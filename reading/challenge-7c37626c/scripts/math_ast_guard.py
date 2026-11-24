@@ -76,6 +76,61 @@ _GREEK_TO_ASCII: dict[str, str] = {
     "Π": "Pi", "Σ": "Sigma", "Φ": "Phi", "Ψ": "Psi", "Ω": "Omega",
 }
 
+_GREEK_CANONICAL_TO_UNICODE: dict[str, list[str]] = {}
+for _gch, _gname in _GREEK_TO_ASCII.items():
+    _canon = _gname.rstrip("_")
+    _GREEK_CANONICAL_TO_UNICODE.setdefault(_canon, []).append(_gch)
+_GREEK_CANONICAL_TO_UNICODE["varepsilon"] = ["ε", "ϵ"]
+_GREEK_CANONICAL_TO_UNICODE["vartheta"] = ["θ", "ϑ"]
+_GREEK_CANONICAL_TO_UNICODE["varphi"] = ["φ", "ϕ"]
+
+_SUBSCRIPT_UNICODE_MAP: dict[str, str] = {
+    "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+    "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+    "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ",
+    "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ",
+    "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ",
+}
+
+MATHEMATICAL_CONSTANTS = {"pi", "e"}
+
+
+def build_symbol_variants(sym: str) -> list[str]:
+    """Generate Unicode, LaTeX, and subscript-normalized lookup variants for a symbol."""
+    variants: list[str] = []
+
+    def _add(v: str) -> None:
+        if v and v not in variants:
+            variants.append(v)
+
+    _add(sym)
+    if "_" in sym:
+        base, sub = sym.split("_", 1)
+        base_forms = [base]
+        if base in _GREEK_CANONICAL_TO_UNICODE:
+            base_forms.append("\\" + base)
+            base_forms.extend(_GREEK_CANONICAL_TO_UNICODE[base])
+        sub_uni = "".join(_SUBSCRIPT_UNICODE_MAP.get(ch, "") for ch in sub)
+        has_uni_sub = len(sub_uni) == len(sub) and bool(sub_uni)
+        for bf in base_forms:
+            _add(f"{bf}_{sub}")
+            _add(f"{bf}_{{{sub}}}")
+            _add(f"{{{bf}}}_{{{sub}}}")
+            if has_uni_sub:
+                _add(f"{bf}{sub_uni}")
+            if len(bf) == 1 and len(sub) <= 3:
+                _add(f"{bf}{sub}")
+    else:
+        if sym in _GREEK_CANONICAL_TO_UNICODE:
+            _add("\\" + sym)
+            for u in _GREEK_CANONICAL_TO_UNICODE[sym]:
+                _add(u)
+        elif sym in _GREEK_TO_ASCII:
+            canon = _GREEK_TO_ASCII[sym].rstrip("_")
+            _add(canon)
+            _add("\\" + canon)
+    return variants
+
 _UNICODE_OP_TO_LATEX: dict[str, str] = {
     "\u2212": "-",
     "\u2013": "-",
@@ -131,6 +186,11 @@ _UNIT_TABLE: dict[str, tuple[tuple[float, ...], float, bool]] = {
     "ppb": ((0, 0, 0, 0, 0, 0, 0), 1e-9, False),
     "deg": ((0, 0, 0, 0, 0, 0, 0), math.pi / 180.0, False),
     "\u00b0": ((0, 0, 0, 0, 0, 0, 0), math.pi / 180.0, False),
+    "dec": ((0, 0, 0, 0, 0, 0, 0), 1.0, False),       # logarithmic decade (dimensionless, e.g. mV/dec)
+    "decade": ((0, 0, 0, 0, 0, 0, 0), 1.0, False),
+    "rpm": ((0, 0, -1, 0, 0, 0, 0), 1.0 / 60.0, False),
+    "inhabitants": ((0, 0, 0, 0, 0, 0, 0), 1.0, False),
+    "cases": ((0, 0, 0, 0, 0, 0, 0), 1.0, False),
     # SI base units (gram has scale 1e-3 so kg = 1.0)
     "m": ((1, 0, 0, 0, 0, 0, 0), 1.0, True),
     "g": ((0, 1, 0, 0, 0, 0, 0), 1e-3, True),
@@ -189,7 +249,7 @@ _UNIT_TABLE: dict[str, tuple[tuple[float, ...], float, bool]] = {
     "Ah": ((0, 0, 1, 1, 0, 0, 0), 3600.0, True),
 }
 
-# Safe lowercase aliases for common case-folded scientific units
+# Safe lowercase aliases for common case-folded scientific units (never fold single-letter symbols like 'a'/'j'/'k'/'n')
 _CASE_INSENSITIVE_ALIASES: dict[str, str] = {
     "hz": "Hz", "khz": "kHz", "mhz": "MHz", "ghz": "GHz",
     "pa": "Pa", "kpa": "kPa", "mpa": "MPa", "gpa": "GPa",
@@ -199,8 +259,12 @@ _CASE_INSENSITIVE_ALIASES: dict[str, str] = {
     "mv": "mV", "kv": "kV", "ma": "mA", "ua": "uA",
     "ml": "mL", "ul": "uL", "nl": "nL", "dl": "dL",
     "torr": "Torr", "mmhg": "mmHg", "angstrom": "Angstrom",
-    "da": "Da", "kda": "kDa", "mda": "MDa",
-    "j": "J", "w": "W", "v": "V", "a": "A", "k": "K", "n": "N",
+    "kda": "kDa", "mda": "MDa",
+}
+
+_UNIT_STOPWORDS: set[str] = {
+    "a", "an", "as", "at", "by", "in", "is", "of", "on", "or", "to",
+    "the", "and", "for", "per", "from", "with", "into", "that", "this",
 }
 
 _SUPERSCRIPT_MAP = str.maketrans({
@@ -389,32 +453,56 @@ def _strip_tex_wrappers(tex: str) -> str:
     return s
 
 
+_GREEK_CMD_NAMES = (
+    "alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|"
+    "lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|"
+    "Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega"
+)
+
+
 def extract_symbols_from_latex(latex: str) -> list[str]:
-    """Extract candidate mathematical variable identifiers from LaTeX while excluding commands."""
-    # Preserve Greek command names as normalized symbols before stripping other commands
-    greek_cmds = re.findall(
-        r"\\(alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|"
-        r"lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|"
-        r"Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega)\b",
-        latex,
-    )
-    # Remove \text{...} and \mathrm{...} prose blocks from variable scan? Keep short 1-3 char mathrm symbols if subscripted
-    no_text = re.sub(r"\\text\{[^}]*\}", " ", latex)
-    # Capture subscripted variables like E_a, I_0, k_{cat}, w_0
-    sub_vars = re.findall(r"\b([A-Za-z][A-Za-z0-9]*_(?:\{[A-Za-z0-9,]+\}|[A-Za-z0-9]+))\b", no_text)
-    cleaned_subs = [sv.replace("{", "").replace("}", "") for sv in sub_vars]
-    # Remove LaTeX commands
-    stripped = re.sub(r"\\[A-Za-z]+", " ", no_text)
-    # Also capture Unicode Greek chars
-    unicode_greeks = [_GREEK_TO_ASCII[ch].rstrip("_") for ch in stripped if ch in _GREEK_TO_ASCII]
-    # Plain identifiers
-    plain = re.findall(r"\b([A-Za-z][A-Za-z0-9_]{0,12})\b", stripped)
+    """Extract normalized mathematical symbols (preserving braced/Greek subscripts without fragmenting)."""
+    work = re.sub(r"\\text\{[^}]*\}", " ", latex)
+    work = re.sub(r"\\(?:begin|end)\{[^}]*\}", " ", work)
+    # Normalize Unicode Greek characters to canonical ASCII names before subscript capture
+    for gch, gname in _GREEK_TO_ASCII.items():
+        canon = gname.rstrip("_")
+        work = work.replace(gch, f" \\{canon} ")
+
     out: set[str] = set()
-    for tok in plain + cleaned_subs + greek_cmds + unicode_greeks:
+
+    # 1. Capture braced-base or plain-base Greek/Latin subscripted symbols first so they don't fragment
+    #    e.g., {E}_{a}, {G}_{x}, {D}_{1}^{2}, \eta_{0}, \Delta_{G}, E_a, I_0, k_{B}, k_{cat}
+    sub_patterns = (
+        re.compile(rf"\{{\s*\\({_GREEK_CMD_NAMES})\s*\}}\s*_\s*\{{\s*([A-Za-z0-9,]+)\s*\}}"),
+        re.compile(rf"\\({_GREEK_CMD_NAMES})\s*_\s*(?:\{{\s*([A-Za-z0-9,]+)\s*\}}|([A-Za-z0-9]+))"),
+        re.compile(r"\{\s*([A-Za-z][A-Za-z0-9]*)\s*\}\s*_\s*\{\s*([A-Za-z0-9,]+)\s*\}"),
+        re.compile(r"\b([A-Za-z][A-Za-z0-9]*)\s*_\s*(?:\{\s*([A-Za-z0-9,]+)\s*\}|([A-Za-z0-9]+))"),
+    )
+    for pat in sub_patterns:
+        def _grab_sub(m: re.Match[str]) -> str:
+            base = m.group(1).strip()
+            sub = (m.group(2) if m.group(2) is not None else m.group(3)).strip().replace(",", "_")
+            if base.lower() not in _LATEX_NON_SYMBOLS:
+                out.add(f"{base}_{sub}")
+            return " "
+        work = pat.sub(_grab_sub, work)
+
+    # 2. Capture remaining standalone Greek commands
+    def _grab_greek(m: re.Match[str]) -> str:
+        out.add(m.group(1))
+        return " "
+
+    work = re.sub(rf"\\({_GREEK_CMD_NAMES})\b", _grab_greek, work)
+
+    # 3. Strip remaining LaTeX commands and extract plain identifiers
+    stripped = re.sub(r"\\[A-Za-z]+", " ", work)
+    for tok in re.findall(r"\b([A-Za-z][A-Za-z0-9_]{0,12})\b", stripped):
         t = tok.strip("_")
         if not t or t.isdigit() or t.lower() in _LATEX_NON_SYMBOLS:
             continue
         out.add(t)
+
     return sorted(out)
 
 
@@ -436,20 +524,23 @@ def inspect_formula_noise(latex: str, raw_text: str = "") -> dict[str, Any]:
             "message": "Replacement glyph or mojibake detected in formula transcription.",
         })
     # 3. Unexpected CJK characters in mathematical formula (Pix2Text #142 hallucinated Chinese side-notes)
-    without_text_cmd = re.sub(r"\\text\{[^}]*\}", "", latex)
+    #    Distinguish legitimate Chinese text inside \text{}/\mathrm{}/\operatorname{} from raw math-mode CJK or OCR side-note markers.
+    text_mode_blocks = re.findall(r"\\(?:text|mathrm|operatorname)\{([^}]*)\}", latex)
+    without_text_cmd = re.sub(r"\\(?:text|mathrm|operatorname)\{[^}]*\}", "", latex)
     cjk_outside = _CJK_RE.findall(without_text_cmd)
-    cjk_inside_text = _CJK_RE.findall(latex)
+    _SIDENOTE_RE = re.compile(r"(?:旁注|见第|第\s*\d+\s*页|注[:：]|校验|\.pdf|CMYK|Equaçao)", re.I)
+    suspicious_text_blocks = [tb for tb in text_mode_blocks if _CJK_RE.search(tb) and _SIDENOTE_RE.search(tb)]
     if cjk_outside:
         issues.append({
             "code": "UNEXPECTED_CJK_IN_FORMULA",
             "severity": "halt_for_verification",
-            "message": f"Unexpected CJK characters outside \\text{{}} in formula: {''.join(cjk_outside[:12])!r}. Pause and verify against source image/XML.",
+            "message": f"Unexpected CJK characters outside text-mode wrappers in math mode: {''.join(cjk_outside[:12])!r}. Pause and verify against source image/XML.",
         })
-    elif cjk_inside_text and re.search(r"[A-Za-z\\]", without_text_cmd):
+    elif suspicious_text_blocks:
         issues.append({
             "code": "SUSPICIOUS_CJK_ANNOTATION_IN_FORMULA",
             "severity": "halt_for_verification",
-            "message": f"CJK text mixed into symbolic formula (Pix2Text-style side-note contamination): {''.join(cjk_inside_text[:12])!r}.",
+            "message": f"Pix2Text-style CJK side-note/OCR artifact inside text command: {suspicious_text_blocks[0][:40]!r}.",
         })
     # 4. Unbalanced brackets/braces
     stack: list[str] = []
@@ -485,7 +576,10 @@ def inspect_formula_noise(latex: str, raw_text: str = "") -> dict[str, Any]:
             "message": f"Mismatched \\left ({left_cnt}) and \\right ({right_cnt}) delimiters.",
         })
     # 6. Empty \frac or dangling script operator
-    if re.search(r"\\frac\s*\{\s*\}\s*\{|\\frac\s*\{[^}]*\}\s*\{\s*\}", latex) or re.search(r"[\^_]\s*$", latex.strip()):
+    if (
+        re.search(r"\\frac\s*\{\s*\}\s*\{|\\frac\s*\{(?:[^{}]|\{[^{}]*\})*\}\s*\{\s*\}", latex)
+        or re.search(r"[\^_]\s*$", latex.strip())
+    ):
         issues.append({
             "code": "MALFORMED_LATEX_STRUCTURE",
             "severity": "halt_for_verification",
@@ -633,6 +727,8 @@ def parse_xml_formulas(xml_path: str, source_file: str | None = None) -> list[di
 
 def _resolve_unit_atom(atom: str) -> tuple[tuple[float, ...], float] | None:
     """Resolve a single unit token (with optional SI prefix) into (7-dim vector, SI scale)."""
+    if not atom or "_" in atom or atom in _UNIT_STOPWORDS:
+        return None
     if atom in _UNIT_TABLE:
         dim, scale, _ = _UNIT_TABLE[atom]
         return dim, scale
@@ -646,12 +742,13 @@ def _resolve_unit_atom(atom: str) -> tuple[tuple[float, ...], float] | None:
                 if prefixable:
                     return dim, p_scale * base_scale
 
-    # Case-insensitive fallback for known unambiguous spellings
-    low = atom.lower()
-    if low in _CASE_INSENSITIVE_ALIASES:
-        canonical = _CASE_INSENSITIVE_ALIASES[low]
-        if canonical != atom:
-            return _resolve_unit_atom(canonical)
+    # Case-insensitive fallback ONLY for multi-char unambiguous spellings (never fold single letters)
+    if len(atom) >= 2:
+        low = atom.lower()
+        if low in _CASE_INSENSITIVE_ALIASES:
+            canonical = _CASE_INSENSITIVE_ALIASES[low]
+            if canonical != atom:
+                return _resolve_unit_atom(canonical)
     return None
 
 
@@ -810,7 +907,22 @@ class _UnitParser:
 
 def parse_unit_expression(unit_str: str) -> dict[str, Any]:
     """Parse arbitrary composite SI unit string into 7-dim vector and SI base scale factor."""
+    raw_stripped = (unit_str or "").strip()
+    if not raw_stripped or "_" in raw_stripped or raw_stripped in _UNIT_STOPWORDS:
+        return {
+            "ok": False,
+            "status": "unknown_unit",
+            "raw": unit_str,
+            "error": f"Rejected non-unit or subscripted symbol token: {unit_str!r}",
+        }
     cleaned = _preprocess_unit_str(unit_str)
+    if "_" in cleaned:
+        return {
+            "ok": False,
+            "status": "unknown_unit",
+            "raw": unit_str,
+            "error": f"Rejected subscripted symbol in unit expression: {unit_str!r}",
+        }
     try:
         dim, scale, atoms = _UnitParser(cleaned).parse()
     except KeyError as exc:
@@ -819,6 +931,11 @@ def parse_unit_expression(unit_str: str) -> dict[str, Any]:
         return {"ok": False, "status": "parse_error", "raw": unit_str, "error": str(exc)}
 
     rounded_dim = [int(round(v)) if abs(v - round(v)) < 1e-9 else round(v, 6) for v in dim]
+    sem_notes: list[str] = []
+    if any(a in ("dec", "decade") for a in atoms):
+        sem_notes.append("dec/decade treated as dimensionless logarithmic decade (e.g., Tafel slope mV/dec has voltage dimension V)")
+    if any(a in ("inhabitants", "cases") for a in atoms):
+        sem_notes.append("count/population denominator treated as dimensionless epidemiological basis")
     return {
         "ok": True,
         "status": "parsed",
@@ -829,6 +946,7 @@ def parse_unit_expression(unit_str: str) -> dict[str, Any]:
         "si_scale_factor": scale,
         "log10_si_scale": round(math.log10(scale), 6) if scale > 0 else None,
         "atoms": atoms,
+        "semantic_unit_notes": sem_notes,
     }
 
 
@@ -951,8 +1069,217 @@ def safe_eval_ast(expr: str, env: dict[str, float]) -> float:
     return val
 
 
+def _extract_ast_free_variables(expr: str) -> tuple[bool, set[str], str | None]:
+    """Parse normalized expression into safe AST and return (parseable, free_var_names, error)."""
+    cleaned = normalize_math_expr(expr)
+    try:
+        tree = ast.parse(cleaned, mode="eval")
+    except SyntaxError as exc:
+        return False, set(), f"syntax_error: {exc.msg}"
+
+    free_vars: set[str] = set()
+
+    def _walk(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Expression):
+            return _walk(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            return None
+        if isinstance(node, ast.Name):
+            if node.id not in _SAFE_CONSTS:
+                free_vars.add(node.id)
+            return None
+        if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
+            return _walk(node.left) or _walk(node.right)
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
+            return _walk(node.operand)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _SAFE_FUNCS:
+            for arg in node.args:
+                err = _walk(arg)
+                if err:
+                    return err
+            return None
+        if isinstance(node, ast.Call):
+            fname = ast.unparse(node.func) if hasattr(ast, "unparse") else type(node.func).__name__
+            return f"unsupported_callable: {fname}"
+        return f"unsupported_ast_node: {type(node).__name__}"
+
+    err = _walk(tree)
+    if err:
+        return False, free_vars, err
+    return True, free_vars, None
+
+
+_DETERMINISTIC_DOMAIN_PROFILES: tuple[tuple[str, tuple[float, ...]], ...] = (
+    ("positive_small", (0.073, 0.137, 0.193, 0.257, 0.311, 0.419, 0.523, 0.641)),
+    ("positive_unit_near", (0.817, 1.193, 1.471, 1.831, 2.137, 2.617, 3.079, 3.541)),
+    ("positive_mid", (2.371, 3.893, 5.171, 6.733, 8.291, 9.613, 11.47, 13.19)),
+    ("positive_large", (17.31, 23.77, 31.19, 43.63, 59.17, 71.83, 89.29, 107.4)),
+    ("negative_small", (-0.089, -0.173, -0.269, -0.353, -0.461, -0.577, -0.683, -0.797)),
+    ("negative_mid", (-1.43, -2.79, -4.13, -5.87, -7.31, -8.93, -10.4, -12.7)),
+    ("mixed_sign_a", (0.431, -0.619, 1.733, -2.141, 3.257, -0.887, 4.913, -1.531)),
+    ("mixed_sign_b", (-0.517, 0.913, -1.617, 2.819, -3.413, 1.279, -0.337, 5.123)),
+)
+
+
+def _multi_domain_equivalence_probe(
+    expr1: str,
+    expr2: str,
+    seed_env: dict[str, float] | None = None,
+    rel_tol: float = 1e-9,
+    min_valid_samples: int = 3,
+) -> dict[str, Any]:
+    """Deterministic multi-point cross-domain boundary sampling when SymPy is unavailable."""
+    ok1, vars1, err1 = _extract_ast_free_variables(expr1)
+    ok2, vars2, err2 = _extract_ast_free_variables(expr2)
+    if not ok1 or not ok2:
+        return {
+            "verifiable": False,
+            "method": "not_verifiable",
+            "equivalent": None,
+            "reason": f"unparseable_or_unsupported_symbolic_expr ({err1 or err2})",
+            "samples_tested": 0,
+            "domains_covered": [],
+        }
+
+    all_vars = sorted(vars1 | vars2)
+    if not all_vars:
+        try:
+            v1 = safe_eval_ast(expr1, {})
+            v2 = safe_eval_ast(expr2, {})
+            abs_err = abs(v1 - v2)
+            rel_err = abs_err / max(1e-12, abs(v1), abs(v2))
+            return {
+                "verifiable": True,
+                "method": "ast_constant_exact",
+                "equivalent": rel_err < rel_tol or abs_err < 1e-12,
+                "samples_tested": 1,
+                "domains_covered": ["constant"],
+                "numeric_v1": round(v1, 10),
+                "numeric_v2": round(v2, 10),
+                "rel_error": round(rel_err, 12),
+                "max_rel_error": round(rel_err, 12),
+            }
+        except Exception as exc:
+            return {
+                "verifiable": False,
+                "method": "not_verifiable",
+                "equivalent": None,
+                "reason": f"constant_eval_failed: {exc}",
+                "samples_tested": 0,
+                "domains_covered": [],
+            }
+
+    candidate_points: list[tuple[str, dict[str, float]]] = []
+    if seed_env:
+        norm_seed = {normalize_math_expr(k): float(v) for k, v in seed_env.items()}
+        if all(v in norm_seed for v in all_vars):
+            for tag, factor in (("seed_perturb_a", 1.137), ("seed_perturb_b", 0.793), ("seed_perturb_c", 1.419)):
+                pt = {}
+                for i, vn in enumerate(all_vars):
+                    base = norm_seed[vn]
+                    shift = 0.031 * (i + 1)
+                    pt[vn] = base * (factor + 0.017 * i) if abs(base) > 1e-9 else shift
+                candidate_points.append((tag, pt))
+
+    for domain_name, palette in _DETERMINISTIC_DOMAIN_PROFILES:
+        pt = {vn: palette[(i * 3 + len(vn)) % len(palette)] * (1.0 + 0.037 * (i // len(palette))) for i, vn in enumerate(all_vars)}
+        candidate_points.append((domain_name, pt))
+
+    valid_samples = 0
+    domains_covered: list[str] = []
+    domain_asymmetries: list[str] = []
+    max_rel_err = 0.0
+    first_vals: tuple[float, float, float] | None = None
+
+    for dname, pt in candidate_points:
+        e1_err: str | None = None
+        e2_err: str | None = None
+        v1 = v2 = 0.0
+        try:
+            v1 = safe_eval_ast(expr1, pt)
+        except Exception as exc:
+            e1_err = str(exc)
+        try:
+            v2 = safe_eval_ast(expr2, pt)
+        except Exception as exc:
+            e2_err = str(exc)
+
+        if e1_err and e2_err:
+            continue
+        if bool(e1_err) != bool(e2_err):
+            domain_asymmetries.append(f"{dname}: lhs_err={e1_err!r}, rhs_err={e2_err!r}")
+            continue
+
+        abs_err = abs(v1 - v2)
+        rel_err = abs_err / max(1e-12, abs(v1), abs(v2))
+        valid_samples += 1
+        domains_covered.append(dname)
+        if first_vals is None:
+            first_vals = (v1, v2, rel_err)
+        if rel_err > max_rel_err:
+            max_rel_err = rel_err
+
+        if rel_err >= rel_tol and abs_err >= 1e-12:
+            return {
+                "verifiable": True,
+                "method": "ast_multi_domain_sampling",
+                "equivalent": False,
+                "samples_tested": valid_samples,
+                "domains_covered": domains_covered,
+                "counterexample_domain": dname,
+                "counterexample_env": {k: round(v, 6) for k, v in pt.items()},
+                "numeric_v1": round(v1, 10),
+                "numeric_v2": round(v2, 10),
+                "rel_error": round(rel_err, 12),
+                "max_rel_error": round(max_rel_err, 12),
+            }
+
+    if valid_samples < min_valid_samples:
+        return {
+            "verifiable": False,
+            "method": "not_verifiable",
+            "equivalent": None,
+            "reason": f"insufficient_valid_domain_samples ({valid_samples} < {min_valid_samples}); free_vars={all_vars}",
+            "samples_tested": valid_samples,
+            "domains_covered": domains_covered,
+            "domain_asymmetries": domain_asymmetries[:4],
+        }
+
+    if domain_asymmetries:
+        # Domain asymmetry on negative/mixed sign branches (e.g. log(x/y) vs log(x)-log(y) when x,y<0)
+        # is a valid domain restriction when all positive-domain & seed-neighborhood samples match identically.
+        non_sign_asym = [da for da in domain_asymmetries if not da.startswith(("negative_", "mixed_sign_"))]
+        if non_sign_asym:
+            return {
+                "verifiable": True,
+                "method": "ast_multi_domain_sampling",
+                "equivalent": False,
+                "reason": "domain_asymmetry_between_expressions",
+                "samples_tested": valid_samples,
+                "domains_covered": domains_covered,
+                "domain_asymmetries": domain_asymmetries[:4],
+                "max_rel_error": round(max_rel_err, 12),
+            }
+
+    v1_0, v2_0, r0 = first_vals if first_vals is not None else (0.0, 0.0, 0.0)
+    out: dict[str, Any] = {
+        "verifiable": True,
+        "method": "ast_multi_domain_sampling",
+        "equivalent": True,
+        "samples_tested": valid_samples,
+        "domains_covered": domains_covered,
+        "numeric_v1": round(v1_0, 10),
+        "numeric_v2": round(v2_0, 10),
+        "rel_error": round(r0, 12),
+        "max_rel_error": round(max_rel_err, 12),
+    }
+    if domain_asymmetries:
+        out["domain_restriction_note"] = f"Equivalent on valid positive/real domain; sign-restricted asymmetries: {domain_asymmetries[:2]}"
+    return out
+
+
 def check_equivalence(expr1: str, expr2: str, test_env: dict[str, float] | None = None) -> dict[str, Any]:
-    """Verify symbolic equivalence via SymPy (if installed) and AST numeric cross-check."""
+    """Verify symbolic equivalence via SymPy (if installed) or deterministic multi-domain AST sampling."""
     noise1 = inspect_formula_noise(expr1)
     noise2 = inspect_formula_noise(expr2)
     if noise1["severity"] == "halt_for_verification" or noise2["severity"] == "halt_for_verification":
@@ -969,7 +1296,7 @@ def check_equivalence(expr1: str, expr2: str, test_env: dict[str, float] | None 
     result: dict[str, Any] = {
         "expr1": expr1,
         "expr2": expr2,
-        "method": "ast_numeric",
+        "method": "not_verifiable",
         "equivalent": None,
     }
     if sp is not None:
@@ -999,7 +1326,468 @@ def check_equivalence(expr1: str, expr2: str, test_env: dict[str, float] | None 
             result["numeric_v2"] = round(v2, 10)
             result["rel_error"] = round(rel_err, 12)
             if result["equivalent"] is None:
-                result["equivalent"] = rel_err < 1e-9
+                if rel_err >= 1e-9 and abs_err >= 1e-12:
+                    result["method"] = "ast_numeric"
+                    result["equivalent"] = False
+                else:
+                    # Guard against single-point coincidence (e.g. x == x**2 at x=1) via multi-domain probe
+                    probe = _multi_domain_equivalence_probe(expr1, expr2, seed_env=test_env)
+                    result["method"] = probe["method"]
+                    result["equivalent"] = probe["equivalent"]
+                    result["samples_tested"] = probe["samples_tested"]
+                    result["domains_covered"] = probe["domains_covered"]
+                    if "max_rel_error" in probe:
+                        result["max_rel_error"] = probe["max_rel_error"]
+                    if "counterexample_domain" in probe:
+                        result["counterexample_domain"] = probe["counterexample_domain"]
+                        result["counterexample_env"] = probe["counterexample_env"]
+                    if "reason" in probe:
+                        result["verdict_reason"] = probe["reason"]
         except Exception as exc:
             result["numeric_error"] = str(exc)
+
+    if result["equivalent"] is None:
+        probe = _multi_domain_equivalence_probe(expr1, expr2, seed_env=test_env)
+        result["method"] = probe["method"]
+        result["equivalent"] = probe["equivalent"]
+        result["samples_tested"] = probe["samples_tested"]
+        result["domains_covered"] = probe["domains_covered"]
+        for k in ("numeric_v1", "numeric_v2", "rel_error", "max_rel_error", "counterexample_domain", "counterexample_env", "domain_asymmetries"):
+            if k in probe and k not in result:
+                result[k] = probe[k]
+        if "reason" in probe:
+            result["verdict_reason"] = probe["reason"]
+
     return result
+
+
+# ---------------------------------------------------------------------------
+# Step-by-Step Derivation, Domain Constraint & Equation Dependency DAG Auditor
+# ---------------------------------------------------------------------------
+
+_CMP_OPS = {
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+}
+
+
+def extract_lhs_rhs_symbols(latex: str) -> tuple[str | None, list[str]]:
+    """Split an equation on top-level '=' to identify the defined LHS symbol and RHS symbols."""
+    cleaned = re.sub(r"\\(?:le|ge|ne|approx|equiv|propto)\b", " ", latex)
+    if "=" not in cleaned:
+        return None, extract_symbols_from_latex(latex)
+    lhs_str, rhs_str = cleaned.split("=", 1)
+    lhs_syms = extract_symbols_from_latex(lhs_str)
+    rhs_syms = extract_symbols_from_latex(rhs_str)
+    lhs_target = lhs_syms[0] if len(lhs_syms) == 1 else (lhs_syms[0] if lhs_syms else None)
+    return lhs_target, rhs_syms
+
+
+def evaluate_domain_predicate(predicate: str, env: dict[str, float] | None) -> dict[str, Any]:
+    """Safely check numeric domain/boundary predicates like 'T > 0' or '0 < alpha < 1' against env."""
+    raw = predicate.strip()
+    if not env:
+        return {"predicate": raw, "status": "unverifiable_no_env", "satisfied": None}
+    norm = raw.replace("≥", ">=").replace("≤", "<=").replace("≠", "!=").replace("≪", "<").replace("<<", "<").replace("≫", ">").replace(">>", ">")
+    norm = re.sub(r"\b(?:for|where|with|assuming)\b", "", norm, flags=re.I).strip(" ,.;()")
+    # Require a comparison operator
+    if not re.search(r"<=|>=|!=|==|<|>", norm):
+        return {"predicate": raw, "status": "qualitative_condition", "satisfied": None}
+    # Normalize single '=' to '==' when not part of <=, >=, !=, ==
+    norm = re.sub(r"(?<![<>!=])=(?!=)", "==", norm)
+    expr_py = normalize_math_expr(norm)
+    norm_env = {normalize_math_expr(k): float(v) for k, v in env.items()}
+    try:
+        tree = ast.parse(expr_py, mode="eval")
+        if not isinstance(tree.body, ast.Compare):
+            return {"predicate": raw, "status": "qualitative_condition", "satisfied": None}
+
+        def _eval_node(node: ast.AST) -> float:
+            sub_expr = ast.Expression(body=node)
+            return safe_eval_ast(ast.unparse(sub_expr), norm_env)
+
+        left_val = _eval_node(tree.body.left)
+        ok = True
+        for op, comp in zip(tree.body.ops, tree.body.comparators):
+            if type(op) not in _CMP_OPS:
+                return {"predicate": raw, "status": "qualitative_condition", "satisfied": None}
+            right_val = _eval_node(comp)
+            if not _CMP_OPS[type(op)](left_val, right_val):
+                ok = False
+                break
+            left_val = right_val
+        return {"predicate": raw, "status": "satisfied" if ok else "violated", "satisfied": ok}
+    except Exception as exc:
+        return {"predicate": raw, "status": "unverifiable_symbolic", "satisfied": None, "note": str(exc)[:120]}
+
+
+_EQ_REF_RE = re.compile(
+    r"(?:Eqs?\.?|Equations?|Formula|公式|式)\s*\(?\s*([0-9]+[A-Za-z]?)\s*\)?(?:\s*(?:and|to|&|,|与)\s*\(?\s*([0-9]+[A-Za-z]?)\s*\)?)?",
+    re.I,
+)
+
+_PREMISE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("approximation", re.compile(
+        r"(?:steady[- ]state|quasi[- ]steady|in\s+the\s+limit\s+of|high[- ]overpotential\s+limit|low[- ]overpotential\s+limit|"
+        r"dilute\s+limit|small[- ]angle|first[- ]order\s+approximation|Taylor\s+expansion|neglecting\s+[^.;,]{3,80}|"
+        r"for\s+[A-Za-z0-9_\\]+\s*(?:<<|>>|≪|≫)\s*[A-Za-z0-9_.\-]+|lineariz(?:ing|ed)|ignoring\s+[^.;,]{3,60}|"
+        r"稳态|近似|忽略[^。；，]{2,40}|一阶展开)",
+        re.I,
+    )),
+    ("assumption", re.compile(
+        r"(?:assuming\s+[^.;]{4,110}|under\s+the\s+assumption\s+[^.;]{4,110}|we\s+assume\s+[^.;]{4,110}|"
+        r"provided\s+that\s+[^.;]{4,90}|suppose\s+[^.;]{4,90}|when\s+no\s+inflection\s+points[^.;]{0,80}|"
+        r"假设[^。；]{3,60})",
+        re.I,
+    )),
+    ("boundary_or_domain_condition", re.compile(
+        r"(?:boundary\s+condition[^.;]{0,90}|initial\s+condition[^.;]{0,90}|valid\s+for\s+[^.;]{3,80}|"
+        r"cutoff\s+[^.;]{0,60}|until\s+[0-9.]+\s*[A-Za-z]+|at\s+[A-Za-z]\s*=\s*0|"
+        r"\(\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:>=|>|<=|<|≥|≤)\s*[-+]?[0-9.]+\s*\)|"
+        r"where\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:>=|>|<=|<|≥|≤)\s*[-+]?[0-9.]+|"
+        r"边界条件[^。；]{0,50}|初始条件[^。；]{0,50}|成立范围[^。；]{0,50})",
+        re.I,
+    )),
+    ("derivation_operation", re.compile(
+        r"(?:substituting\s+Eq\.?\s*\(?[0-9]+\)?[^.;]{0,90}|taking\s+the\s+(?:natural\s+)?logarithm[^.;]{0,80}|"
+        r"rearranging\s+Eq\.?\s*\(?[0-9]+\)?[^.;]{0,80}|combining\s+Eqs?\.?\s*\(?[0-9]+\)?[^.;]{0,90}|"
+        r"differentiating\s+[^.;]{3,70}|integrating\s+[^.;]{3,70}|solving\s+for\s+[^.;]{2,60})",
+        re.I,
+    )),
+]
+
+
+def _extract_label_num(label: str | None, formula_id: str) -> str | None:
+    if label:
+        m = re.search(r"([0-9]+[A-Za-z]?)", label)
+        if m:
+            return m.group(1)
+    m2 = re.search(r"(?:eq|formula)[_-]?([0-9]+[A-Za-z]?)", formula_id, re.I)
+    return m2.group(1) if m2 else None
+
+
+def extract_derivation_assumptions_and_boundaries(
+    paras: list[dict[str, str]],
+    formulas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Extract grounded assumptions, approximations, boundary conditions, and derivation cues from prose."""
+    label_to_fid: dict[str, str] = {}
+    for f in formulas:
+        num = _extract_label_num(f.get("label"), str(f.get("formula_id", "")))
+        if num:
+            label_to_fid[num] = str(f["formula_id"])
+
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    cid = 0
+    for p in paras:
+        txt = " ".join(p["text"].split())
+        if not txt:
+            continue
+        linked_eqs: list[str] = []
+        for rm in _EQ_REF_RE.finditer(txt):
+            for g in (rm.group(1), rm.group(2)):
+                if g and g in label_to_fid and label_to_fid[g] not in linked_eqs:
+                    linked_eqs.append(label_to_fid[g])
+        for cat, pat in _PREMISE_PATTERNS:
+            for m in pat.finditer(txt):
+                span = m.group(0).strip(" ,.;:()")
+                sig = (p["paragraph_id"], cat, span.lower()[:80])
+                if sig in seen or len(span) < 4:
+                    continue
+                seen.add(sig)
+                cid += 1
+                start = max(0, m.start() - 35)
+                end = min(len(txt), m.end() + 65)
+                findings.append({
+                    "condition_id": f"C{cid:03d}",
+                    "category": cat,
+                    "linked_equations": linked_eqs,
+                    "text": span,
+                    "paragraph_id": p["paragraph_id"],
+                    "quote": txt[start:end].strip(),
+                })
+    return findings
+
+
+def build_equation_dependency_dag(
+    formulas: list[dict[str, Any]],
+    paras: list[dict[str, str]],
+    derivation_chains: list[dict[str, Any]] | None = None,
+    derivation_checks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build cross-equation dependency DAG from prose citations, derivation chains, and LHS->RHS symbol flows."""
+    nodes: list[dict[str, Any]] = []
+    label_to_fid: dict[str, str] = {}
+    lhs_owner: dict[str, str] = {}
+    fid_order: dict[str, int] = {}
+
+    for idx, f in enumerate(formulas):
+        fid = str(f.get("formula_id") or f"eq_{idx+1}")
+        fid_order[fid] = idx
+        lhs_sym, rhs_syms = extract_lhs_rhs_symbols(str(f.get("latex") or ""))
+        num = _extract_label_num(f.get("label"), fid)
+        if num:
+            label_to_fid[num] = fid
+        if lhs_sym and lhs_sym not in lhs_owner:
+            lhs_owner[lhs_sym] = fid
+        nodes.append({
+            "formula_id": fid,
+            "label": f.get("label"),
+            "lhs_symbol": lhs_sym,
+            "rhs_symbols": rhs_syms,
+            "verification_status": f.get("verification_status", "parsed"),
+        })
+
+    edges: list[dict[str, Any]] = []
+    edge_keys: set[tuple[str, str, str]] = set()
+
+    def _add_edge(src: str, dst: str, rel: str, syms: list[str], anchor: str, quote: str) -> None:
+        if not src or not dst or src == dst:
+            return
+        if src not in fid_order or dst not in fid_order:
+            return
+        key = (src, dst, rel)
+        if key in edge_keys:
+            return
+        edge_keys.add(key)
+        edges.append({
+            "from_formula_id": src,
+            "to_formula_id": dst,
+            "relation_type": rel,
+            "shared_symbols": syms,
+            "source_anchor": anchor,
+            "evidence_quote": quote[:200],
+        })
+
+    # 1. Explicit derivation_chains / derivation_checks declared edges
+    for ch in (derivation_chains or []):
+        for st in (ch.get("steps") or []):
+            src = str(st.get("from_formula_id") or "")
+            dst = str(st.get("to_formula_id") or "")
+            if src and dst:
+                _add_edge(src, dst, "derivation_chain", [], f"chain:{ch.get('chain_id', 'C')}:{st.get('step_id', 'S')}", str(st.get("operation") or ""))
+    for dc in (derivation_checks or []):
+        src = str(dc.get("from_formula_id") or dc.get("formula_id") or "")
+        dst = str(dc.get("to_formula_id") or "")
+        if src and dst:
+            _add_edge(src, dst, "derivation_chain", [], f"check:{dc.get('step_id', 'S')}", str(dc.get("operation") or "algebraic_step"))
+
+    # 2. Explicit cross-equation prose citations (e.g. "substituting Eq. (1) into Eq. (2)", "from Eq. (1) ... Eq. (2)")
+    for p in paras:
+        txt = " ".join(p["text"].split())
+        refs: list[str] = []
+        for m in _EQ_REF_RE.finditer(txt):
+            for g in (m.group(1), m.group(2)):
+                if g and g in label_to_fid:
+                    fid = label_to_fid[g]
+                    if fid not in refs:
+                        refs.append(fid)
+        if len(refs) >= 2:
+            for a, b in zip(refs, refs[1:]):
+                src, dst = (a, b) if fid_order[a] < fid_order[b] else (b, a)
+                _add_edge(src, dst, "explicit_citation", [], p["paragraph_id"], txt)
+
+    # 3. Symbol-flow dependencies: earlier LHS symbol reused in later equation's RHS
+    for n in nodes:
+        dst = n["formula_id"]
+        for rsym in n["rhs_symbols"]:
+            src = lhs_owner.get(rsym)
+            if src and src != dst and fid_order[src] < fid_order[dst]:
+                _add_edge(src, dst, "symbol_flow", [rsym], f"symbol:{rsym}", f"LHS symbol `{rsym}` from `{src}` enters RHS of `{dst}`.")
+
+    # Kahn topological sort
+    indeg: dict[str, int] = {n["formula_id"]: 0 for n in nodes}
+    adj: dict[str, list[str]] = {n["formula_id"]: [] for n in nodes}
+    seen_pair: set[tuple[str, str]] = set()
+    for e in edges:
+        pair = (e["from_formula_id"], e["to_formula_id"])
+        if pair not in seen_pair:
+            seen_pair.add(pair)
+            adj[pair[0]].append(pair[1])
+            indeg[pair[1]] += 1
+    queue = [fid for fid in fid_order if indeg[fid] == 0]
+    topo: list[str] = []
+    while queue:
+        cur = queue.pop(0)
+        topo.append(cur)
+        for nxt in adj[cur]:
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                queue.append(nxt)
+    has_cycle = len(topo) < len(nodes)
+    root_eqs = [n["formula_id"] for n in nodes if all(e["to_formula_id"] != n["formula_id"] for e in edges)]
+    derived_eqs = [n["formula_id"] for n in nodes if any(e["to_formula_id"] == n["formula_id"] for e in edges)]
+
+    return {
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "has_cycle": has_cycle,
+        "topological_order": topo,
+        "root_equations": root_eqs,
+        "derived_equations": derived_eqs,
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def audit_derivation_chain(
+    chain_spec: dict[str, Any],
+    halted_formula_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """Audit a multi-step mathematical derivation chain: equivalence, intermediate values, domain & units."""
+    halted = halted_formula_ids or set()
+    chain_id = str(chain_spec.get("chain_id") or "DCHAIN")
+    shared_env = chain_spec.get("test_env") or {}
+    steps_out: list[dict[str, Any]] = []
+
+    for idx, st in enumerate(chain_spec.get("steps") or [], start=1):
+        sid = str(st.get("step_id") or f"{chain_id}_S{idx}")
+        from_fid = str(st.get("from_formula_id") or "")
+        to_fid = str(st.get("to_formula_id") or "")
+        expr_before = str(st.get("expr_before") or st.get("lhs") or "")
+        expr_after = str(st.get("expr_after") or st.get("rhs") or "")
+        operation = str(st.get("operation") or "algebraic_transformation")
+        assumptions = [str(a) for a in (st.get("assumptions") or [])]
+        approximations = [str(a) for a in (st.get("approximations") or [])]
+        boundary_conditions = [str(b) for b in (st.get("boundary_conditions") or [])]
+        domain_constraints = [str(d) for d in (st.get("domain_constraints") or [])]
+        step_env = {**shared_env, **(st.get("test_env") or {})}
+        approx_tol = float(st.get("approx_rel_tol", 0.05)) if approximations else 1e-9
+
+        if (from_fid and from_fid in halted) or (to_fid and to_fid in halted):
+            steps_out.append({
+                "step_id": sid,
+                "from_formula_id": from_fid or None,
+                "to_formula_id": to_fid or None,
+                "operation": operation,
+                "assumptions": assumptions,
+                "approximations": approximations,
+                "boundary_conditions": boundary_conditions,
+                "method": "halted_ocr_noise",
+                "equivalent": None,
+                "step_verdict": "halted_ocr_noise",
+                "reason": "Skipped step because linked formula failed OCR noise gate.",
+            })
+            continue
+
+        chk = check_equivalence(expr_before, expr_after, test_env=step_env or None) if (expr_before and expr_after) else {
+            "method": "unverified_missing_expr",
+            "equivalent": None,
+        }
+
+        # Evaluate numeric domain predicates (from domain_constraints + assumptions + boundary_conditions)
+        domain_checks = [
+            evaluate_domain_predicate(pred, step_env or None)
+            for pred in (domain_constraints + assumptions + boundary_conditions)
+        ]
+        domain_violations = [d for d in domain_checks if d.get("status") == "violated"]
+
+        # Optional step-level dimensional self-consistency check
+        dim_check = None
+        if st.get("unit_before") and st.get("unit_after"):
+            dim_check = check_dimensional_balance(str(st["unit_before"]), str(st["unit_after"]))
+
+        rel_err = chk.get("rel_error")
+        if chk.get("method") == "halted_ocr_noise":
+            verdict = "halted_ocr_noise"
+        elif domain_violations:
+            verdict = "domain_violation"
+        elif dim_check and dim_check.get("consistent") is False:
+            verdict = "dimensional_mismatch"
+        elif chk.get("equivalent") is True:
+            verdict = "verified"
+        elif approximations and isinstance(rel_err, (int, float)) and rel_err <= approx_tol:
+            verdict = "verified_under_approximation"
+        elif chk.get("equivalent") is False:
+            verdict = "failed_equivalence"
+        elif assumptions or approximations or boundary_conditions:
+            verdict = "conditional_on_stated_premise"
+        else:
+            verdict = "not_verifiable_from_supplied_materials"
+
+        steps_out.append({
+            "step_id": sid,
+            "from_formula_id": from_fid or None,
+            "to_formula_id": to_fid or None,
+            "operation": operation,
+            "expr_before": expr_before,
+            "expr_after": expr_after,
+            "assumptions": assumptions,
+            "approximations": approximations,
+            "boundary_conditions": boundary_conditions,
+            "method": chk.get("method"),
+            "equivalent": chk.get("equivalent"),
+            "numeric_before": chk.get("numeric_v1"),
+            "numeric_after": chk.get("numeric_v2"),
+            "rel_error": rel_err,
+            "domain_checks": [d for d in domain_checks if d["status"] in ("satisfied", "violated")],
+            "domain_violations": domain_violations,
+            "dimensional_check": dim_check,
+            "step_verdict": verdict,
+        })
+
+    verdicts = [s["step_verdict"] for s in steps_out]
+    if any(v in ("failed_equivalence", "domain_violation", "dimensional_mismatch") for v in verdicts):
+        chain_status = "failed"
+    elif any(v == "halted_ocr_noise" for v in verdicts):
+        chain_status = "halted_ocr_noise"
+    elif steps_out and all(v in ("verified", "verified_under_approximation") for v in verdicts):
+        chain_status = "verified"
+    else:
+        chain_status = "partial"
+
+    return {
+        "chain_id": chain_id,
+        "title": str(chain_spec.get("title") or chain_id),
+        "chain_status": chain_status,
+        "step_count": len(steps_out),
+        "verified_step_count": sum(1 for v in verdicts if v in ("verified", "verified_under_approximation")),
+        "steps": steps_out,
+    }
+
+
+def run_self_tests() -> dict[str, Any]:
+    """Run deterministic stdlib unit tests for equivalence sampling, unit parsing, and symbol guards."""
+    checks: list[dict[str, Any]] = []
+
+    def _record(name: str, passed: bool, detail: Any = None) -> None:
+        checks.append({"test": name, "passed": bool(passed), "detail": detail})
+
+    # 1. Multi-domain sampling without test_env: true algebraic identity
+    r_id = _multi_domain_equivalence_probe("((IR_t * exp(beta_1) - IR_t) / IR_t) * 100", "(exp(beta_1) - 1) * 100")
+    _record("equiv_true_identity_no_env", r_id["equivalent"] is True and r_id["samples_tested"] >= 3, r_id)
+
+    # 2. Multi-domain sampling catches false identity that coincides at x=1
+    r_false = check_equivalence("x", "x**2", test_env={"x": 1.0})
+    _record("equiv_rejects_single_point_coincidence", r_false["equivalent"] is False, r_false)
+
+    # 3. Free unparseable / unknown symbolic callable -> explicit not_verifiable (never false pass)
+    r_unver = check_equivalence("unknown_op(x)", "x + 1")
+    _record("equiv_free_symbolic_not_verifiable", r_unver["equivalent"] is None and r_unver["method"] == "not_verifiable", r_unver)
+
+    # 4. Unit parser rejects English article 'a' and subscripted symbol 'E_a', accepts 'mA/cm^2' and 'A'
+    u_art = parse_unit_expression("a")
+    u_sub = parse_unit_expression("E_a")
+    u_amp = parse_unit_expression("A")
+    u_comp = parse_unit_expression("mA/cm^2")
+    _record("unit_rejects_article_a", u_art["ok"] is False, u_art)
+    _record("unit_rejects_subscript_E_a", u_sub["ok"] is False, u_sub)
+    _record("unit_accepts_uppercase_A", u_amp["ok"] is True and u_amp["dimension_named"] == {"I": 1}, u_amp)
+    _record("unit_accepts_composite_mA_cm2", u_comp["ok"] is True and abs(u_comp["si_scale_factor"] - 10.0) < 1e-9, u_comp)
+
+    all_ok = all(c["passed"] for c in checks)
+    return {"ok": all_ok, "passed": sum(1 for c in checks if c["passed"]), "total": len(checks), "checks": checks}
+
+
+if __name__ == "__main__":
+    import json
+    import sys
+
+    res = run_self_tests()
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    raise SystemExit(0 if res["ok"] else 1)

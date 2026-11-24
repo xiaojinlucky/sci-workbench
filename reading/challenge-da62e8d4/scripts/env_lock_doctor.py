@@ -230,13 +230,34 @@ def _compare_version_drift(deps: list[dict[str, Any]], installed: dict[str, str]
     comparisons: list[dict[str, Any]] = []
     for d in deps:
         norm = d["norm_name"]
+        if norm == "python":
+            inst_py = platform.python_version()
+            decl_m = re.search(r"python\s*[=~<>!]{1,2}\s*([0-9]+(?:\.[0-9]+){1,2})", d["raw_spec"], re.I)
+            decl_py = decl_m.group(1) if decl_m else d.get("pinned_version")
+            if decl_py:
+                decl_parts = decl_py.split(".")
+                inst_parts = inst_py.split(".")
+                py_match = inst_parts[:len(decl_parts)] == decl_parts
+                py_drift = "exact_match" if py_match else "version_drift"
+            else:
+                py_drift = "unpinned_in_manifest"
+            comparisons.append({
+                "name": d["name"],
+                "source_file": d["source_file"],
+                "ecosystem": d["ecosystem"],
+                "declared_spec": d["raw_spec"],
+                "pinned_version": decl_py,
+                "installed_version": inst_py,
+                "drift_status": py_drift,
+            })
+            continue
         if norm in NON_PYTHON_CONDA_SYSTEM_PKGS:
             comparisons.append({
                 "name": d["name"],
                 "source_file": d["source_file"],
                 "ecosystem": d["ecosystem"],
                 "declared_spec": d["raw_spec"],
-                "installed_version": platform.python_version() if norm == "python" else None,
+                "installed_version": None,
                 "drift_status": "system_or_runtime_dep",
             })
             continue

@@ -36,6 +36,7 @@ try:
     import gap_gate
     import preflight_probe
     import result_guard
+    import zotero_adapter
     from citation_anchors import extract_emlsi_fingerprint, extract_identifiers, verify_exact_quote
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
@@ -45,11 +46,14 @@ except ImportError:
     import gap_gate
     import preflight_probe
     import result_guard
+    import zotero_adapter
     from citation_anchors import extract_emlsi_fingerprint, extract_identifiers, verify_exact_quote
 
 
 SECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("abstract", re.compile(r"\b(?:abstract|summary|摘要)\b", re.I)),
+    ("references", re.compile(r"\b(?:references?|bibliography|参考文献)\b", re.I)),
+    ("backmatter", re.compile(r"\b(?:acknowledg(?:e)?ments?|funding|conflict\s+of\s+interests?|competing\s+interests?|authors?['’]?\s+contributions?|data\s+availability|code\s+availability|agent\s+availability|declaration|ethics|致谢|利益冲突)\b", re.I)),
+    ("abstract", re.compile(r"\b(?:abstract|resumo|summary|摘要)\b", re.I)),
     ("introduction", re.compile(r"\b(?:introduction|background|overview|引言|背景)\b", re.I)),
     ("related_work", re.compile(r"\b(?:related\s+work|literature\s+review|prior\s+work|相关工作|文献综述)\b", re.I)),
     ("methods", re.compile(r"\b(?:materials?\s+and\s+methods?|methods?|methodology|experimental|protocol|benchmark\s+design|study\s+design|方法|材料与方法|实验设计)\b", re.I)),
@@ -61,39 +65,44 @@ SECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 PLAIN_HEADING_RE = re.compile(
     r"^\s*(?:(?:\d+(?:\.\d+)*|[IVX]+)\.?\s+)?"
-    r"((?:abstract|introduction|background|related\s+work|literature\s+review|"
+    r"((?:abstract(?:\s+resumo)?|resumo|introduction|background|related\s+work|literature\s+review|"
     r"(?:materials?\s+and\s+)?methods?|methodology|experimental(?:\s+section|\s+methods?)?|"
     r"results?(?:\s+and\s+discussion)?|findings?|evaluation|discussion|"
     r"conclusions?(?:\s+and\s+outlook)?|limitations?|threats?\s+to\s+validity|"
-    r"future\s+work|roadmap|acknowledg(?:e)?ments?|references?|"
-    r"摘要|背景|引言|相关工作|材料与方法|实验方法|方法|结果与讨论|结果|讨论|局限性?|结论|总结与展望))\s*[:：]?\s*$",
+    r"future\s+work|roadmap|acknowledg(?:e)?ments?|references?|funding|"
+    r"conflict\s+of\s+interests?|competing\s+interests?|authors?['’]?\s+contributions?|"
+    r"data\s+and\s+code\s+availability|code\s+and\s+data\s+availability|"
+    r"data\s+availability|code\s+availability|agent\s+availability|software\s+availability|"
+    r"ethics(?:\s+(?:approval|statement))?|ethical\s+(?:approval|considerations?)|declaration|"
+    r"摘要|背景|引言|相关工作|材料与方法|实验方法|方法|结果与讨论|结果|讨论|局限性?|结论|总结与展望|参考文献))\s*[:：]?\s*$",
     re.I,
 )
 NUMBERED_SUBHEADING_RE = re.compile(r"^\s*(\d+(?:\.\d+)+\.?)\s+([A-Z\u4e00-\u9fff][^\n]{3,110})$")
 TEX_HEADING_RE = re.compile(r"^\s*\\(?:sub)*section\*?\{([^}]+)\}")
+HTML_ANCHOR_RE = re.compile(r'^\s*<a\s+id=["\']([A-Za-z0-9_.:-]+)["\']\s*>\s*</a>\s*$', re.I)
 
 GAP_CUE_RE = re.compile(
-    r"\b(?:however|remains?|unfortunately|underexplored|scarcity|lack(?:s|ing)?|challenge|bottleneck|poorly\s+understood|yet\s+to\s+be|gap)\b|然而|仍是挑战|鲜有|缺乏|尚未|瓶颈|空白",
+    r"\b(?:however|remains?|unfortunately|underexplored|scarcity|lack(?:s|ing)?|challenge|bottleneck|poorly\s+understood|yet\s+to\s+be|gap|barriers?|siloed|objective\s*:|aim(?:s|ed)?\s+to)\b|然而|仍是挑战|鲜有|缺乏|尚未|瓶颈|空白",
     re.I,
 )
 HINGE_CUE_RE = re.compile(
-    r"\b(?:here\s+we|in\s+this\s+(?:study|work|paper|article)|we\s+(?:present|show|propose|introduce|develop|demonstrate|report|construct))\b|本文提出|本研究|在此我们",
+    r"\b(?:here\s+we|in\s+this\s+(?:study|work|paper|article)|we\s+(?:present|show|propose|introduce|develop|demonstrate|report|construct|address)|objective\s*:\s*to|to\s+describe|to\s+analyze|addresses?\s+this\s+challenge)\b|本文提出|本研究|在此我们",
     re.I,
 )
 METHOD_RATIONALE_RE = re.compile(
-    r"\b(?:to\s+(?:test|avoid|isolate|overcome|measure|resolve|distinguish|evaluate|validate)|selected|chosen|designed\s+to|using|via|protocol|assay|pipeline|regression|model|spectrometry|sequencing|chronopotentiometry|cv|eis)\b|为验证|为排除|采用|通过|方法|协议",
+    r"\b(?:to\s+(?:test|avoid|isolate|overcome|measure|resolve|distinguish|evaluate|validate)|selected|chosen|designed\s+to|using|via|protocol|assay|pipeline|regression|model|spectrometry|sequencing|chronopotentiometry|descriptive\s+statistics|observational\s+study|mcp\s+server|multi-agent|workflow|framework|implemented\s+with)\b|为验证|为排除|采用|通过|方法|协议",
     re.I,
 )
 CONTROL_CUE_RE = re.compile(
-    r"\b(?:control|baseline|placebo|sham|blank|ablation|negative\s+control|positive\s+control|compared\s+(?:to|with)|versus|vs\.?|ruled?\s+out|exclud(?:e|ed|ing)|benchmark(?:ed)?\s+against)\b|对照|基线|消融|排除|相比|对比",
+    r"\b(?:control|baseline|placebo|sham|blank|ablation|negative\s+control|positive\s+control|compared\s+(?:to|with)|versus|vs\.?|ruled?\s+out|exclud(?:e|ed|ing)|benchmark(?:ed)?\s+against|outperform(?:s|ed|ing)|relative\s+to|contrast(?:s|ed)?\s+with)\b|对照|基线|消融|排除|相比|对比",
     re.I,
 )
 LIMITATION_CUE_RE = re.compile(
-    r"\b(?:limitation|limitations|caveat|remains?\s+to\s+be|cannot\s+(?:exclude|rule\s+out|generalize|establish)|confined\s+to|restricted\s+to|limited\s+to|small\s+sample|not\s+tested|future\s+work|prerequisite|assumption|only\s+valid\s+under|requires?\s+further)\b|局限|前提|仅适用于|受限于|尚需验证|无法排除|样本量有限",
+    r"\b(?:limitation|limitations|caveat|remains?\s+to\s+be|cannot\s+(?:exclude|rule\s+out|generalize|establish)|confined\s+to|restricted\s+to|limited\s+to|small\s+sample|not\s+tested|future\s+work|prerequisite|assumption|only\s+valid\s+under|requires?\s+further|secondary\s+data|underreporting|ignored\s+fields?|inherent\s+difficulty|challenges?\s+remain|excluded\s+from|fails?\s+validation)\b|局限|前提|仅适用于|受限于|尚需验证|无法排除|样本量有限",
     re.I,
 )
 DATASET_CUE_RE = re.compile(
-    r"\b(?:n\s*=\s*\d+|participants?|patients?|cohort|dataset|corpus|samples?|specimens?|subjects?|trials?|cell\s+lines?|mice|rats|catalysts?|compounds?|benchmarks?|papers?\s+screened)\b|样本量|队列|数据集|受试者|患者|样本",
+    r"\b(?:n\s*=\s*\d+|participants?|patients?|cohort|dataset|corpus|samples?|specimens?|subjects?|trials?|cell\s+lines?|mice|rats|catalysts?|compounds?|benchmarks?|papers?\s+screened|cases\s+of|inhabitants|queries|single-cell|transcriptomics|variants?|notifiable\s+diseases|data\s+extracted)\b|样本量|队列|数据集|受试者|患者|样本",
     re.I,
 )
 FIG_CALL_RE = re.compile(r"\b((?:Fig(?:ure)?\.?|Extended\s+Data\s+Fig(?:ure)?\.?|Supplementary\s+Fig(?:ure)?\.?|Table)\s*\d+[a-zA-Z]?)\b|图\s*\d+[a-zA-Z]?|表\s*\d+", re.I)
@@ -102,7 +111,7 @@ LEGEND_INTERP_RE = re.compile(
     re.I,
 )
 QUANT_RE = re.compile(
-    r"(?:\b\d+(?:\.\d+)?(?:\s*±\s*\d+(?:\.\d+)?)?\s*(?:%|mg/L|mmol|µM|uM|mM|nM|mV|V|mA|A|cm-2|mA/cm\^?2|nm|µm|um|mm|cm|kg|g|mg|µg|h|hr|min|s|ms|K|°C|Pa|kPa|MPa|ppm|ppb|eV|kJ|fold|×)\b|[pP]\s*[<=>]\s*0?\.\d+|95%\s*CI|\bR\^?2\s*=|\bAUC\s*=|\bF1\s*=)",
+    r"(?:\b\d+(?:,\d{3})*(?:\.\d+)?(?:\s*±\s*\d+(?:\.\d+)?)?\s*(?:%|mg/L|mmol|µM|uM|mM|nM|mV|V|mA|A|cm-2|mA/cm\^?2|nm|µm|um|mm|cm|kg|g|mg|µg|h|hr|min|minutes|s|ms|K|°C|Pa|kPa|MPa|ppm|ppb|eV|kJ|fold|×|/10,000|/100,000)\b|[pP]\s*[<=>]\s*0?\.\d+(?:e[-+]?\d+)?|95%\s*CI|\bR\^?2\s*=|\bAUC\s*=|\bF1\s*=|\bn\s*=\s*\d+(?:,\d{3})*)",
     re.I,
 )
 
@@ -153,9 +162,64 @@ def format_anchor(p: dict[str, Any]) -> str:
     return f"{src}#source-line={p['line_no']}"
 
 
-def parse_plain_or_md_sections(text: str, source_name: str, *, pdf: bool = False) -> list[dict[str, Any]]:
-    """Parse Markdown/TXT/TeX/PDF text preserving original headings and true locators."""
+FLOAT_CAPTION_START_RE = re.compile(
+    r"^\s*(?:Table|Figure|Fig\.?|Supplementary\s+(?:Table|Figure|Fig\.?)|Extended\s+Data\s+(?:Table|Figure|Fig\.?))\s+\d+[A-Za-z]?(?:\s*[:.\-–]|\s+[A-Z])"
+)
+PDF_PARA_OPENER_RE = re.compile(
+    r"^(?:Objective:|Methods:|Results:|Conclusions?:|Considering\b|Regarding\b|When\s+analyzing\b|"
+    r"In\s+the\s+present\s+study\b|In\s+this\s+study\b|Another\s+(?:issue|limitation|factor|aspect)\b|"
+    r"Furthermore,|However,|Likewise,|Therefore,|Thus,|This\s+study\s+has\s+limitations\b|"
+    r"Other\s+limitations\b|The\s+study\s+showed\b|In\s+conclusion\b|Worldwide,\b|Although\s+this\s+study\b|"
+    r"Due\s+to\s+this\b|There\s+are\s+probably\b|It\s+is\s+worth\b)"
+)
+REF_ENTRY_RE = re.compile(r"^\s*(?:\[\d+\]|\d{1,3}\.\s+[A-Z])")
+ICD_OR_FOOTNOTE_RE = re.compile(r"^(?:[A-Z]\d{2}(?:\.\d)?\s+to\s+[A-Z]\d{2}|ICD-10:|APC:|95%CI:|\*Statistical)", re.I)
+
+
+def _is_tabular_or_axis_line(s: str) -> bool:
+    """Detect numeric table rows, axis tick labels, or short chart annotations in PDF text."""
+    if not s:
+        return True
+    if ICD_OR_FOOTNOTE_RE.match(s):
+        return True
+    toks = s.split()
+    if len(toks) <= 2 and re.fullmatch(r"[\d.,%()–\-+/<>=*]+", "".join(toks)):
+        return True
+    num_toks = sum(1 for t in toks if re.search(r"\d", t) or t in {"–", "-", "—", "*", "n", "%"})
+    if len(toks) >= 2 and (num_toks / len(toks)) >= 0.45 and len(s) < 95:
+        return True
+    if len(toks) <= 6 and not s.endswith((".", "!", "?")) and not re.search(r"\b(?:the|was|were|are|is|that|with|from|which|have|has|for)\b", s, re.I):
+        return True
+    return False
+
+
+def _detect_pdf_running_headers(pages: list[str]) -> set[str]:
+    """Identify repeated running headers/footers appearing identically on >=3 pages."""
+    if len(pages) < 3:
+        return set()
+    page_counts: Counter[str] = Counter()
+    for pg in pages:
+        seen: set[str] = set()
+        raw_lines = [ln.strip() for ln in pg.splitlines() if ln.strip()]
+        for ln in raw_lines[:4] + raw_lines[-3:]:
+            if 3 <= len(ln) <= 95:
+                seen.add(ln)
+        for ln in seen:
+            page_counts[ln] += 1
+    return {ln for ln, c in page_counts.items() if c >= 3}
+
+
+def parse_plain_or_md_sections(
+    text: str,
+    source_name: str,
+    *,
+    pdf: bool = False,
+    extracted_floats: list[dict[str, Any]] | None = None,
+    doc_meta: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Parse Markdown/TXT/TeX/PDF text preserving original headings, clean prose boundaries, and true locators."""
     pages = text.split("\f") if pdf else [text]
+    running_headers = _detect_pdf_running_headers(pages) if pdf else set()
     lines = [
         (page_no, line_on_page, raw_line)
         for page_no, page_txt in enumerate(pages, 1)
@@ -177,54 +241,115 @@ def parse_plain_or_md_sections(text: str, source_name: str, *, pdf: bool = False
     buf_start_global = 1
     buf_start_page = 1
     buf_start_page_line = 1
+    pending_html_anchor: str | None = None
+    in_pdf_float: dict[str, Any] | None = None
+    post_ref_unclassified_paras: list[dict[str, Any]] = []
+    parent_h2_cat: str | None = None
+
+    def flush_float() -> None:
+        nonlocal in_pdf_float
+        if in_pdf_float and extracted_floats is not None:
+            caption_txt = " ".join(in_pdf_float["caption_lines"]).strip()
+            if caption_txt:
+                in_pdf_float["text"] = caption_txt
+                extracted_floats.append(in_pdf_float)
+        in_pdf_float = None
 
     def flush_paragraph() -> None:
-        nonlocal buf_lines
+        nonlocal buf_lines, pending_html_anchor
         if not buf_lines:
             return
         raw_joined = "\n".join(x.strip() for x in buf_lines if x.strip())
-        # Rejoin soft hyphenated line wraps cleanly while preserving real compound hyphens
         raw_joined = re.sub(r"([A-Za-z])-\n([a-z])", r"\1\2", raw_joined)
         joined = " ".join(raw_joined.split()).strip()
         if joined:
-            p_obj: dict[str, Any] = {
-                "line_no": buf_start_global,
-                "text": joined,
-                "source_file": source_name,
-                "anchor_kind": "pdf-page-line" if pdf else "source-line",
-            }
-            if pdf:
-                p_obj["page"] = buf_start_page
-                p_obj["line_on_page"] = buf_start_page_line
+            if pending_html_anchor and not pdf:
+                p_obj: dict[str, Any] = {
+                    "line_no": buf_start_global,
+                    "paragraph_id": pending_html_anchor,
+                    "text": joined,
+                    "source_file": source_name,
+                    "anchor_kind": "paragraph_id",
+                }
+            else:
+                p_obj = {
+                    "line_no": buf_start_global,
+                    "text": joined,
+                    "source_file": source_name,
+                    "anchor_kind": "pdf-page-line" if pdf else "source-line",
+                }
+                if pdf:
+                    p_obj["page"] = buf_start_page
+                    p_obj["line_on_page"] = buf_start_page_line
             p_obj["anchor"] = format_anchor(p_obj)
-            current_sec["paragraphs"].append(p_obj)
+
+            # NEVER blindly promote non-reference prose after REFERENCES into Discussion/Conclusions
+            # without an explicit standalone section heading. Quarantine as post_references_unclassified.
+            if (
+                pdf
+                and current_sec["category"] == "references"
+                and not REF_ENTRY_RE.match(joined)
+                and len(joined.split()) >= 14
+                and not re.search(r"\b(?:19|20)\d{2};\d+:", joined)
+            ):
+                post_ref_unclassified_paras.append(p_obj)
+            else:
+                current_sec["paragraphs"].append(p_obj)
         buf_lines = []
+        pending_html_anchor = None
 
     for g_idx, (page_no, page_line, line) in enumerate(lines, start=1):
         stripped = line.strip()
+
+        # Skip HTML anchor lines in Markdown while preserving native paragraph_id
+        if not pdf:
+            ha_m = HTML_ANCHOR_RE.match(line)
+            if ha_m:
+                flush_paragraph()
+                pending_html_anchor = ha_m.group(1).strip()
+                continue
+
+        # Skip PDF running headers/footers and standalone page numbers
+        if pdf and (stripped in running_headers or re.fullmatch(r"\d{1,3}", stripped)):
+            continue
+
         md_m = re.match(r"^\s*(#{1,4})\s+(.+?)\s*$", line)
         tex_m = TEX_HEADING_RE.match(line)
         plain_m = PLAIN_HEADING_RE.fullmatch(line)
         num_m = NUMBERED_SUBHEADING_RE.fullmatch(line) if not stripped.endswith(".") else None
 
         heading_title: str | None = None
+        heading_level = 2
         if md_m:
-            heading_title = md_m.group(2).strip().rstrip("#").strip()
+            hashes, htxt = md_m.group(1), md_m.group(2).strip().rstrip("#").strip()
+            if hashes == "#" and doc_meta is not None and not doc_meta.get("title"):
+                doc_meta["title"] = htxt
+                continue
+            heading_title = htxt
+            heading_level = len(hashes)
         elif tex_m:
             heading_title = tex_m.group(1).strip()
         elif plain_m:
             heading_title = plain_m.group(1).strip()
         elif num_m and len(num_m.group(2).split()) <= 12:
             heading_title = f"{num_m.group(1)} {num_m.group(2).strip()}"
+            heading_level = 3
 
         if heading_title:
+            flush_float()
             flush_paragraph()
             if current_sec["paragraphs"]:
                 sections.append(current_sec)
+            own_cat = classify_section_category(heading_title)
+            if heading_level <= 2:
+                parent_h2_cat = own_cat if own_cat != "other" else None
+                eff_cat = own_cat
+            else:
+                eff_cat = own_cat if own_cat != "other" else (parent_h2_cat or "other")
             current_sec = {
                 "section_id": f"{source_name}_sec_{sec_counter}",
                 "title": heading_title,
-                "category": classify_section_category(heading_title),
+                "category": eff_cat,
                 "source_file": source_name,
                 "line_start": g_idx,
                 "paragraphs": [],
@@ -232,16 +357,70 @@ def parse_plain_or_md_sections(text: str, source_name: str, *, pdf: bool = False
             sec_counter += 1
             continue
 
+        # PDF floating Table/Figure block isolation (prevents 500+ table cells/axis ticks from bloating Discussion)
+        if pdf:
+            if in_pdf_float is not None:
+                if page_no != in_pdf_float["page"]:
+                    flush_float()
+                elif not stripped:
+                    in_pdf_float["blank_streak"] += 1
+                    if in_pdf_float["blank_streak"] >= 2:
+                        flush_float()
+                    continue
+                elif _is_tabular_or_axis_line(stripped) or len(in_pdf_float["caption_lines"]) < 3 and not re.search(r"[.!?]\s*$", in_pdf_float["caption_lines"][-1]):
+                    in_pdf_float["blank_streak"] = 0
+                    if len(in_pdf_float["caption_lines"]) < 4 and not _is_tabular_or_axis_line(stripped):
+                        in_pdf_float["caption_lines"].append(stripped)
+                    else:
+                        in_pdf_float["data_lines"] += 1
+                    continue
+                else:
+                    flush_float()
+
+            if FLOAT_CAPTION_START_RE.match(stripped):
+                flush_paragraph()
+                in_pdf_float = {
+                    "source_file": source_name,
+                    "section": current_sec["title"],
+                    "page": page_no,
+                    "line_on_page": page_line,
+                    "anchor_kind": "pdf-page-line",
+                    "anchor": f"{source_name}#page={page_no}&extracted-line={page_line}",
+                    "caption_lines": [stripped],
+                    "data_lines": 0,
+                    "blank_streak": 0,
+                }
+                continue
+
+            if ICD_OR_FOOTNOTE_RE.match(stripped) and current_sec["category"] in {"discussion", "results", "methods"}:
+                flush_paragraph()
+                if extracted_floats is not None:
+                    extracted_floats.append({
+                        "source_file": source_name,
+                        "section": current_sec["title"],
+                        "page": page_no,
+                        "line_on_page": page_line,
+                        "anchor_kind": "pdf-page-line",
+                        "anchor": f"{source_name}#page={page_no}&extracted-line={page_line}",
+                        "text": stripped,
+                    })
+                continue
+
         if not stripped:
             flush_paragraph()
             continue
 
-        # Start a new paragraph when PDF page changes or list/figure item starts
-        if buf_lines and (
-            (pdf and page_no != buf_start_page)
-            or re.match(r"^(?:[-*•]\s+|\d+\)\s+|Fig(?:ure)?\.?\s*\d+|Table\s*\d+)", stripped)
-        ):
-            flush_paragraph()
+        # Clean paragraph boundaries for single-newline PDF prose & list starts
+        if buf_lines:
+            prev_s = buf_lines[-1]
+            prev_ends_sent = bool(re.search(r"[.!?。！？\)\]]\s*(?:\d{1,2}(?:,\d{1,2})*)?$", prev_s))
+            if (
+                (pdf and page_no != buf_start_page)
+                or re.match(r"^(?:[-*•]\s+|\d+\)\s+|Fig(?:ure)?\.?\s*\d+|Table\s*\d+)", stripped)
+                or (pdf and prev_ends_sent and (PDF_PARA_OPENER_RE.match(stripped) or len(prev_s) < 48))
+                or (pdf and current_sec["category"] == "references" and REF_ENTRY_RE.match(stripped))
+            ):
+                flush_paragraph()
 
         if not buf_lines:
             buf_start_global = g_idx
@@ -249,9 +428,31 @@ def parse_plain_or_md_sections(text: str, source_name: str, *, pdf: bool = False
             buf_start_page_line = page_line
         buf_lines.append(stripped)
 
+    flush_float()
     flush_paragraph()
     if current_sec["paragraphs"]:
         sections.append(current_sec)
+
+    # Keep non-reference prose appearing after REFERENCES without an explicit heading
+    # in an auditable post_references_unclassified section (never promote to Discussion/Conclusions).
+    if post_ref_unclassified_paras:
+        sections.append({
+            "section_id": f"{source_name}_sec_{sec_counter}",
+            "title": "Post-References Unclassified Text",
+            "category": "post_references_unclassified",
+            "source_file": source_name,
+            "line_start": post_ref_unclassified_paras[0]["line_no"],
+            "paragraphs": post_ref_unclassified_paras,
+        })
+        sec_counter += 1
+
+    # Promote Preamble structured abstract (Objective:/Methods:/Results:/Conclusions:) to abstract if no abstract prose exists
+    if sections and sections[0]["category"] == "unsectioned":
+        pre_txt = " ".join(p["text"] for p in sections[0]["paragraphs"])
+        if re.search(r"\bObjective\s*:", pre_txt, re.I) and re.search(r"\bResults\s*:", pre_txt, re.I):
+            sections[0]["title"] = "Structured Abstract"
+            sections[0]["category"] = "abstract"
+
     return sections
 
 
@@ -437,6 +638,7 @@ def classify_paper_genre(sections: list[dict[str, Any]], full_text: str) -> dict
     """Classify article genre using article-anatomy cues without forcing IMRaD."""
     cats = {s["category"] for s in sections}
     low = full_text.lower()
+    opening = low[:2500]
     scores: dict[str, int] = {
         "research_article": 0,
         "review": 0,
@@ -447,25 +649,28 @@ def classify_paper_genre(sections: list[dict[str, Any]], full_text: str) -> dict
     cues: dict[str, list[str]] = {k: [] for k in scores}
 
     if {"methods", "results"} <= cats:
-        scores["research_article"] += 4
+        scores["research_article"] += 5
         cues["research_article"].append("IMRaD Methods+Results sections present")
-    if re.search(r"\b(?:here we (?:show|present|demonstrate|report)|we measured|we performed|our experiments)\b", low):
-        scores["research_article"] += 3
-        cues["research_article"].append("First-person own-data reporting verbs")
-    if re.search(r"\b(?:systematic review|scoping review|meta-analysis|prisma|literature survey|in this review|we review recent)\b", low):
-        scores["review"] += 5
-        cues["review"].append("Explicit review/survey/PRISMA cues")
-    if "outlook" in low and "methods" not in cats:
+    elif "results" in cats and ("introduction" in cats or "discussion" in cats):
+        scores["research_article"] += 4
+        cues["research_article"].append("Empirical Results with Introduction/Discussion structure")
+    if re.search(r"\b(?:here we (?:show|present|demonstrate|report)|we (?:introduce|demonstrate|measured|performed|analyzed)|observational study|retrospective|prospective|cross-sectional|case studies|our experiments)\b", low):
+        scores["research_article"] += 4
+        cues["research_article"].append("Empirical/observational or original-method reporting verbs")
+    if re.search(r"\b(?:systematic review|scoping review|meta-analysis|prisma|literature survey|in this review|we review recent)\b", opening):
+        scores["review"] += 6
+        cues["review"].append("Explicit review/survey/PRISMA cues in opening")
+    if "outlook" in low and "methods" not in cats and "results" not in cats:
         scores["review"] += 2
-        cues["review"].append("Synthesis/outlook structure without own-data Methods")
-    if re.search(r"\b(?:benchmark|leaderboard|evaluation suite|standardized evaluation|task suite|versioned dataset|reproducibility framework)\b", low):
-        scores["benchmark_framework"] += 5
-        cues["benchmark_framework"].append("Benchmark/evaluation-suite terminology")
-    if re.search(r"\b(?:roadmap|call to action|field should|community must|perspective|policy recommendation)\b", low):
-        scores["perspective"] += 4
+        cues["review"].append("Synthesis/outlook structure without own-data Methods/Results")
+    if re.search(r"\b(?:we introduce a benchmark|new benchmark|leaderboard|evaluation suite|standardized evaluation|task suite|versioned dataset|reproducibility framework)\b", opening):
+        scores["benchmark_framework"] += 6
+        cues["benchmark_framework"].append("Benchmark/evaluation-suite framing in title/abstract")
+    if re.search(r"\b(?:roadmap|call to action|field should|community must|perspective|policy recommendation)\b", opening):
+        scores["perspective"] += 5
         cues["perspective"].append("Normative roadmap/perspective cues")
     if len(sections) <= 2 and len(full_text) < 4000 and re.search(r"\b(?:commentary|correspondence|editorial|i argue)\b", low):
-        scores["comment"] += 4
+        scores["comment"] += 5
         cues["comment"].append("Short non-IMRaD commentary format")
 
     best_genre = max(scores, key=lambda k: scores[k])
@@ -474,6 +679,7 @@ def classify_paper_genre(sections: list[dict[str, Any]], full_text: str) -> dict
 
     return {
         "genre": best_genre,
+        "label": best_genre,
         "attribution": "model_synthesized",
         "scores": scores,
         "evidence_cues": cues.get(best_genre, ["Insufficient structural cues"]),
@@ -587,43 +793,55 @@ def build_section_cards(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return cards
 
 
-def extract_figure_method_cards(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def extract_figure_method_cards(
+    sections: list[dict[str, Any]],
+    extracted_floats: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """One-Figure-One-Method lens: why chosen, what controls exclude, boundary, legend interpretation flag."""
     fig_map: dict[str, dict[str, Any]] = {}
+    sources_iter: list[tuple[str, str, str]] = []
     for sec in sections:
+        if sec["category"] in {"references", "backmatter"}:
+            continue
         for p in sec["paragraphs"]:
-            for sent in split_sentences(p["text"]):
-                matches = list(FIG_CALL_RE.finditer(sent))
-                if not matches or not verify_exact_quote(sent, p["text"]):
-                    continue
-                is_caption_like = bool(re.match(r"^\s*(?:Fig(?:ure)?\.?|Extended\s+Data\s+Fig(?:ure)?\.?|Table)\s*\d+\s*[:|.—-]", sent, re.I))
-                for m in matches:
-                    fid = " ".join(m.group(0).split())
-                    entry = fig_map.setdefault(fid, {
-                        "figure_or_table_id": fid,
-                        "sections": [],
-                        "anchors": [],
-                        "quotes": [],
-                        "method_rationale": [],
-                        "controls_or_exclusions": [],
-                        "evidence_boundaries": [],
-                        "legend_contains_interpretation": False,
-                        "attribution": "author_reported",
-                    })
-                    if sec["title"] not in entry["sections"]:
-                        entry["sections"].append(sec["title"])
-                    if p["anchor"] not in entry["anchors"]:
-                        entry["anchors"].append(p["anchor"])
-                    if sent not in entry["quotes"] and len(entry["quotes"]) < 3:
-                        entry["quotes"].append(sent)
-                    if METHOD_RATIONALE_RE.search(sent) and sent not in entry["method_rationale"]:
-                        entry["method_rationale"].append(sent)
-                    if CONTROL_CUE_RE.search(sent) and sent not in entry["controls_or_exclusions"]:
-                        entry["controls_or_exclusions"].append(sent)
-                    if LIMITATION_CUE_RE.search(sent) and sent not in entry["evidence_boundaries"]:
-                        entry["evidence_boundaries"].append(sent)
-                    if is_caption_like and LEGEND_INTERP_RE.search(sent):
-                        entry["legend_contains_interpretation"] = True
+            sources_iter.append((sec["title"], p["text"], p["anchor"]))
+    for fl in (extracted_floats or []):
+        if fl.get("text"):
+            sources_iter.append((fl.get("section") or "Float", fl["text"], fl["anchor"]))
+
+    for sec_title, para_txt, anc in sources_iter:
+        for sent in split_sentences(para_txt):
+            matches = list(FIG_CALL_RE.finditer(sent))
+            if not matches or not verify_exact_quote(sent, para_txt):
+                continue
+            is_caption_like = bool(re.match(r"^\s*(?:Fig(?:ure)?\.?|Extended\s+Data\s+Fig(?:ure)?\.?|Table)\s*\d+(?:\s*[:|.—-]|\s+[A-Z])", sent, re.I))
+            for m in matches:
+                fid = " ".join(m.group(0).split())
+                entry = fig_map.setdefault(fid, {
+                    "figure_or_table_id": fid,
+                    "sections": [],
+                    "anchors": [],
+                    "quotes": [],
+                    "method_rationale": [],
+                    "controls_or_exclusions": [],
+                    "evidence_boundaries": [],
+                    "legend_contains_interpretation": False,
+                    "attribution": "author_reported",
+                })
+                if sec_title not in entry["sections"]:
+                    entry["sections"].append(sec_title)
+                if anc not in entry["anchors"]:
+                    entry["anchors"].append(anc)
+                if sent not in entry["quotes"] and len(entry["quotes"]) < 3:
+                    entry["quotes"].append(sent)
+                if METHOD_RATIONALE_RE.search(sent) and sent not in entry["method_rationale"]:
+                    entry["method_rationale"].append(sent)
+                if CONTROL_CUE_RE.search(sent) and sent not in entry["controls_or_exclusions"]:
+                    entry["controls_or_exclusions"].append(sent)
+                if LIMITATION_CUE_RE.search(sent) and sent not in entry["evidence_boundaries"]:
+                    entry["evidence_boundaries"].append(sent)
+                if is_caption_like and LEGEND_INTERP_RE.search(sent):
+                    entry["legend_contains_interpretation"] = True
     return list(fig_map.values())[:12]
 
 
@@ -631,6 +849,8 @@ def extract_terminology_glossary(sections: list[dict[str, Any]]) -> list[dict[st
     """Extract and deduplicate Full Term (ABBR) definitions with first-definition locator."""
     glossary: dict[str, dict[str, Any]] = {}
     for sec in sections:
+        if sec["category"] in {"references", "backmatter"}:
+            continue
         for p in sec["paragraphs"]:
             txt = p["text"]
             for pat in (ABBR_FULL_THEN_SHORT_RE, ABBR_ZH_RE):
@@ -638,10 +858,10 @@ def extract_terminology_glossary(sections: list[dict[str, Any]]) -> list[dict[st
                     full_term = " ".join(m.group(1).split()).strip()
                     abbr = m.group(2).strip()
                     # Trim leading stop/preposition words from captured English phrase
-                    full_term = re.sub(r"^(?:the|a|an|of|in|for|by|and|with|to|across|using|integrated)\s+", "", full_term, flags=re.I)
+                    full_term = re.sub(r"^(?:the|a|an|of|in|for|by|and|with|to|across|using|integrated|state\s+of)\s+", "", full_term, flags=re.I)
                     if len(abbr) < 2 or abbr.isdigit() or len(full_term) < len(abbr) + 2:
                         continue
-                    if abbr.lower() in {"fig", "tab", "ref", "eq", "vs", "sd", "se", "ci"}:
+                    if abbr.lower() in {"fig", "tab", "ref", "eq", "vs", "sd", "se", "ci", "al", "uk", "us"}:
                         continue
                     # Basic letter plausibility: at least half of uppercase letters in abbr appear in full_term
                     u_letters = [ch.lower() for ch in abbr if ch.isalpha()]
@@ -708,8 +928,12 @@ def build_paper_card_and_discovery_chain(
         if title else {"value": "Not reported in available source text.", "attribution": "not_reported", "evidence_anchors": [], "evidence_quotes": []}
     )
 
-    full_text = "\n".join(p["text"] for s in sections for p in s["paragraphs"])
-    ids = extract_identifiers(full_text)
+    non_ref_text = "\n".join(
+        p["text"] for s in sections if s["category"] != "references" for p in s["paragraphs"]
+    )
+    ids = extract_identifiers(non_ref_text) if non_ref_text else extract_identifiers(
+        "\n".join(p["text"] for s in sections for p in s["paragraphs"])
+    )
     doi_val = case_data.get("primary_doi") or case_data.get("doi") or doc_meta.get("doi")
     if not doi_val:
         doi_obj = next((i for i in ids if i.kind in {"DOI", "PMID", "PMC", "arXiv"}), None)
@@ -726,14 +950,78 @@ def build_paper_card_and_discovery_chain(
     ctrl_cands: list[tuple[float, str, str]] = []
     find_cands: list[tuple[float, str, str]] = []
     lim_cands: list[tuple[float, str, str]] = []
+    funding_cands: list[tuple[float, str, str]] = []
+    ethics_cands: list[tuple[float, str, str]] = []
+    data_avail_cands: list[tuple[float, str, str]] = []
+    code_avail_cands: list[tuple[float, str, str]] = []
+
+    funding_re = re.compile(
+        r"\b(?:did\s+not\s+receive\s+any\s+funding|no\s+funding|funded\s+by|funding\s+was\s+provided|"
+        r"financial\s+support|supported\s+by\s+(?:grant|the\s+|NIH|NSF|NSFC|ERC|CNPq|FAPESP)|grant\s+(?:no\.?|number|#))\b|"
+        r"基金资助|经费支持|无资助",
+        re.I,
+    )
+    ethics_re = re.compile(
+        r"\b(?:research\s+ethics\s+committee|ethics\s+committee|ethical\s+approval|institutional\s+review\s+board|"
+        r"\bIRB\b|informed\s+consent|declaration\s+of\s+helsinki|animal\s+care\s+and\s+use|no\s+approval\s+by\s+the\s+.*ethics)\b|"
+        r"伦理审批|伦理委员会|知情同意",
+        re.I,
+    )
+    data_avail_re = re.compile(
+        r"\b(?:data\s+availability|data\s+(?:are|is)\s+(?:publicly\s+)?available|database\s+that\s+originated|"
+        r"available\s+(?:from|with)\s+the\s+corresponding\s+author|data\s+(?:were\s+)?deposited\s+(?:in|at)|"
+        r"publicly\s+available\s+(?:data|dataset)|zenodo\.org|figshare|dryad|ncbi\s+geo|open[- ]access\s+dataset)\b|"
+        r"数据可用性|数据公开",
+        re.I,
+    )
+    code_avail_re = re.compile(
+        r"\b(?:code\s+availability|source\s+code\s+is\s+available|code\s+(?:is|are)\s+(?:publicly\s+)?available|"
+        r"software\s+availability|agent\s+availability|github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|"
+        r"gitlab\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|open[- ]source\s+(?:code|repository|implementation)|"
+        r"huggingface\.co/[A-Za-z0-9_.-]+)\b|代码可用性|开源代码",
+        re.I,
+    )
 
     for sec in sections:
         cat = sec["category"]
+        sec_title_low = sec["title"].lower()
+        if cat == "references":
+            continue
         for p in sec["paragraphs"]:
             for sent in split_sentences(p["text"]):
-                if len(sent) < 20 or not verify_exact_quote(sent, p["text"]):
+                if len(sent) < 16 or not verify_exact_quote(sent, p["text"]):
                     continue
                 anc = p["anchor"]
+
+                # Governance & reproducibility fields (checked across body + backmatter + post_references_unclassified)
+                if "funding" in sec_title_low or funding_re.search(sent):
+                    fnd_sc = 4.0 if "funding" in sec_title_low else 2.5
+                    funding_cands.append((fnd_sc, sent, anc))
+                if "ethic" in sec_title_low or ethics_re.search(sent):
+                    eth_sc = 4.0 if "ethic" in sec_title_low else 3.0
+                    ethics_cands.append((eth_sc, sent, anc))
+                if (
+                    "data availability" in sec_title_low
+                    or "data and code" in sec_title_low
+                    or "code and data" in sec_title_low
+                    or ("declaration" in sec_title_low and re.search(r"\b(?:data|database)\b", sent, re.I))
+                    or data_avail_re.search(sent)
+                ):
+                    da_sc = 4.0 if ("data availability" in sec_title_low or "declaration" in sec_title_low) else 2.5
+                    data_avail_cands.append((da_sc, sent, anc))
+                if (
+                    "code availability" in sec_title_low
+                    or "agent availability" in sec_title_low
+                    or "software availability" in sec_title_low
+                    or "code and data" in sec_title_low
+                    or "data and code" in sec_title_low
+                    or code_avail_re.search(sent)
+                ):
+                    ca_sc = 4.0 if ("code availability" in sec_title_low or "agent availability" in sec_title_low) else 2.5
+                    code_avail_cands.append((ca_sc, sent, anc))
+
+                if cat == "backmatter" or len(sent) < 20:
+                    continue
                 # Research question / gap / hinge
                 if cat in {"abstract", "introduction", "unsectioned", "other"}:
                     q_sc = (3.0 if HINGE_CUE_RE.search(sent) else 0.0) + (2.5 if GAP_CUE_RE.search(sent) else 0.0)
@@ -742,17 +1030,17 @@ def build_paper_card_and_discovery_chain(
                 # Dataset / sample
                 if DATASET_CUE_RE.search(sent) and cat in {"methods", "results", "abstract", "introduction", "other", "unsectioned"}:
                     ds_sc = 3.0 if cat == "methods" else 2.0
-                    if re.search(r"\bn\s*=\s*\d+\b", sent, re.I):
+                    if re.search(r"\bn\s*=\s*\d+(?:,\d{3})*\b", sent, re.I):
                         ds_sc += 2.0
                     ds_cands.append((ds_sc, sent, anc))
                 # Methods / conditions
-                if cat == "methods" or (cat in {"abstract", "other"} and METHOD_RATIONALE_RE.search(sent)):
-                    m_sc = 3.0 if cat == "methods" else 1.5
+                if cat == "methods" or (cat in {"abstract", "other", "results"} and METHOD_RATIONALE_RE.search(sent)):
+                    m_sc = 3.0 if cat == "methods" else (2.0 if cat == "abstract" else 1.5)
                     if QUANT_RE.search(sent):
                         m_sc += 1.5
                     meth_cands.append((m_sc, sent, anc))
                 # Controls / exclusions
-                if CONTROL_CUE_RE.search(sent):
+                if CONTROL_CUE_RE.search(sent) and cat != "post_references_unclassified":
                     c_sc = 3.0 if cat in {"methods", "results"} else 1.8
                     ctrl_cands.append((c_sc, sent, anc))
                 # Main findings
@@ -762,10 +1050,10 @@ def build_paper_card_and_discovery_chain(
                         f_sc += 2.0
                     if f_sc >= 2.0 and not LIMITATION_CUE_RE.search(sent):
                         find_cands.append((f_sc, sent, anc))
-                # Limitations / prerequisites (also inside Discussion & Conclusion!)
+                # Limitations / prerequisites (also inside Discussion, Conclusion & post_references_unclassified)
                 if cat == "limitations" or LIMITATION_CUE_RE.search(sent):
                     l_sc = 4.0 if cat == "limitations" else 2.5
-                    if cat in {"discussion", "conclusion"}:
+                    if cat in {"discussion", "conclusion", "post_references_unclassified"}:
                         l_sc += 1.0
                     lim_cands.append((l_sc, sent, anc))
 
@@ -786,6 +1074,10 @@ def build_paper_card_and_discovery_chain(
     ctrl_top = top_unique(ctrl_cands, 2)
     find_top = top_unique(find_cands, 5)
     lim_top = top_unique(lim_cands, 2)
+    funding_top = top_unique(funding_cands, 2)
+    ethics_top = top_unique(ethics_cands, 2)
+    data_avail_top = top_unique(data_avail_cands, 2)
+    code_avail_top = top_unique(code_avail_cands, 2)
 
     paper_card = {
         "title": title_field,
@@ -797,6 +1089,10 @@ def build_paper_card_and_discovery_chain(
         "controls_and_exclusions": _make_card_field(ctrl_top),
         "main_findings": _make_card_field(find_top, is_list=True),
         "limitations_and_prerequisites": _make_card_field(lim_top),
+        "funding": _make_card_field(funding_top, not_reported_msg="not_reported"),
+        "ethics": _make_card_field(ethics_top, not_reported_msg="not_reported"),
+        "data_availability": _make_card_field(data_avail_top, not_reported_msg="not_reported"),
+        "code_availability": _make_card_field(code_avail_top, not_reported_msg="not_reported"),
     }
 
     discovery_chain = {
@@ -817,6 +1113,8 @@ def extract_knowledge_points(sections: list[dict[str, Any]], max_kps: int = 12) 
     pool: list[dict[str, Any]] = []
     for s_idx, sec in enumerate(sections):
         cat = sec["category"]
+        if cat in {"references", "backmatter"}:
+            continue
         for p in sec["paragraphs"]:
             for sent in split_sentences(p["text"]):
                 if len(sent) < 22 or not verify_exact_quote(sent, p["text"]):
@@ -905,6 +1203,10 @@ def render_markdown_notes(
         ("method_conditions", "方法与实验条件"),
         ("controls_and_exclusions", "对照与排除边界"),
         ("limitations_and_prerequisites", "局限与成立前提"),
+        ("funding", "资助声明 (funding)"),
+        ("ethics", "伦理审批 (ethics)"),
+        ("data_availability", "数据可用性 (data_availability)"),
+        ("code_availability", "代码可用性 (code_availability)"),
     ]
     for fkey, flabel in field_labels:
         fobj = paper_card[fkey]
@@ -1001,6 +1303,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, case_id: str
     sources_scanned: list[str] = []
     source_modalities: dict[str, str] = {}
     sections: list[dict[str, Any]] = []
+    extracted_floats: list[dict[str, Any]] = []
     gaps: list[dict[str, Any]] = []
     doc_meta: dict[str, str] = {}
 
@@ -1055,7 +1358,11 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, case_id: str
                         "impact": "No claims can be extracted from this scanned/empty PDF.",
                     })
                     continue
-                sections.extend(parse_plain_or_md_sections(source_text, rel_name, pdf=True))
+                sections.extend(
+                    parse_plain_or_md_sections(
+                        source_text, rel_name, pdf=True, extracted_floats=extracted_floats, doc_meta=doc_meta
+                    )
+                )
             except Exception as exc:
                 gaps.append({
                     "code": "PDF_TEXT_EXTRACTION_FAILED",
@@ -1116,7 +1423,11 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, case_id: str
                     "impact": "No claims anchored to empty source.",
                 })
                 continue
-            sections.extend(parse_plain_or_md_sections(raw_txt, rel_name, pdf=False))
+            sections.extend(
+                parse_plain_or_md_sections(
+                    raw_txt, rel_name, pdf=False, extracted_floats=extracted_floats, doc_meta=doc_meta
+                )
+            )
 
     # Also ingest inline paragraphs from case.json if no standalone paper files yielded sections
     if not sections and isinstance(case_data.get("paragraphs"), list):
@@ -1155,13 +1466,15 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, case_id: str
     full_text = "\n".join(p["text"] for s in sections for p in s["paragraphs"])
     genre_info = classify_paper_genre(sections, full_text)
     section_cards = build_section_cards(sections)
-    figure_cards = extract_figure_method_cards(sections)
+    figure_cards = extract_figure_method_cards(sections, extracted_floats=extracted_floats)
     glossary = extract_terminology_glossary(sections)
     paper_card, discovery_chain = build_paper_card_and_discovery_chain(sections, case_data, doc_meta, genre_info)
     knowledge_points = extract_knowledge_points(sections, max_kps=max_kps)
 
     core_card_keys = ("research_question", "dataset_or_sample", "method_conditions", "main_findings", "limitations_and_prerequisites")
+    gov_card_keys = ("funding", "ethics", "data_availability", "code_availability")
     complete_count = sum(1 for k in core_card_keys if paper_card[k]["attribution"] != "not_reported")
+    gov_complete_count = sum(1 for k in gov_card_keys if paper_card[k]["attribution"] != "not_reported")
     if complete_count < len(core_card_keys):
         missing_keys = [k for k in core_card_keys if paper_card[k]["attribution"] == "not_reported"]
         gaps.append({
@@ -1170,6 +1483,26 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, case_id: str
             "source": "paper_card",
             "message": f"Only {complete_count}/{len(core_card_keys)} core paper-card fields supported by source text; missing: {missing_keys}.",
             "impact": "Unsupported fields remain attribution='not_reported' and were never fabricated.",
+        })
+    missing_gov = [k for k in gov_card_keys if paper_card[k]["attribution"] == "not_reported"]
+    if missing_gov:
+        gaps.append({
+            "code": "PAPER_CARD_GOVERNANCE_FIELDS_MISSING",
+            "severity": "warning",
+            "source": "paper_card",
+            "missing_fields": missing_gov,
+            "message": f"Governance/reproducibility fields not reported in source text ({gov_complete_count}/{len(gov_card_keys)} present): {missing_gov}.",
+            "impact": "Each missing governance field is recorded as 'not_reported' instead of silently returning gaps=0.",
+        })
+    post_ref_secs = [s for s in sections if s["category"] == "post_references_unclassified"]
+    if post_ref_secs:
+        n_post_paras = sum(len(s["paragraphs"]) for s in post_ref_secs)
+        gaps.append({
+            "code": "POST_REFERENCES_UNCLASSIFIED_TEXT",
+            "severity": "warning",
+            "source": "section_parser",
+            "message": f"{n_post_paras} non-reference paragraph(s) appeared after REFERENCES without an explicit standalone section heading; quarantined as 'post_references_unclassified' rather than promoted to Discussion.",
+            "impact": "Requires manual two-column layout verification before reassigning to Discussion/Conclusions.",
         })
     if not knowledge_points:
         gaps.append({
@@ -1180,12 +1513,39 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, case_id: str
             "impact": "Knowledge-point table is empty; inspect source text directly.",
         })
 
+    # Optional Zotero annotation JSON import & case-sensitive verification
+    zotero_import_audit: dict[str, Any] | None = None
+    zotero_in_candidates = sorted(
+        p for p in input_dir.rglob("zotero_annotations*.json")
+        if p.is_file() and not p.is_symlink()
+    )
+    if zotero_in_candidates:
+        try:
+            zotero_import_audit = zotero_adapter.import_and_verify_zotero_annotations(zotero_in_candidates[0], full_text)
+            if zotero_import_audit["rejected_count"] > 0:
+                gaps.append({
+                    "code": "ZOTERO_ANNOTATIONS_REJECTED",
+                    "severity": "warning",
+                    "source": zotero_in_candidates[0].name,
+                    "message": f"{zotero_import_audit['rejected_count']}/{zotero_import_audit['total_imported']} imported Zotero annotations failed case-sensitive verbatim verification.",
+                    "impact": "Unverified or case/unit/negation-tampered highlights were excluded from trusted notes.",
+                })
+        except Exception as exc:
+            gaps.append({
+                "code": "ZOTERO_IMPORT_FAILED",
+                "severity": "warning",
+                "source": zotero_in_candidates[0].name,
+                "message": f"Failed to parse Zotero annotation JSON ({type(exc).__name__}).",
+                "impact": "Proceeded using source document text only.",
+            })
+
     status = "partial_with_gaps" if gaps else "ok"
 
-    # Emit standalone paper_card.json, structured_notes.json, structured_notes.md
+    # Emit standalone paper_card.json, structured_notes.json, zotero_annotations.json, structured_notes.md
     paper_card_payload = {
         "case_id": case_id,
-        "schema_version": "2.0",
+        "schema_version": "2.2",
+        "genre": genre_info["genre"],
         "attribution_legend": ["author_reported", "model_synthesized", "not_reported"],
         "source_modalities": source_modalities,
         "paper_card": paper_card,
@@ -1193,17 +1553,34 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, case_id: str
     }
     result_guard.atomic_write_json(output_dir / "paper_card.json", paper_card_payload)
 
+    zotero_payload = zotero_adapter.export_zotero_annotations_payload(
+        case_id=case_id,
+        paper_card=paper_card,
+        knowledge_points=knowledge_points,
+        source_modalities=source_modalities,
+    )
+    if zotero_import_audit is not None:
+        zotero_payload["imported_audit"] = zotero_import_audit
+    result_guard.atomic_write_json(output_dir / "zotero_annotations.json", zotero_payload)
+
     notes_json_payload = {
         "case_id": case_id,
         "status": status,
         "source_modalities": source_modalities,
+        "genre": genre_info["genre"],
         "paper_genre": genre_info,
         "paper_card": paper_card,
         "discovery_chain": discovery_chain,
         "section_cards": section_cards,
+        "extracted_floats": extracted_floats[:30],
         "figure_method_cards": figure_cards,
         "terminology_glossary": glossary,
         "knowledge_points": knowledge_points,
+        "zotero_export_summary": {
+            "file": "zotero_annotations.json",
+            "schema": zotero_payload["schema"],
+            "annotation_count": zotero_payload["annotation_count"],
+        },
         "gaps": gaps,
     }
     result_guard.atomic_write_json(output_dir / "structured_notes.json", notes_json_payload)
@@ -1214,49 +1591,61 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, case_id: str
     (output_dir / "structured_notes.md").write_text(md_text, encoding="utf-8")
 
     # Update result.json via M2 result_guard
+    aligned_cats = {"abstract", "introduction", "related_work", "methods", "results", "discussion", "limitations", "conclusion"}
     patch = {
         "status": status,
         "sources": sources_scanned,
         "source_modalities": source_modalities,
         "uncertainty": (
-            "All author_reported quotes passed verbatim substring checks in their cited block. "
-            "PDF locators record actual page and extracted-line (double-column reading order requires review); "
-            "non-PDF sources use source-line or paragraph_id and never fabricate PDF pages."
+            "All author_reported quotes passed case-sensitive verbatim substring and unit/numeric/negation fidelity checks in their cited block. "
+            "Post-REFERENCES prose lacking explicit headings is quarantined as post_references_unclassified rather than promoted to Discussion. "
+            "Missing funding/ethics/data_availability/code_availability fields are explicitly marked not_reported and recorded in gaps."
         ),
-        "artifacts": ["result.json", "structured_notes.md", "structured_notes.json", "paper_card.json"],
+        "artifacts": ["result.json", "structured_notes.md", "structured_notes.json", "paper_card.json", "zotero_annotations.json"],
         "metrics": {
-            "sections_aligned": sum(1 for s in sections if s["category"] not in {"other", "unsectioned"}),
+            "sections_aligned": sum(1 for s in sections if s["category"] in aligned_cats),
             "section_cards_count": len(section_cards),
+            "extracted_floats_isolated": len(extracted_floats),
             "knowledge_points_extracted": len(knowledge_points),
             "terminology_terms_extracted": len(glossary),
             "figure_method_cards_count": len(figure_cards),
             "paper_card_fields_complete": complete_count,
             "paper_card_fields_total": len(core_card_keys),
+            "governance_fields_complete": gov_complete_count,
+            "governance_fields_total": len(gov_card_keys),
+            "zotero_annotations_exported": zotero_payload["annotation_count"],
             "legend_interpretation_flags": sum(1 for fc in figure_cards if fc["legend_contains_interpretation"]),
         },
         "metric_provenance": {
             "sections_aligned": "structured_notes.json:section_cards",
             "section_cards_count": "structured_notes.json:section_cards",
+            "extracted_floats_isolated": "structured_notes.json:extracted_floats",
             "knowledge_points_extracted": "structured_notes.json:knowledge_points",
             "terminology_terms_extracted": "structured_notes.json:terminology_glossary",
             "figure_method_cards_count": "structured_notes.json:figure_method_cards",
             "paper_card_fields_complete": "paper_card.json:paper_card",
             "paper_card_fields_total": "paper_card.json:paper_card",
+            "governance_fields_complete": "paper_card.json:paper_card",
+            "governance_fields_total": "paper_card.json:paper_card",
+            "zotero_annotations_exported": "zotero_annotations.json:annotations",
             "legend_interpretation_flags": "structured_notes.json:figure_method_cards",
         },
         "findings": [
-            f"Classified paper genre as '{genre_info['genre']}' across {len(section_cards)} original-order section card(s).",
-            f"Verified {len(knowledge_points)} density-ranked knowledge point(s) (cap={max_kps}), {len(glossary)} deduplicated term(s), and {len(figure_cards)} figure/table method card(s).",
-            f"Completed {complete_count}/{len(core_card_keys)} core paper-card fields with three-layer attribution; gaps recorded: {len(gaps)}.",
+            f"Classified paper genre as '{genre_info['genre']}' across {len(section_cards)} original-order section card(s) ({len(extracted_floats)} floating table/figure block(s) isolated).",
+            f"Verified {len(knowledge_points)} density-ranked knowledge point(s) (cap={max_kps}), {len(glossary)} deduplicated term(s), {len(figure_cards)} figure/table method card(s), and {zotero_payload['annotation_count']} zotero-mcp annotation(s).",
+            f"Completed {complete_count}/{len(core_card_keys)} core + {gov_complete_count}/{len(gov_card_keys)} governance paper-card fields with three-layer attribution; gaps recorded: {len(gaps)}.",
         ],
         "structured_notes": {
+            "genre": genre_info["genre"],
             "paper_genre": genre_info["genre"],
             "paper_card": paper_card,
             "discovery_chain": discovery_chain,
             "section_count": len(section_cards),
+            "extracted_floats_count": len(extracted_floats),
             "knowledge_point_count": len(knowledge_points),
             "terminology_count": len(glossary),
             "figure_method_card_count": len(figure_cards),
+            "zotero_annotations_exported": zotero_payload["annotation_count"],
         },
         "gaps": gaps,
     }
@@ -1274,7 +1663,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, case_id: str
     audit = final_audit.audit_deliverables(
         output_dir,
         result_file="result.json",
-        required_files=["structured_notes.md", "structured_notes.json", "paper_card.json"],
+        required_files=["structured_notes.md", "structured_notes.json", "paper_card.json", "zotero_annotations.json"],
     )
     if not audit["passed"]:
         raise RuntimeError(f"final_audit failed: {audit['blocking_failures']}")

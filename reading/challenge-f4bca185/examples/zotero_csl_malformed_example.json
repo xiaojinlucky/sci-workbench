@@ -1,0 +1,36 @@
+{
+  "case_id": "zotero-csl-schema-negative-example",
+  "note": "Negative test cases illustrating Zotero/CSL-JSON schema validation failures (missing author.family and malformed issued/date fields) that must be quarantined into needs_human_review without silent coercion.",
+  "records": [
+    {
+      "row_id": "ZOT-BAD-AUTHOR-01",
+      "entity": "Catalyst_A",
+      "metric": "overpotential",
+      "value": "250",
+      "unit": "mV vs RHE",
+      "source_document_id": "zotero_item_8821",
+      "experimental_condition": "1.0M_KOH",
+      "csl_type": "article-journal",
+      "author": [
+        {"given": "Maria"},
+        {"family": "", "given": "Carlos"}
+      ],
+      "issued": {"date-parts": [[2024, 5, 12]]}
+    },
+    {
+      "row_id": "ZOT-BAD-DATE-02",
+      "entity": "Catalyst_B",
+      "metric": "overpotential",
+      "value": "230",
+      "unit": "mV vs RHE",
+      "source_document_id": "zotero_item_8822",
+      "experimental_condition": "1.0M_KOH",
+      "csl_type": "article-journal",
+      "author": [
+        {"family": "Silva", "given": "Ana"}
+      ],
+      "issued": {"date-parts": [[2024, 15, 42]]},
+      "date": "2024-15-42"
+    }
+  ]
+}

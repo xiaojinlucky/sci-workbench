@@ -7,14 +7,18 @@
 | --- | --- | --- | --- |
 | `source_defined` | 原文（`publisher-source.xml` `<p>`、PDF/MD/TXT、`case.json`）明确出现 `"where x denotes ..."` / `"x is the ..."` / `"其中 x 表示 ..."` 等显式定义句 | `paragraph_id`, `definition_quote`, `unit_hint`, `range_hint` | 不可篡改原文符号或静默换单位 |
 | `context_inferred` | 原文出现该符号但无显式定义句，仅能从上下文提及位置推测语境 | `paragraph_id`, `definition_quote` | 不可伪装成 `source_defined` |
+| `mathematical_constant` | 通用数学常数（如 `\pi`、`e`），非论文自由变量 | `unit_hint: "1"`, `range_hint: "constant"` | 不可误报为未定义变量或改写常数值 |
 | `undefined_in_supplied_text` | 全部输入材料均未提及或未定义该符号 | `paragraph_id: null`, `definition_quote: ""` | 严禁按教科书常识直接填定义或赋 0 值 |
 
-## 2. 推导步骤、假设与边界条件审查
-`source-formulas.xml` 只是从出版商 XML 抽取出的公式节点目录，不等于完整推导。对每条关键推导步骤核查四项：
-1. **跨公式依赖**：标明前序公式 ID 与目标公式 ID（如 `eq1 -> eq3`）。
-2. **代数/微积分等价性**：调用 `math_ast_guard.check_equivalence()`（有 SymPy 时隔离保留字 `E, I, S, N, O, Q, C` 做符号化简，并辅以 AST 多点数值交叉验证）。
-3. **显式假设与近似**：逐条记录所用假设（如稳态假设、小角度近似 `\sin\theta \approx \theta`、稀溶液假设、线性响应区、忽略高阶项）及其原文段落锚点；若文中未声明关键近似，标记为 `conditional_on_unstated_assumption`。
-4. **成立域与边界条件**：检查分母不为零、对数真数为正、温度 `T > 0 K`、收敛条件与极限边界。
+希腊字母与下标双向归一化：`build_symbol_variants()` 与 `extract_symbols_from_latex()` 自动对齐 Unicode 希腊字母（`α`/`η`/`Δ`/`τ`）、LaTeX 命令（`\alpha`/`\eta`/`\Delta`/`\tau`）、花括号下标（`{E}_{a}`/`I_{0}`/`k_{B}`）与 Unicode 下标（`I₀`/`Eₐ`），避免把 `E_a` 拆成孤立的 `E` 和 `a`；`unit_hint` 经复合 SI 解析器校验且限定局部子句，避免邻近变量单位串扰或英文词尾误匹配。
+
+## 2. 推导步骤、假设、边界条件与跨公式依赖 DAG 审查
+`source-formulas.xml` 只是从出版商 XML 抽取出的公式节点目录，不等于完整推导。引擎通过 `build_equation_dependency_dag()`、`extract_derivation_assumptions_and_boundaries()` 与 `audit_derivation_chain()` 确定性核查五项：
+1. **跨公式依赖 DAG**：自动融合正文显式引用（如 `substituting Eq. (1) into Eq. (2)`）、声明推导链（`from_formula_id -> to_formula_id`）及 LHS→RHS 符号流边，执行 Kahn 拓扑排序并检测环路。
+2. **多步代数链与中间值复算**：逐步调用 `check_equivalence()`（有 SymPy 时隔离保留字 `E, I, S, N, O, Q, C` 做符号化简，并输出 AST `numeric_before` / `numeric_after` / `rel_error`）。
+3. **显式假设与近似抽取**：从原文自动抓取 `assuming`、`steady state`、`high-overpotential limit`、`for x << 1`、`neglecting` 等前提并绑定 `paragraph_id` 与原文摘录；近似步骤在容差内判为 `verified_under_approximation`。
+4. **成立域与边界条件 AST 校验**：通过 `evaluate_domain_predicate()` 对 `T > 0`、`A > 0`、`0 < alpha < 1` 等数值域约束自动验算，越界即判 `domain_violation`。
+5. **步骤级量纲自洽**：若步骤声明 `unit_before`/`unit_after`，同步调用 `check_dimensional_balance()` 核验步骤前后量纲一致。
 
 ## 3. Pix2Text #142 类 OCR/转写噪音拦截协议
 公开社区报告（如 Pix2Text Issue #142）显示，数学证明或公式截图 OCR 常将旁注或误识别的异常中文字符、乱码、控制字符混入公式中。若不拦截直接代入推导，会导致后续代数和数值结论全盘失真。

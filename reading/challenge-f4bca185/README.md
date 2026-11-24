@@ -19,5 +19,10 @@ Offline Python 3.12 standard-library Skill for cleaning, standardizing, deduplic
 
 ## Quick Offline Run
 ```bash
-python -B scripts/data_cleaning_pipeline.py --input examples --output /tmp/clean_out --work /tmp/clean_work
+python3 -B scripts/data_cleaning_pipeline.py --input examples --output /tmp/clean_out --work /tmp/clean_work
 ```
+
+## Key Guardrails
+- **`R05_PHYSICAL_BOUNDS`**: Intercepts `Kelvin < 0`, `pH < 0` or `pH > 14`, bounded percentage efficiencies `> 100%`, negative concentrations/sample sizes, and instrument sentinels (`-999`) into `needs_human_review`.
+- **`R03_CROSS_DIMENSION_REFUSAL`**: Normalizes clinical/epidemiology/materials compound units (`mg/dL`, `g/dL`, `g/L`, `/10,000`, `/100,000`, `kcal/mol`, `kJ/mol`, `mV vs RHE`, `mA cm^-2`) and explicitly refuses `mass_conc <-> molar_conc` conversion when `molar_mass_g_mol` is missing.
+- **`verification_checklist` & `quality_scorecard`**: Emits per-row `row_id -> before -> after -> rule_ids -> formula -> source_locator -> status` audit trails.

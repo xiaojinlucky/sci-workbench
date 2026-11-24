@@ -1,6 +1,6 @@
 ---
 name: math-formula-verifier
-description: Parse JATS publisher-source.xml and source-formulas.xml MathML/TeX trees without double-counting, trace variable definitions across XML and paper prose into a 3-tier provenance table, audit derivation assumptions and boundary conditions, verify arbitrary composite SI dimensional algebra and order-of-magnitude scale offsets, intercept Pix2Text-class OCR noise before derivation, self-validate formula_notes.md Markdown math, and emit honest partial/insufficient_evidence on C02-style missing-formula branches.
+description: Parse JATS publisher-source.xml and source-formulas.xml MathML/TeX trees without double-counting, trace variable definitions with Greek Unicode/LaTeX and subscript normalization into a provenance table with SI-validated unit/range hints, build cross-equation dependency DAGs and audit multi-step derivation assumptions, approximations, boundary conditions, intermediate values, and composite SI dimensions, intercept Pix2Text-class OCR noise before derivation, self-validate formula_notes.md Markdown math, and emit honest partial/insufficient_evidence on C02-style missing-formula branches.
 ---
 
 # Formula Parsing & Mathematical Reasoning (`challenge-7c37626c`)
@@ -32,21 +32,28 @@ All bundled scripts run offline on **pure Python 3.12 standard library** (`pytho
      - Audit only the explicit metrics and conditions present in the snapshot, and emit `formula_coverage_status: "insufficient_evidence"` (zero formulas) or `"partial"` (missing variables / halted OCR / unreadable source) with structured `gaps[]`.
 
 ## Deterministic Execution Workflow
-Locate all scripts relative to this `SKILL.md` directory (`scripts/`).
+Always resolve scripts via `SKILL_ROOT` (installed at `/skills/weekly-skill` in container runs) so commands succeed from `/app/work` or any working directory, or invoke `"$SKILL_ROOT/scripts/run.sh"` directly.
 
 ### Step 1: Preflight, Budget Init & Core Formula Pipeline
 ```bash
-python -B scripts/preflight_probe.py --input /input --output /app/output --out /app/work/env.json
-python -B scripts/budget_guard.py --state /app/work/.budget_state.json --init
-python -B scripts/formula_math_engine.py --input /input --output /app/output --work /app/work
+export SKILL_ROOT="${SKILL_ROOT:-/skills/weekly-skill}"
+python3 -B "$SKILL_ROOT/scripts/preflight_probe.py" --input /input --output /app/output --out /app/work/env.json
+python3 -B "$SKILL_ROOT/scripts/budget_guard.py" --state /app/work/.budget_state.json --init
+python3 -B "$SKILL_ROOT/scripts/formula_math_engine.py" --input /input --output /app/output --work /app/work
+# One-click equivalent (runs Steps 1 & 3 end-to-end):
+# bash "$SKILL_ROOT/scripts/run.sh" /input /app/output /app/work
 ```
-`formula_math_engine.py` performs the deterministic core pass:
-1. **XML/MathML Layered Extraction (`math_ast_guard.parse_xml_formulas`)**: lowers `<mrow>`, `<mfrac>`, `<msub>`, `<msup>`, `<msubsup>`, `<msqrt>`, `<mroot>`, `<mtable>`/`<mtr>`/`<mtd>`, `<mfenced>`, `<mover>`/`<munder>`/`<munderover>`, `<mmultiscripts>`, and `<semantics>` (without concatenating `<annotation>` noise) while recording `source_file`, `formula_id`, `xml_tag`, `label`, and `representation_source`.
-2. **Pix2Text #142 OCR/Transcription Noise Gate (`math_ast_guard.inspect_formula_noise`)**: flags unexpected CJK side-notes mixed into formulas, literal tabs/control characters (e.g., corrupted `\tau`/`\theta`), mojibake, unbalanced `()`/`[]`/`{}`, mismatched `\left`/`\right`, and empty `\frac{}{}`. Any halted formula is marked `verification_status: "halted_for_visual_check"` and blocked from blind derivation or numeric evaluation.
-3. **Three-Tier Variable Provenance Table**: traces each extracted symbol across `publisher-source.xml` `<p>` nodes, `case.json`, and text/PDF inputs into `source_defined`, `context_inferred`, or `undefined_in_supplied_text`, capturing `paragraph_id`, `unit_hint`, `range_hint`, and verbatim quote.
-4. **General Composite SI Dimensional Algebra (`math_ast_guard.check_dimensional_balance`)**: parses arbitrary composite expressions (`m s^-2`, `kg*m^2/(s^3*A)`, `J/(mol*K)`, `kJ/mol`, `mA/cm^2`, `mg/L`, `eV`, `Pa*s`), decomposes SI prefixes (`f` to `T`), compares 7-dimensional SI vectors `(L, M, T, I, Theta, N, J)`, and flags both dimensional mismatches (`DIMENSIONAL_MISMATCH`) and silent order-of-magnitude scale offsets (`UNIT_ORDER_OF_MAGNITUDE_OFFSET`, e.g., `J` vs `kJ` or `mA/cm^2` vs `A/m^2`).
-5. **Safe Derivation & Numeric Verification**: evaluates arithmetic/scientific expressions via Python AST whitelist (zero `eval()`), normalizes Greek letters and subscripts, isolates SymPy reserved names (`E, I, S, N, O, Q, C`), and refuses zero-filling when any required variable is absent.
-6. **Portable Markdown Notes & Self-Check**: writes `/app/output/formula_notes.md` with `E001...` anchors and validates it via `math_markdown_validator.py`.
+`formula_math_engine.py` performs the deterministic core pass (with an **Auto-Candidate Generation Layer** so hidden cases that omit pre-structured `derivation_chains`/`numeric_checks`/`dimensional_checks` in `case.json` still autonomously parse `task.md`, synthesize DAG-grounded derivation audits, extract prose numeric parameter values, and emit honest `insufficient_evidence` + `missing_variables` without zero-filling):
+1. **XML/MathML Layered Extraction (`math_ast_guard.parse_xml_formulas`)**: lowers `<mrow>`, `<mfrac>`, `<msub>`, `<msup>`, `<msubsup>`, `<msqrt>`, `<mroot>`, `<mtable>`/`<mtr>`/`<mtd>`, `<mfenced>`, `<mover>`/`<munder>`/`<munderover>`, `<mmultiscripts>`, and `<semantics>` (without concatenating `<annotation>` noise) while recording `source_file`, `formula_id`, `xml_tag`, `label`, and `representation_source`. Preserves braced/Greek subscripts (`{E}_{a}` -> `E_a`, `\eta_0` -> `eta_0`) without splitting subscripts into orphan letters.
+2. **Pix2Text #142 OCR/Transcription Noise Gate (`math_ast_guard.inspect_formula_noise`)**: distinguishes legitimate scientific Chinese inside `\text{}`/`\mathrm{}`/`\operatorname{}` from raw math-mode CJK or Pix2Text-style side-note/CMYK artifacts (`旁注`, `见第`, `.pdf`, `CMYK`), literal tabs/control characters (e.g., corrupted `\tau`/`\theta`), mojibake, unbalanced `()`/`[]`/`{}`, mismatched `\left`/`\right`, and empty `\frac{}{}`. Any halted formula is marked `verification_status: "halted_for_visual_check"` and blocked from blind derivation or numeric evaluation.
+3. **Greek/Subscript-Normalized Variable Provenance Table**: traces each extracted symbol across `publisher-source.xml` `<p>` nodes, `case.json`, and text/PDF inputs using bidirectional Greek Unicode↔LaTeX (`α`↔`\alpha`, `η`↔`\eta`, `Δ`↔`\Delta`, `τ`↔`\tau`) and subscript normalization (`I_0`/`I_{0}`/`I₀`, `E_a`/`E_{a}`, `k_B`), separating `source_defined`, `context_inferred`, `mathematical_constant` (e.g., `\pi`), and `undefined_in_supplied_text`, while validating `unit_hint` via the composite SI unit parser and scoping `range_hint` to the local clause.
+4. **Step-by-Step Derivation & Cross-Equation Dependency DAG Auditor (`math_ast_guard.build_equation_dependency_dag`, `extract_derivation_assumptions_and_boundaries`, `audit_derivation_chain`)**:
+   - Builds an acyclic cross-equation dependency graph (`explicit_citation` edges such as `Eq. (1) -> Eq. (2)`, `derivation_chain` edges, and `symbol_flow` LHS→RHS edges) with Kahn topological ordering.
+   - Automatically extracts grounded assumptions (`assuming`, `provided that`), approximations (`steady state`, `high-overpotential limit`, `for x << 1`, `neglecting`), boundary/domain conditions (`T > 0`, `cutoff`, `boundary condition`), and derivation operations from paper prose with exact paragraph anchors and verbatim quotes.
+   - Audits multi-step algebraic chains and single-step derivations (or auto-synthesized DAG steps when `case.json` omits explicit chains) for symbolic/numeric equivalence, intermediate values (`numeric_before`, `numeric_after`, `rel_error`), AST-evaluated domain predicate compliance (`evaluate_domain_predicate`), and step-level dimensional self-consistency, assigning explicit step verdicts (`verified`, `verified_under_approximation`, `failed_equivalence`, `domain_violation`, `dimensional_mismatch`, `halted_ocr_noise`, `conditional_on_stated_premise`, `not_verifiable_from_supplied_materials`).
+5. **General Composite SI Dimensional Algebra (`math_ast_guard.check_dimensional_balance`)**: parses arbitrary composite expressions (`m s^-2`, `kg*m^2/(s^3*A)`, `J/(mol*K)`, `kJ/mol`, `mA/cm^2`, `mV/dec`, `rpm`, `mg/L`, `eV`, `Pa*s`) with explicit semantic unit notes for dimensionless logarithmic `dec`/decade and epidemiological count denominators, decomposes SI prefixes (`f` to `T`), compares 7-dimensional SI vectors `(L, M, T, I, Theta, N, J)`, and flags both dimensional mismatches (`DIMENSIONAL_MISMATCH`) and silent order-of-magnitude scale offsets (`UNIT_ORDER_OF_MAGNITUDE_OFFSET`).
+6. **Safe Numeric Verification & Dynamic `output_contract` Absorption**: evaluates arithmetic/scientific expressions via Python AST whitelist (zero `eval()`), isolates SymPy reserved names (`E, I, S, N, O, Q, C`), auto-extracts prose parameter values when `case.json.numeric_checks` is omitted, refuses zero-filling when any required variable is absent, and dynamically preserves any `output_contract` fields declared in `case.json`.
+7. **Portable Markdown Notes & Self-Check**: writes `/app/output/formula_notes.md` with `E001...` anchors, the Cross-Equation Dependency DAG table, the Derivation Steps & Boundary Conditions Audit table, and Extracted Prose Premises, then validates it via `math_markdown_validator.py`.
 
 ### Step 2: Host Agent Deep Scientific Audit (Enriching Notes & Derivation Steps)
 After Step 1 writes the deterministic baseline, inspect `/app/output/formula_verification_report.json` and `/app/output/formula_notes.md` against the source paper:
@@ -62,9 +69,10 @@ After Step 1 writes the deterministic baseline, inspect `/app/output/formula_ver
 ### Step 3: Markdown Validation, Grounding Gate & Final Deliverable Audit
 Whenever `formula_notes.md` or `result.json` is updated, re-run all three gates:
 ```bash
-python -B scripts/math_markdown_validator.py /app/output/formula_notes.md --json
-python -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
-python -B scripts/final_audit.py --dir /app/output --result-file result.json --require formula_verification_report.json --require formula_notes.md
+export SKILL_ROOT="${SKILL_ROOT:-/skills/weekly-skill}"
+python3 -B "$SKILL_ROOT/scripts/math_markdown_validator.py" /app/output/formula_notes.md --json
+python3 -B "$SKILL_ROOT/scripts/gap_gate.py" --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
+python3 -B "$SKILL_ROOT/scripts/final_audit.py" --dir /app/output --result-file result.json --require formula_verification_report.json --require formula_notes.md
 ```
 
 ## Reference Specifications

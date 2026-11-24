@@ -9,15 +9,15 @@ description: Build section-aligned literature notes, genre-aware argumentation s
 Use this skill for scientific paper summarization and structured note-taking in Harbor offline sandboxes. It converts supplied scientific sources (`.pdf`, `.md`, `.txt`, `.tex`, `.xml`/JATS, `.json`) into reusable, section-aligned, evidence-anchored research notes rather than generic prose summaries.
 
 Core objectives:
-1. **Genre & Argument Alignment**: Detect article genre (`research_article`, `review`, `perspective`, `benchmark_framework`, `comment`) and follow the paper's actual section sequence and inter-section transitions without forcing rigid templates.
+1. **Genre & Argument Alignment**: Detect article genre (`research_article`, `review`, `perspective`, `benchmark_framework`, `comment`) exposed under both `genre` and `paper_genre.label`, preserve parent-section category inheritance for nested subheadings, strip repeated PDF running headers/footers and floating table/figure numeric blocks into `extracted_floats` (preventing table cells or axis ticks from bloating `DISCUSSION`), and **never promote post-`REFERENCES` prose into `DISCUSSION`/`CONCLUSIONS` without an explicit standalone section heading** (quarantine ambiguous post-references prose as `post_references_unclassified` with a gap warning).
 2. **Discovery Chain & One-Figure-One-Method Lens**: Extract the end-to-end discovery chain (`Problem/Gap -> Method/Operation -> Key Results & Figure Evidence -> Limitations/Prerequisites`) plus per-figure method rationale, control/exclusion scope, and evidence boundary.
-3. **Controlled-Granularity Notes & Three-Layer Attribution**: Emit section-level synthesis cards, a deduplicated terminology/abbreviation glossary, and evidence-density-ranked knowledge points capped for usability. Label every structured claim strictly as `author_reported`, `model_synthesized`, or `not_reported`.
-4. **Authentic Locator Fidelity**: Record real `page` + `extracted_line` for PDFs (and flag blank/scanned pages needing OCR), `paragraph_id` for JATS XML / structured JSON, and `source-line` for Markdown/TXT/TeX. Never fabricate PDF page numbers for non-PDF inputs.
+3. **Controlled-Granularity Notes, Governance Fields & Three-Layer Attribution**: Emit section-level synthesis cards, a deduplicated terminology/abbreviation glossary, evidence-density-ranked knowledge points capped for usability, and explicit `funding`, `ethics`, `data_availability`, `code_availability` fields in `paper_card.json` (genuinely absent fields stay `attribution: "not_reported"` and MUST be written into `gaps` — never mask missing metadata with `gaps=0`). Label every structured claim strictly as `author_reported`, `model_synthesized`, or `not_reported`.
+4. **Authentic Locator Fidelity & Zotero Adapter**: Record real `page` + `extracted_line` for PDFs (flagging blank/scanned pages needing OCR), `paragraph_id` for JATS XML / structured JSON, and `source-line` for Markdown/TXT/TeX. Export `zotero_annotations.json` (aligned with the `zotero-mcp` / Zotero Web API v3 contract, embedding an in-memory BibTeX string without emitting unsolicited `.bib` files) and support case-sensitive verification of imported `zotero_annotations*.json` highlights.
 
 ## Hard Invariants & Guardrails
-- **Never fabricate missing fields or sections**: Unsupported card fields (e.g., missing sample size, controls, or limitations) stay `attribution: "not_reported"` and are logged in `gaps`.
-- **Strict verbatim quote verification**: Every emitted knowledge point quote must pass normalized substring matching inside its exact cited paragraph/block. Cross-paragraph borrowing is forbidden.
-- **Zero `.tsv` artifacts**: Never generate or bundle `.tsv` files inside the Skill or output deliverables.
+- **Never fabricate missing fields or sections**: Unsupported core or governance card fields (`funding`, `ethics`, `data_availability`, `code_availability`, sample size, controls, limitations) stay `attribution: "not_reported"` and are explicitly logged in `gaps`.
+- **Strict case-sensitive verbatim quote & fidelity verification**: `verify_exact_quote` / `verify_quote_strict` normalize whitespace/line-break hyphenation ONLY and strictly preserve character case (never `.lower()` / `.casefold()`). Case-sensitive unit/chemical-symbol/numeric/negation checks (`check_claim_fidelity`) explicitly block `mM` vs `mm`, `Co` vs `CO`, numeric alteration, and negation deletion/insertion. Cross-paragraph borrowing is forbidden.
+- **Zero `.tsv` / `.bib` / `.tex` artifacts**: Never bundle `.tsv`, `.tex`, or `.bib` files inside the Skill package; BibTeX export is embedded as a string inside `zotero_annotations.json` (and via `zotero_adapter.py` API).
 - **Honest modality & OCR boundaries**: When a PDF contains blank text layers or extraction fails without OCR, preserve partial output and emit `PDF_PAGES_NEED_OCR` / `PDF_TEXT_EXTRACTION_FAILED`.
 - **Read `task.md` & actual sources first**: Never infer paper facts from filenames or domain labels.
 
@@ -39,10 +39,11 @@ python3 -B scripts/structured_notes_engine.py \
   --work /app/work \
   --max-kps 12
 ```
-Emits four synchronized deliverables under `/app/output/`:
+Emits five synchronized deliverables under `/app/output/`:
 - `result.json` — Harbor output contract with `case_id`, `status`, `sources`, `uncertainty`, `artifacts`, `metrics`, `findings`, `structured_notes`, and `gaps`.
-- `paper_card.json` — Standalone reusable structured paper card with three-layer attribution (`author_reported` / `model_synthesized` / `not_reported`) and verified anchors.
+- `paper_card.json` — Standalone reusable structured paper card with three-layer attribution (`author_reported` / `model_synthesized` / `not_reported`), verified anchors, and explicit `funding`, `ethics`, `data_availability`, `code_availability` fields.
 - `structured_notes.json` — Full machine-indexable graph: genre classification, ordered section cards with transitions, discovery chain, figure/method audit cards, terminology glossary, and density-ranked knowledge points.
+- `zotero_annotations.json` — Lightweight `zotero-mcp` / Zotero Web API v3 compatible annotation JSON (with embedded BibTeX entry string); existing `zotero_annotations*.json` files placed in `/input` are automatically imported and verified case-sensitively.
 - `structured_notes.md` — Human-readable structured research notes ready for downstream reading or comparative synthesis.
 
 ### Step 3: Host Agent Deepening & Verification
@@ -59,7 +60,7 @@ Inspect `/app/output/structured_notes.json` and `task.md`:
 ```bash
 python3 -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
 python3 -B scripts/final_audit.py --dir /app/output --result-file result.json \
-  --require structured_notes.md --require structured_notes.json --require paper_card.json
+  --require structured_notes.md --require structured_notes.json --require paper_card.json --require zotero_annotations.json
 ```
 
 ## References

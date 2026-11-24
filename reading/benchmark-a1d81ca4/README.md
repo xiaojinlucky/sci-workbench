@@ -19,6 +19,11 @@ Offline Python 3.12 standard-library Skill for auditing, running, scoring, and v
 
 ## Quick Offline Run
 ```bash
-python -B scripts/item_bank_auditor.py --input examples --out /tmp/item_audit.json
-python -B scripts/benchmark_runner.py --input examples --output /tmp/bench_out --work /tmp/bench_work
+python3 -B scripts/item_bank_auditor.py --input examples --out /tmp/item_audit.json
+python3 -B scripts/benchmark_runner.py --input examples --output /tmp/bench_out --work /tmp/bench_work
 ```
+
+## Key Capabilities
+- **Direct `.md`/`.txt`/`.json` Corpus Ingestion**: Automatically indexes `<a id="p...">`, `[P001]`/`[T01]`, markdown pipe tables, and paragraph blocks without manual reformatting.
+- **Per-Criterion 0/1/2 Breakdown**: Emits `criterion_breakdown` (`value_unit_ok`, `keyword_ok`, `anchor_id_ok`, `verbatim_quote_ok`, `citation_parity_ok`, `abstention_ok`) for transparent error attribution.
+- **Auto-vs-Human Calibration Engine**: Computes `exact_agreement_rate`, `within_1_agreement_rate`, `cohens_kappa`, `quadratic_weighted_kappa`, `confusion_matrix`, and `per_item_disagreements[]` when `human_gold_scores` are provided; otherwise emits a stratified `human_calibration_queue[]` without fabricating agreement.

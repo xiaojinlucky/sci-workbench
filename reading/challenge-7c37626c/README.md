@@ -8,15 +8,15 @@ Offline-first, zero-mandatory-dependency Skill for scientific formula extraction
 
 ## Quickstart
 ```bash
-python -B scripts/formula_math_engine.py --input /input --output /app/output --work /app/work
-python -B scripts/math_markdown_validator.py /app/output/formula_notes.md --json
-python -B scripts/final_audit.py --dir /app/output --result-file result.json --require formula_verification_report.json --require formula_notes.md
+python3 -B scripts/formula_math_engine.py --input /input --output /app/output --work /app/work
+python3 -B scripts/math_markdown_validator.py /app/output/formula_notes.md --json
+python3 -B scripts/final_audit.py --dir /app/output --result-file result.json --require formula_verification_report.json --require formula_notes.md
 ```
 
 ## Directory Layout
 - `SKILL.md` — DeepSeek Harness executable workflow and boundaries.
-- `scripts/formula_math_engine.py` — End-to-end formula extraction, provenance, dimensional, numeric, and Markdown generation pipeline.
-- `scripts/math_ast_guard.py` — JATS/MathML deduplicating parser, general composite SI dimensional algebra engine, Pix2Text-class OCR noise detector, and AST/SymPy verifier.
+- `scripts/formula_math_engine.py` — End-to-end formula extraction, Greek/subscript-normalized provenance, derivation-chain & dependency DAG auditing, composite SI dimensional & numeric checks, and Markdown generation pipeline.
+- `scripts/math_ast_guard.py` — JATS/MathML deduplicating parser, step-by-step derivation & cross-equation DAG auditor, domain predicate evaluator, general composite SI dimensional algebra engine, Pix2Text-class OCR noise detector, and AST/SymPy verifier.
 - `scripts/math_markdown_validator.py` — Offline validator for `formula_notes.md` (checks `$`/`$$` balance, bare LaTeX, pseudo-math, literal tabs, and `E...` anchors).
 - `scripts/audit_chain.py` — SHA-256 hash-chained audit log.
 - `scripts/{preflight_probe,result_guard,budget_guard,block_indexer,gap_gate,final_audit}.py` — Harbor runtime guardrails (M1–M6).

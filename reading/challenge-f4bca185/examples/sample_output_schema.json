@@ -13,6 +13,8 @@
     "uncertainty",
     "artifacts",
     "schema_probe_report",
+    "quality_scorecard",
+    "verification_checklist",
     "canonical_records",
     "duplicate_log",
     "context_preserved_log",

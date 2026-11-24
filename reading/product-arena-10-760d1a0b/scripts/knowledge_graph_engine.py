@@ -56,59 +56,101 @@ from kg_query_and_export import (
     run_standard_queries,
 )
 
-# Generalizable scientific entity patterns across chemistry, biology, materials, medicine, and ML/CS
-ENTITY_PATTERNS: dict[str, str] = {
+# Case-sensitive chemical/formula/gene/acronym entities (NEVER matched case-insensitively against common English words!)
+ENTITY_PATTERNS_CASE_SENSITIVE: dict[str, str] = {
     "material_or_entity": (
-        r"\b(?:[A-Z][a-z]?(?:-[A-Z][a-z0-9]+)+(?:\s+(?:catalyst|complex|alloy|oxide|membrane|nanoparticle|electrode))?|"
+        r"\b(?:"
+        r"(?:Cu|Pt|Pd|Fe|Ni|Co|Zn|Ti|Au|Ag)(?:[0-9]+(?:[A-Z][a-z0-9]*)*|(?:-[A-Z][a-z0-9]+)+|/[A-Z][A-Za-z0-9]*|\s+(?:catalyst|nanoparticles?|electrode|oxide))|"
+        r"[A-Z][a-z]?(?:-[A-Z][a-z0-9]+)+(?:\s+(?:catalyst|complex|alloy|oxide|membrane|nanoparticle|electrode))?|"
         r"CO2|CH4|H2O2|NH3|NOx|ATP|DNA|RNA|mRNA|siRNA|CRISPR-Cas9|PD-L1|PD-1|EGFR|TP53|KRAS|HER2|IL-6|TNF-alpha|"
-        r"(?:Cu|Pt|Pd|Fe|Ni|Co|Zn|Ti|Au|Ag)[A-Za-z0-9\-/]*(?:\s+(?:catalyst|nanoparticles?|electrode|oxide))?|"
-        r"zeolite|perovskite|graphene|hydrogel|electrolyte|substrate|catalyst|ligand|inhibitor|antibody|receptor|enzyme|protein|compound|biomarker)\b"
-        r"|催化剂|配合物|电极|纳米颗粒|抑制剂|抗体|受体|酶|生物标志物|材料"
+        r"T-cells?"
+        r")\b"
     ),
     "method_or_model": (
         r"\b(?:DFT|XPS|XRD|SEM|TEM|NMR|FTIR|LC-MS|GC-MS|RNA-seq|scRNA-seq|ChIP-seq|ATAC-seq|WGS|WES|PCR|qPCR|ELISA|FACS|"
-        r"Transformer|BERT|GPT-[0-9A-Za-z.\-]+|ResNet(?:-\d+)?|GNN|GCN|GAT|CNN|RNN|LSTM|Random\s+Forest|XGBoost|LightGBM|SVM|"
-        r"AdamW?|SGD|LoRA|RAG|BM25|SPECTER2?|SciBERT|BioBERT|AlphaFold\d?|ESM-?\d?|"
-        r"density\s+functional\s+theory|molecular\s+dynamics|flow\s+cytometry|mass\s+spectrometry|western\s+blot|meta-analysis|ablation\s+study)\b"
-        r"|密度泛函理论|分子动力学|质谱|流式细胞术|随机森林|图神经网络|微调|表征方法"
-    ),
-    "task_or_domain": (
-        r"\b(?:CO2\s+hydrogenation|CO2\s+reduction|water\s+splitting|oxygen\s+evolution|hydrogen\s+evolution|nitrogen\s+fixation|"
-        r"drug\s+discovery|protein\s+folding|cell\s+type\s+annotation|tumor\s+microenvironment|cancer\s+immunotherapy|"
-        r"question\s+answering|information\s+extraction|relation\s+extraction|document\s+parsing|entity\s+linking|citation\s+verification|"
-        r"hydrogenation|electroreduction|photocatalysis|immunotherapy|classification|segmentation|forecasting)\b"
-        r"|加氢反应|电催化还原|药物发现|蛋白质折叠|免疫治疗|关系抽取|文献解析"
+        r"RDE|RRDE|MEA|PEM|AEM|OER|HER|ORR|CO2RR|"
+        r"Paper2Agent|AlphaGenome|Scanpy|TISSUE|Seurat|Biomni|MCP\s+servers?|MCP\s+tools?|AI\s+agents?|LLMs?|"
+        r"Claude\s*\+\s*Repo|Claude\s+Code|DeepSeek|Gemini|GPT-[0-9A-Za-z.\-]+|Transformer|BERT|ResNet(?:-\d+)?|GNN|GCN|GAT|CNN|RNN|LSTM|"
+        r"XGBoost|LightGBM|SVM|AdamW?|SGD|LoRA|RAG|BM25|SPECTER2?|SciBERT|BioBERT|AlphaFold\d?|ESM-?\d?)\b"
     ),
     "dataset_or_cohort": (
-        r"\b(?:TCGA(?:-[A-Z]+)?|GEO|GSE\d+|UK\s+Biobank|MIMIC-(?:III|IV)|PubMedQA|BioASQ|SciFact|QASPER|arXiv|OpenAlex|PubMed|PMLB|ImageNet|CIFAR-\d+|GLUE|MMLU|SQuAD|"
-        r"clinical\s+cohort|validation\s+cohort|patient\s+cohort|benchmark\s+dataset)\b"
-        r"|临床队列|验证队列|基准数据集"
+        r"\b(?:SINAN|IBGE|ICD-?10|AERS|FAERS|VAERS|WHO\s+Vigibase|FDA|CDER|CBER|"
+        r"TCGA(?:-[A-Z]+)?|GEO|GSE\d+|UK\s+Biobank|MIMIC-(?:III|IV)|"
+        r"PubMedQA|BioASQ|SciFact|QASPER|arXiv|OpenAlex|PubMed|PMLB|ImageNet|CIFAR-\d+|GLUE|MMLU|SQuAD|GWAS)\b"
     ),
     "metric_or_endpoint": (
-        r"\b(?:Faradaic\s+efficiency|methanol\s+selectivity|CO2\s+conversion|turnover\s+frequency|TOF|overpotential|current\s+density|"
-        r"AUROC|AUC|AUPRC|F1(?:-score)?|precision|recall|accuracy|RMSE|MAE|R\^?2|p-value|hazard\s+ratio|odds\s+ratio|overall\s+survival|PFS|IC50|EC50|"
-        r"selectivity|efficiency|yield|sensitivity|specificity|latency|throughput)\b"
-        r"|法拉第效率|选择性|转化率|过电位|准确率|召回率|总生存期"
+        r"\b(?:TOF|AAPC|APC|AUROC|AUC|AUPRC|F1(?:-score)?|RMSE|MAE|R\^?2|PFS|IC50|EC50|95%\s*CI)\b"
     ),
 }
 
-ENTITY_RE = re.compile("|".join(f"(?P<{cat}>{pat})" for cat, pat in ENTITY_PATTERNS.items()), re.I)
+# Case-insensitive multi-word / domain-specific scientific nouns across disciplines
+ENTITY_PATTERNS_CI: dict[str, str] = {
+    "material_or_entity": (
+        r"\b(?:zeolite|perovskite|graphene|hydrogel|electrolyte|substrate|catalyst|ligand|inhibitor|antibody|receptor|enzyme|protein|compound|biomarker|"
+        r"medications?|medicines?|pesticides?|toxic\s+agents?|venomous\s+animals?|household\s+cleaning\s+products?|"
+        r"adverse\s+(?:events?|drug\s+reactions?)|safety\s+signals?|drug\s+products?|"
+        r"children\s+and\s+adolescents|adolescents|patients?|macrophages?|genomic\s+variants?|single-cell\s+transcriptomics)\b"
+        r"|催化剂|配合物|电极|纳米颗粒|抑制剂|抗体|受体|酶|生物标志物|材料|药物|农药|毒物"
+    ),
+    "method_or_model": (
+        r"\b(?:large\s+language\s+models?|paper\s+agents?|random\s+forest|"
+        r"(?:joinpoint|inflection\s+point|logistic|linear|Cox|Poisson)\s+regression(?:\s+model)?|"
+        r"data\s+mining|signal\s+detection|spontaneous\s+reporting|case-control\s+stud(?:y|ies)|cohort\s+stud(?:y|ies)|"
+        r"rotating\s+disk\s+electrode|benchmarking\s+protocol|electrochemical\s+measurement|"
+        r"time-series\s+analysis|descriptive\s+statistics|spatial\s+transcriptomics|multi-agent\s+(?:framework|workflow|system)|"
+        r"density\s+functional\s+theory|molecular\s+dynamics|flow\s+cytometry|mass\s+spectrometry|western\s+blot|meta-analysis|ablation\s+study)\b"
+        r"|密度泛函理论|分子动力学|质谱|流式细胞术|随机森林|图神经网络|微调|表征方法|回归模型|时间序列分析"
+    ),
+    "task_or_domain": (
+        r"\b(?:CO2\s+hydrogenation|CO2\s+reduction|water\s+splitting|oxygen\s+evolution(?:\s+reaction)?|hydrogen\s+evolution|nitrogen\s+fixation|"
+        r"exogenous\s+(?:intoxications?|poisonings?)|suicide\s+attempts?|accidental\s+poisonings?|pharmacovigilance|pharmacoepidemiolog(?:ic|y)|"
+        r"postmarketing\s+(?:surveillance|safety)|risk\s+assessment|drug\s+safety|"
+        r"drug\s+discovery|protein\s+folding|cell\s+type\s+annotation|spatial\s+gene\s+expression\s+prediction|"
+        r"genomic\s+variant\s+interpretation|tumor\s+microenvironment|cancer\s+immunotherapy|"
+        r"question\s+answering|information\s+extraction|relation\s+extraction|document\s+parsing|entity\s+linking|citation\s+verification|"
+        r"hydrogenation|electroreduction|photocatalysis|immunotherapy|classification|segmentation|forecasting|reproducibility)\b"
+        r"|加氢反应|电催化还原|药物发现|蛋白质折叠|免疫治疗|关系抽取|文献解析|外源性中毒"
+    ),
+    "dataset_or_cohort": (
+        r"\b(?:Notifiable\s+Diseases\s+Information\s+System|spontaneous\s+reporting\s+database|case\s+series|"
+        r"GitHub\s+repositor(?:y|ies)|open-source\s+codebases?|public\s+domain\s+data|"
+        r"clinical\s+cohort|validation\s+cohort|patient\s+cohort|benchmark\s+dataset|reference\s+codebase)\b"
+        r"|临床队列|验证队列|基准数据集|公开数据库"
+    ),
+    "metric_or_endpoint": (
+        r"\b(?:Faradaic\s+efficiency|methanol\s+selectivity|CO2\s+conversion|turnover\s+frequency|overpotential|current\s+density|"
+        r"median\s+runtime|runtime|annual\s+percent\s+change|average\s+annual\s+percent\s+change|incidence\s+rates?|mortality\s+rates?|prevalence|temporal\s+trends?|"
+        r"confidence\s+interval|precision|recall|accuracy|p-value|hazard\s+ratio|odds\s+ratio|"
+        r"overall\s+survival|success\s+rate|pass\s+rate|selectivity|efficiency|yield|sensitivity|specificity|latency|throughput)\b"
+        r"|法拉第效率|选择性|转化率|过电位|准确率|召回率|总生存期|发病率|年均变化百分比|运行时间"
+    ),
+}
+
+ENTITY_RE_CS = re.compile("|".join(f"(?P<{cat}>{pat})" for cat, pat in ENTITY_PATTERNS_CASE_SENSITIVE.items()))
+ENTITY_RE_CI = re.compile("|".join(f"(?P<{cat}>{pat})" for cat, pat in ENTITY_PATTERNS_CI.items()), re.I)
 ABBR_DEF_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9\- ]{3,55}?)\s*\(([A-Z][A-Za-z0-9\-]{1,14})\)")
 
 # Controlled directed relations (strictly excluding mere co-occurrence!)
 DIRECTED_LINKS: dict[str, str] = {
-    "uses": r"\b(?:uses?|used|employs?|employed|utilizes?|utilized|adopts?|adopted|applies|applied|relies\s+on)\b|使用|采用|应用",
-    "evaluates_on": r"\b(?:evaluates?\s+on|evaluated\s+on|benchmarks?\s+on|benchmarked\s+on|tested\s+on|trained\s+on|validated\s+on)\b|在.+上评测|在.+上验证",
-    "outperforms": r"\b(?:outperforms?|outperformed|surpasses?|surpassed|exceeds?|exceeded|improves?\s+over)\b|优于|超过",
+    "uses": r"\b(?:uses?|used|employs?|employed|utilizes?|utilized|adopts?|adopted|applies|applied|relies\s+on|built\s+on|integrates?|converts?|leverag(?:es?|ed|ing))\b|使用|采用|应用",
+    "evaluates_on": r"\b(?:evaluates?\s+on|evaluated\s+on|benchmarks?\s+on|benchmarked\s+on|tested\s+on|trained\s+on|validated\s+on|extracted\s+from|collected\s+from|analyzed\s+using|assess(?:es|ed|ing)?|evaluat(?:es|ed|ing)|detect(?:s|ed|ing)?|monitor(?:s|ed|ing)?)\b|在.+上评测|在.+上验证|提取自|评估",
+    "outperforms": r"\b(?:outperforms?|outperformed|outperforming|surpasses?|surpassed|exceeds?|exceeded|improves?\s+over|higher\s+than)\b|优于|超过",
     "compares_with": r"\b(?:compares?\s+with|compared\s+with|compared\s+to|benchmarked\s+against|versus|vs\.)\b|相比|对比",
-    "supports": r"\b(?:supports?|supported|confirms?|confirmed|corroborates?|corroborated|validates?|validated)\b|支持|证实",
+    "supports": r"\b(?:supports?|supported|confirms?|confirmed|corroborates?|corroborated|validates?|validated|matches?|reproduces?|enables?|enabled)\b|支持|证实|复现|赋能",
     "contradicts": r"\b(?:contradicts?|contradicted|refutes?|refuted|conflicts?\s+with|disagrees?\s+with)\b|反驳|相矛盾|冲突",
-    "increases": r"\b(?:increases?|increased|enhances?|enhanced|elevates?|elevated|boosts?|boosted|raises?|raised)\b|提高|增加|增强",
-    "decreases": r"\b(?:decreases?|decreased|reduces?|reduced|lowers?|lowered|diminishes?|diminished)\b|降低|减少",
+    "increases": r"\b(?:increases?|increased|enhances?|enhanced|elevates?|elevated|boosts?|boosted|raises?|raised|grew|rose)\b|提高|增加|增强",
+    "decreases": r"\b(?:decreases?|decreased|reduces?|reduced|lowers?|lowered|diminishes?|diminished|declined)\b|降低|减少|下降",
     "inhibits": r"\b(?:inhibits?|inhibited|suppresses?|suppressed|blocks?|blocked)\b|抑制|阻断",
     "activates": r"\b(?:activates?|activated|induces?|induced|promotes?|promoted|upregulates?|upregulated)\b|激活|诱导|促进",
-    "associated_with": r"\b(?:correlates?\s+with|correlated\s+with|(?:is|was|are|were)\s+associated\s+with)\b|相关",
+    "associated_with": r"\b(?:correlates?\s+with|correlated\s+with|(?:is|was|are|were)\s+(?:significantly\s+)?associated\s+with)\b|相关",
     "causes_direct": r"\b(?:directly\s+causes?|causally\s+drives?|causally\s+induces?)\b|直接导致",
+}
+
+PASSIVE_DIRECTED_LINKS: dict[str, str] = {
+    "uses": r"\b(?:was|were|is|are)\s+(?:analyzed|performed|estimated|calculated|implemented|modeled|built)\s+(?:using|via|with|by)\b",
+    "evaluates_on": r"\b(?:was|were|is|are)\s+(?:evaluated|tested|validated|benchmarked)\s+(?:on|across|against)\b",
+    "inhibits": r"\b(?:was|were|is|are)\s+(?:inhibited|suppressed|blocked)\s+by\b",
+    "activates": r"\b(?:was|were|is|are)\s+(?:activated|induced|promoted|enabled)\s+by\b",
 }
 
 HEDGED_OR_NEGATED_RE = re.compile(
@@ -129,11 +171,36 @@ CONDITION_RE = re.compile(
 )
 SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\u4e00-\u9fff])|(?<=[。！？])")
 
+COMPARISON_BASELINE_CUE_RE = re.compile(
+    r"\b(?:relative\s+to|compared\s+(?:with|to)|versus|vs\.|than\b)",
+    re.I,
+)
+CLAUSE_BREAK_RE = re.compile(
+    r"(?:;|,\s+(?:together\s+with|whereas|while|however|although|therefore|thus|moreover|furthermore)\b)",
+    re.I,
+)
+# Explicit semantic argument-role constraints: (allowed_subject_categories, allowed_object_categories)
+RELATION_ROLE_RULES: dict[str, tuple[set[str], set[str]]] = {
+    "uses": ({"method_or_model", "material_or_entity"}, {"method_or_model", "material_or_entity", "dataset_or_cohort", "task_or_domain"}),
+    "evaluates_on": ({"method_or_model", "material_or_entity"}, {"dataset_or_cohort", "task_or_domain", "material_or_entity", "method_or_model"}),
+    "outperforms": ({"method_or_model", "material_or_entity"}, {"method_or_model", "material_or_entity"}),
+    "compares_with": ({"method_or_model", "material_or_entity"}, {"method_or_model", "material_or_entity"}),
+    "supports": ({"method_or_model", "material_or_entity", "dataset_or_cohort"}, {"task_or_domain", "dataset_or_cohort", "method_or_model", "material_or_entity", "metric_or_endpoint"}),
+    "contradicts": ({"method_or_model", "material_or_entity", "dataset_or_cohort"}, {"method_or_model", "material_or_entity", "dataset_or_cohort", "task_or_domain"}),
+    "increases": ({"method_or_model", "material_or_entity"}, {"metric_or_endpoint", "material_or_entity", "task_or_domain"}),
+    "decreases": ({"method_or_model", "material_or_entity"}, {"metric_or_endpoint", "material_or_entity", "task_or_domain"}),
+    "inhibits": ({"method_or_model", "material_or_entity"}, {"material_or_entity", "task_or_domain", "metric_or_endpoint"}),
+    "activates": ({"method_or_model", "material_or_entity"}, {"material_or_entity", "task_or_domain", "metric_or_endpoint"}),
+    "associated_with": ({"material_or_entity", "method_or_model", "task_or_domain", "dataset_or_cohort"}, {"material_or_entity", "task_or_domain", "metric_or_endpoint"}),
+    "causes_direct": ({"material_or_entity", "method_or_model"}, {"material_or_entity", "task_or_domain", "metric_or_endpoint"}),
+}
+
 GENERIC_NON_MERGE_TERMS = {
     "catalyst", "material", "electrode", "substrate", "electrolyte", "compound", "protein", "enzyme", "receptor",
     "method", "model", "protocol", "calculation", "synthesis", "microscopy", "spectroscopy",
     "dataset", "cohort", "patient cohort", "clinical cohort", "validation cohort", "benchmark dataset",
-    "selectivity", "efficiency", "yield", "accuracy", "precision", "recall", "f1", "auc", "auroc",
+    "patients", "patient", "medications", "medication", "medicines", "adverse events", "adverse event", "drug products",
+    "selectivity", "efficiency", "yield", "accuracy", "precision", "recall", "f1", "auc", "auroc", "incidence rates", "prevalence",
     "classification", "hydrogenation", "reduction", "oxidation", "evaluation",
 }
 
@@ -387,11 +454,23 @@ def build_knowledge_graph(
             if "page" in para:
                 ev_base["page"] = para["page"]
 
-            # Collect non-overlapping entity spans in sentence order
-            spans: list[tuple[re.Match[str], str]] = []
-            for m in ENTITY_RE.finditer(sent):
-                label = _norm_ws(m.group(0))
-                cat = str(m.lastgroup)
+            # Collect non-overlapping entity spans (combining case-sensitive chemical/acronym and case-insensitive domain matches)
+            raw_matches: list[tuple[int, int, str, str]] = []
+            for m in ENTITY_RE_CS.finditer(sent):
+                raw_matches.append((m.start(), m.end(), str(m.lastgroup), _norm_ws(m.group(0))))
+            for m in ENTITY_RE_CI.finditer(sent):
+                raw_matches.append((m.start(), m.end(), str(m.lastgroup), _norm_ws(m.group(0))))
+            # Sort by start ascending, longer span first, and drop overlapping shorter spans
+            raw_matches.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+            dedup_matches: list[tuple[int, int, str, str]] = []
+            last_end = -1
+            for st, en, cat, lbl in raw_matches:
+                if st >= last_end:
+                    dedup_matches.append((st, en, cat, lbl))
+                    last_end = en
+
+            spans: list[tuple[tuple[int, int], str]] = []
+            for st, en, cat, label in dedup_matches:
                 # Within-paper canonicalization if abbreviation was explicitly defined in the same paper
                 canonical_label = paper_abbr_map[sid].get(label.casefold(), label)
                 eid = stable_id(sid, cat, canonical_label.casefold())
@@ -413,15 +492,14 @@ def build_knowledge_graph(
                     node["aliases"].append(label)
                 if ev_base not in node["evidence"]:
                     node["evidence"].append(ev_base)
-                spans.append((m, eid))
+                spans.append(((st, en), eid))
 
-            # Evaluate adjacent entity pairs for explicit directed relations vs undirected co-occurrence
-            for (left_m, src_id), (right_m, tgt_id) in zip(spans, spans[1:]):
+            # Evaluate entity pairs using explicit same-clause (agent, predicate, patient, comparison_baseline, condition) role verification
+            for pair_idx, ((left_span, src_id), (right_span, tgt_id)) in enumerate(zip(spans, spans[1:])):
                 if src_id == tgt_id:
                     continue
-                between = sent[left_m.end() : right_m.start()]
+                between = sent[left_span[1] : right_span[0]]
                 if len(between) > 90:
-                    # Too distant for direct relation; record undirected co-occurrence only
                     pair_ids = sorted((src_id, tgt_id))
                     cid = stable_id("coocc", pair_ids[0], pair_ids[1], sid, str(pid or para["paragraph_index"]))
                     co_occ_map.setdefault(cid, {
@@ -437,13 +515,29 @@ def build_knowledge_graph(
                     continue
 
                 matched_rel = None
-                for rel_name, rel_pat in DIRECTED_LINKS.items():
-                    if re.search(rel_pat, between, re.I):
+                reverse_dir = False
+                rel_match_obj = None
+                for rel_name, rel_pat in PASSIVE_DIRECTED_LINKS.items():
+                    m_p = re.search(rel_pat, between, re.I)
+                    if m_p:
                         matched_rel = rel_name
+                        rel_match_obj = m_p
+                        if rel_name in {"inhibits", "activates"}:
+                            reverse_dir = True
                         break
+                if matched_rel is None:
+                    for rel_name, rel_pat in DIRECTED_LINKS.items():
+                        m_rel = re.search(rel_pat, between, re.I)
+                        if m_rel:
+                            prev_b = between[: m_rel.start()].strip().lower()
+                            tok_b = m_rel.group(0).strip().lower()
+                            if re.search(r"\b(?:a|an|the|their|its|most|more|widely|commonly|indiscriminate|accidental|chronic|acute|of|for)\b$", prev_b) and tok_b in {"use", "used", "uses"}:
+                                continue
+                            matched_rel = rel_name
+                            rel_match_obj = m_rel
+                            break
 
                 if matched_rel is None:
-                    # Pure co-occurrence: NEVER fabricate a causal or directional edge!
                     pair_ids = sorted((src_id, tgt_id))
                     cid = stable_id("coocc", pair_ids[0], pair_ids[1], sid, str(pid or para["paragraph_index"]))
                     co_occ_map.setdefault(cid, {
@@ -479,22 +573,124 @@ def build_knowledge_graph(
                     })
                     continue
 
+                # Same-clause boundary check: block cross-clause modifier/subordinate bleed (e.g., "As ... suicide attempt, continuous monitoring ..., assessment of patients")
+                if CLAUSE_BREAK_RE.search(between) or between.count(",") >= 2:
+                    held_for_review.append({
+                        "reason": "CROSS_CLAUSE_ARGUMENT_MISMATCH",
+                        "source_name": nodes[src_id]["name"],
+                        "candidate_relation": matched_rel,
+                        "target_name": nodes[tgt_id]["name"],
+                        "between_span": _norm_ws(between),
+                        "evidence": ev_base,
+                    })
+                    continue
+
+                eff_src, eff_tgt = (tgt_id, src_id) if reverse_dir else (src_id, tgt_id)
+                src_cat = nodes[eff_src]["category"]
+                tgt_cat = nodes[eff_tgt]["category"]
+                allowed_src, allowed_tgt = RELATION_ROLE_RULES.get(matched_rel, (set(), set()))
+
+                # Guard against baseline-cue hijacking patient role (e.g., "reduces median runtime relative to Claude + Repo" -> baseline, not patient!)
+                after_verb = between[rel_match_obj.end() :] if rel_match_obj else between
+                comparison_baseline: str | None = None
+                if matched_rel in {"increases", "decreases"} and COMPARISON_BASELINE_CUE_RE.search(after_verb):
+                    held_for_review.append({
+                        "reason": "COMPARISON_BASELINE_MISBOUND_AS_PATIENT",
+                        "source_name": nodes[eff_src]["name"],
+                        "candidate_relation": matched_rel,
+                        "target_name": nodes[eff_tgt]["name"],
+                        "detail": "Right-hand entity follows a comparison-baseline cue ('relative to'/'compared with'/'than') and is a baseline, not the modified target.",
+                        "evidence": ev_base,
+                    })
+                    continue
+
+                # If right-hand entity is a metric modified by increases/decreases, check if a comparison baseline follows in the same clause
+                if matched_rel in {"increases", "decreases"} and tgt_cat == "metric_or_endpoint":
+                    after_tgt = sent[right_span[1] : min(len(sent), right_span[1] + 95)]
+                    bm = COMPARISON_BASELINE_CUE_RE.search(after_tgt)
+                    if bm:
+                        for next_sp, next_eid in spans[pair_idx + 2 :]:
+                            if next_sp[0] >= right_span[1] + bm.start() and next_sp[0] <= right_span[1] + 95:
+                                comparison_baseline = nodes[next_eid]["name"]
+                                break
+
+                # Guard against metric acting as agent in outperforms/compares_with: resolve explicit named agent earlier in same clause or hold for review!
+                resolved_metric_axis: str | None = None
+                if matched_rel in {"outperforms", "compares_with"} and src_cat == "metric_or_endpoint":
+                    resolved_metric_axis = nodes[eff_src]["name"]
+                    # Look backward in the SAME clause for an explicit named method_or_model / material_or_entity agent
+                    resolved_agent_id = None
+                    for prev_sp, prev_eid in reversed(spans[:pair_idx]):
+                        inter = sent[prev_sp[1] : left_span[0]]
+                        if len(inter) <= 75 and not CLAUSE_BREAK_RE.search(inter) and "." not in inter and "?" not in inter:
+                            if nodes[prev_eid]["category"] in allowed_src and prev_eid != eff_tgt:
+                                resolved_agent_id = prev_eid
+                                break
+                    if resolved_agent_id is not None:
+                        eff_src = resolved_agent_id
+                        src_cat = nodes[eff_src]["category"]
+                        comparison_baseline = nodes[eff_tgt]["name"]
+                    else:
+                        held_for_review.append({
+                            "reason": "INVALID_ARGUMENT_ROLE_METRIC_AS_AGENT",
+                            "source_name": nodes[eff_src]["name"],
+                            "candidate_relation": matched_rel,
+                            "target_name": nodes[eff_tgt]["name"],
+                            "detail": "Metric/endpoint cannot be the agent of outperforms/compares_with without an explicit named method/entity in the same clause.",
+                            "evidence": ev_base,
+                        })
+                        continue
+
+                # Enforce strict semantic argument-role matrix on (agent_category, patient_category)
+                if (allowed_src and src_cat not in allowed_src) or (allowed_tgt and tgt_cat not in allowed_tgt):
+                    held_for_review.append({
+                        "reason": "INVALID_ARGUMENT_ROLE_CATEGORY",
+                        "source_name": nodes[eff_src]["name"],
+                        "source_category": src_cat,
+                        "candidate_relation": matched_rel,
+                        "target_name": nodes[eff_tgt]["name"],
+                        "target_category": tgt_cat,
+                        "detail": f"Role check failed for '{matched_rel}': got ({src_cat} -> {tgt_cat}).",
+                        "evidence": ev_base,
+                    })
+                    continue
+
                 cond_m = CONDITION_RE.search(sent)
                 cond_str = _norm_ws(cond_m.group(0)).rstrip(",.;:") if cond_m else None
-                rid = stable_id(src_id, matched_rel, tgt_id, sid, str(pid), sent)
-                edges_map.setdefault(rid, {
-                    "relation_id": rid,
-                    "source_entity": src_id,
-                    "source_name": nodes[src_id]["name"],
-                    "target_entity": tgt_id,
-                    "target_name": nodes[tgt_id]["name"],
-                    "relation_type": matched_rel,
-                    "directed": True,
-                    "condition": cond_str,
-                    "attribution": attribution,
-                    "evidence_strength": "secondary_citation" if attribution == "cited_secondary" else "direct_text_evidence",
-                    "evidence": ev_base,
-                })
+                # Canonical deduplication key: (source_entity, relation_type, target_entity, condition) -> merges multi-paragraph duplicate assertions!
+                rid = stable_id(eff_src, matched_rel, eff_tgt, sid, cond_str or "")
+                if rid in edges_map:
+                    existing = edges_map[rid]
+                    if ev_base not in existing["supporting_evidence"]:
+                        existing["supporting_evidence"].append(ev_base)
+                        existing["evidence_count"] = len(existing["supporting_evidence"])
+                else:
+                    edges_map[rid] = {
+                        "relation_id": rid,
+                        "source_entity": eff_src,
+                        "source_name": nodes[eff_src]["name"],
+                        "target_entity": eff_tgt,
+                        "target_name": nodes[eff_tgt]["name"],
+                        "relation_type": matched_rel,
+                        "directed": True,
+                        "role_verified": True,
+                        "argument_roles": {
+                            "agent": nodes[eff_src]["name"],
+                            "agent_category": src_cat,
+                            "predicate": matched_rel,
+                            "patient": nodes[eff_tgt]["name"],
+                            "patient_category": tgt_cat,
+                            "metric_axis": resolved_metric_axis,
+                            "comparison_baseline": comparison_baseline,
+                            "condition": cond_str,
+                        },
+                        "condition": cond_str,
+                        "attribution": attribution,
+                        "evidence_strength": "secondary_citation" if attribution == "cited_secondary" else "direct_text_evidence",
+                        "evidence": ev_base,
+                        "supporting_evidence": [ev_base],
+                        "evidence_count": 1,
+                    }
 
     return nodes, list(edges_map.values()), list(co_occ_map.values()), held_for_review, paper_abbr_map
 

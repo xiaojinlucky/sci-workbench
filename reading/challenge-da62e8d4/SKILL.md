@@ -27,33 +27,38 @@ Never collapse these four tiers into a single "reproduced" claim:
 - **Output directory**: `/app/output` (`result.json`, `reproduction_audit_report.json`, `reproduction_report.md`).
 
 ## Deterministic Execution Workflow
-Locate scripts relative to this `SKILL.md` directory (`scripts/`).
+Always resolve scripts via `SKILL_ROOT` (installed at `/skills/weekly-skill` in container runs) so commands succeed from `/app/work` or any working directory, or invoke `bash "$SKILL_ROOT/scripts/run.sh"` directly.
 
 ### Step 1: Preflight, Lockfile Drift Doctor & Controlled Multi-Run Audit
 ```bash
-python -B scripts/preflight_probe.py --input /input --output /app/output --out /app/work/env.json
-python -B scripts/budget_guard.py --state /app/work/.budget_state.json --init
-python -B scripts/env_lock_doctor.py --input /input --out /app/work/env_doctor.json
-python -B scripts/repro_audit_runner.py --input /input --output /app/output --work /app/work --repeats 2
+export SKILL_ROOT="${SKILL_ROOT:-/skills/weekly-skill}"
+python3 -B "$SKILL_ROOT/scripts/preflight_probe.py" --input /input --output /app/output --out /app/work/env.json
+python3 -B "$SKILL_ROOT/scripts/budget_guard.py" --state /app/work/.budget_state.json --init
+python3 -B "$SKILL_ROOT/scripts/env_lock_doctor.py" --input /input --out /app/work/env_doctor.json
+python3 -B "$SKILL_ROOT/scripts/repro_audit_runner.py" --input /input --output /app/output --work /app/work --repeats 2
+# One-click equivalent (runs Steps 1 & 3 end-to-end):
+# bash "$SKILL_ROOT/scripts/run.sh" /input /app/output /app/work 2
 ```
 `repro_audit_runner.py` executes the full deterministic audit:
 1. **Environment & Lockfile Drift (`env_lock_doctor.py`)**: scans `environment.yml`, `requirements*.txt`, `pyproject.toml`, `conda-lock.yml`, `uv.lock`, `poetry.lock`, `Dockerfile`, `README*`, `LICENSE*`, `CITATION.cff`; flags Conda+pip mixing, unpinned deps, platform-bound builds, and declared-vs-installed runtime version drift; emits the `research_repo_doctor_checklist`.
-2. **Deep AST Hyperparameter & Seed Hygiene Audit**: extracts top-level constants (including negative & annotated), function defaults, `argparse.add_argument(..., default=...)`, config dicts, and `@dataclass` field defaults; inspects `random.seed`, `np.random.seed`, `default_rng`, `torch.manual_seed`, `PYTHONHASHSEED`, and unseeded stochastic RNG calls; classifies every parameter into `matched`, `paper_code_conflict`, `paper_only_missing_in_code`, or `code_only_undocumented`.
-3. **Isolated Repeat Execution & Jitter Check**: executes every candidate script across isolated subdirectories (`--repeats 2` by default) with `PYTHONHASHSEED` injected, recording exact commands, exit codes, elapsed times, and input/output SHA-256 digests. Compares repeat outputs to detect stochastic jitter (`STOCHASTIC_RUN_JITTER`).
-4. **Failed-Run Segregation & A Priori Tolerance Verification**: excludes failed/timeout runs from tolerance pass/fail counts and lists them separately in `failed_runs_excluded[]`. Evaluates clean-exit metrics strictly against pre-declared `abs_tol`/`rel_tol` without post-hoc relaxation.
-5. **Evidence-Backed Five-Axis Discrepancy Attribution**: assigns primary and supporting root-cause axes (`environment_or_seed`, `parameter_mismatch`, `data_or_split_difference`, `implementation_difference`, `paper_underspecification`) with concrete line/jitter/drift/missing-data evidence.
-6. **Report Generation**: writes `/app/output/reproduction_audit_report.json`, `/app/output/reproduction_report.md`, and `/app/output/result.json`.
+2. **Paper Prose Indexing & Exact Locator/Quote Anchoring (`collect_paper_blocks`, `bind_paper_anchor`)**: scans supplied `.md`, `.txt`, `.pdf`, `.xml`, and `case.json` paper excerpts; binds every hyperparameter in `parameter_reconciliation` and every target metric in `tolerance_comparisons` to exact `paper_source_file`, `paper_locator` (Page / Section / Table / Equation / Line span), verbatim `paper_quote`, and `paper_anchor_status` (`anchored_exact`, `anchored_context`, `not_found_in_supplied_prose`, or `not_applicable_code_only`).
+3. **Deep AST Hyperparameter & Seed Hygiene Audit**: extracts top-level constants (including negative & annotated), function defaults, `argparse.add_argument(..., default=...)`, config dicts, and `@dataclass` field defaults; inspects `random.seed`, `np.random.seed`, `default_rng`, `torch.manual_seed`, `PYTHONHASHSEED`, and unseeded stochastic RNG calls; classifies every parameter into `matched`, `paper_code_conflict`, `paper_only_missing_in_code`, or `code_only_undocumented`.
+4. **Isolated Repeat Execution & Jitter Check**: executes every candidate script across isolated subdirectories (`--repeats 2` by default) with `PYTHONHASHSEED` injected, recording exact commands, exit codes, elapsed times, and input/output SHA-256 digests. Compares repeat outputs to detect stochastic jitter (`STOCHASTIC_RUN_JITTER`).
+5. **Failed-Run Segregation & A Priori Tolerance Verification**: excludes failed/timeout runs from tolerance pass/fail counts and lists them separately in `failed_runs_excluded[]`. Evaluates clean-exit metrics strictly against pre-declared `abs_tol`/`rel_tol` without post-hoc relaxation.
+6. **Evidence-Backed Five-Axis Discrepancy Attribution**: assigns primary and supporting root-cause axes (`environment_or_seed`, `parameter_mismatch`, `data_or_split_difference`, `implementation_difference`, `paper_underspecification`) with concrete line/jitter/drift/missing-data evidence.
+7. **Dynamic `output_contract` Absorption & Execution Telemetry**: dynamically populates all fields declared in `case.json.output_contract` (recording unmapped custom keys honestly as `null` with `output_contract_compliance`) and records phase timings, step count, and repeat-run counts in `execution_telemetry`, writing `/app/output/reproduction_audit_report.json`, `/app/output/reproduction_report.md`, and `/app/output/result.json`.
 
 ### Step 2: Host Agent Scientific Synthesis & Evidence Cross-Check
 Inspect `/app/output/reproduction_audit_report.json` and `/app/output/reproduction_report.md` alongside the paper prose in `/input`:
-1. Confirm that every paper-reported hyperparameter, split ratio, and preprocessing step from the paper text/appendix is reflected in the reconciliation table (flagging unstated details as `paper_underspecification` rather than guessing).
+1. Confirm that every paper-reported hyperparameter, split ratio, and preprocessing step from the paper text/appendix is reflected in the reconciliation table with verified `paper_locator` and `paper_quote` (flagging unstated details as `paper_underspecification` rather than guessing).
 2. Verify that failed runs and omitted metrics are reported separately from successful tolerance counts.
 3. Verify that `Data/Code Availability` and missing original repositories or datasets (such as unavailable PMLB splits or proprietary checkpoints) remain explicitly documented in `missing_original_materials[]`.
 
 ### Step 3: Grounding & Final Deliverable Audit
 ```bash
-python -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
-python -B scripts/final_audit.py --dir /app/output --result-file result.json --require reproduction_audit_report.json --require reproduction_report.md
+export SKILL_ROOT="${SKILL_ROOT:-/skills/weekly-skill}"
+python3 -B "$SKILL_ROOT/scripts/gap_gate.py" --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
+python3 -B "$SKILL_ROOT/scripts/final_audit.py" --dir /app/output --result-file result.json --require reproduction_audit_report.json --require reproduction_report.md
 ```
 
 ## Reference Specifications

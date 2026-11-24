@@ -30,9 +30,13 @@
 - **1 分（部分完成 / 轻微瑕疵）**：回答非空、**未触发** `false_certainty_on_missing_data` 与 `schema_or_parse_error`，且仅存在 1 类可修复瑕疵（例如仅有 `unit_mismatch` 或仅有 `citation_count_mismatch`）。
 - **0 分（严重失败）**：回答缺失、触发 `false_certainty_on_missing_data`、`schema_or_parse_error`，或同时触发 ≥2 类失败标签。
 
-## 4. 重复运行稳定性与预算审计
+## 4. 重复运行稳定性、预算审计与自动-人工一致性校准
 
 当同一 `agent_id` 提供多轮重复运行（如 3 次重复）时：
 - 计算该 Agent 总分与得分率的 `mean`、`std`、`min`、`max`；
 - 计算每道题的跨轮次分数方差与 `flipped_items`（同一题在不同轮次得分变化）；
-- 核对 `latency_sec`、`model_requests`、`output_tokens` 是否超出 Harbor 预算阈值（64 requests / 900 s / 16384 tokens per response）。
+- 核对 `latency_sec`、`model_requests`、`output_tokens` 是否超出运行预算阈值（64 requests / 900 s / 16384 tokens per response）。
+
+每道题均输出透明子项明细 `criterion_breakdown`（`value_unit_ok`、`keyword_ok`、`anchor_id_ok`、`verbatim_quote_ok`、`citation_parity_ok`、`abstention_ok`），并执行 **Auto-vs-Human 一致性校准**：
+- 若输入提供 `human_gold_scores`（来自 `case.json` 或 `human_gold_scores.json`），自动计算 `exact_agreement_rate`、`within_1_agreement_rate`、未加权 `cohens_kappa`、有序二次加权 `quadratic_weighted_kappa`、`confusion_matrix`（3×3）与逐项分歧清单 `per_item_disagreements[]`；
+- 若未提供人工金标，严禁伪造一致率（保持 `null`），并按「跨轮翻转题 → 边界 1 分题 → 0 分失败题 → 2 分抽检题」分层自动生成待人工复核队列 `human_calibration_queue[]`。

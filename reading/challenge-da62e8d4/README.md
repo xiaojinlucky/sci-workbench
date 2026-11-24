@@ -8,15 +8,15 @@ Offline-first, zero-mandatory-dependency Skill for environment/lockfile drift au
 
 ## Quickstart
 ```bash
-python -B scripts/env_lock_doctor.py --input /input --out /app/work/env_doctor.json
-python -B scripts/repro_audit_runner.py --input /input --output /app/output --work /app/work --repeats 2
-python -B scripts/final_audit.py --dir /app/output --result-file result.json --require reproduction_audit_report.json --require reproduction_report.md
+python3 -B scripts/env_lock_doctor.py --input /input --out /app/work/env_doctor.json
+python3 -B scripts/repro_audit_runner.py --input /input --output /app/output --work /app/work --repeats 2
+python3 -B scripts/final_audit.py --dir /app/output --result-file result.json --require reproduction_audit_report.json --require reproduction_report.md
 ```
 
 ## Directory Layout
 - `SKILL.md` — DeepSeek Harness executable workflow, 4-tier evidence ladder, and hard boundaries.
 - `scripts/env_lock_doctor.py` — Conda/Pip/UV/pyproject/Dockerfile manifest scanner, Conda #15581 mixed-source drift detector, runtime version comparator, and `research-repo-doctor` checklist generator.
-- `scripts/repro_audit_runner.py` — Deep AST parameter/seed auditor, isolated multi-run executor with `PYTHONHASHSEED` and jitter detection, failed-run segregating tolerance verifier, 5-axis attribution engine, and Markdown report generator.
+- `scripts/repro_audit_runner.py` — Paper prose indexer & locator/quote anchor binder, deep AST parameter/seed auditor, isolated multi-run executor with `PYTHONHASHSEED` and jitter detection, failed-run segregating tolerance verifier, 5-axis attribution engine, dynamic `output_contract` absorber, execution telemetry, and Markdown report generator.
 - `scripts/audit_chain.py` — SHA-256 hash-chained audit log.
 - `scripts/{preflight_probe,result_guard,budget_guard,block_indexer,gap_gate,final_audit}.py` — Harbor runtime guardrails (M1–M6).
 - `references/` — Detailed protocols for `research-repo-doctor` checklists, lockfile/seed auditing, 5-axis discrepancy attribution, and missing-data boundaries.

@@ -87,13 +87,18 @@ def run_standard_queries(
     conflicts: list[dict[str, Any]],
     query_entity: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Execute 5 standard evidence-backed queries (plus optional entity neighborhood trace)."""
+    """Execute 5 standard evidence-backed queries (strictly over role-verified directed edges only)."""
+    verified_edges = [e for e in edges if e.get("role_verified", True)]
     papers_edges: dict[str, list[str]] = defaultdict(list)
-    for e in edges:
+    for e in verified_edges:
         papers_edges[e["evidence"]["source_id"]].append(e["relation_id"])
 
-    uses_eval_edges = [e for e in edges if e["relation_type"] in {"uses", "evaluates_on"}]
-    comp_edges = [e for e in edges if e["relation_type"] in {"compares_with", "outperforms", "contradicts"}]
+    uses_eval_edges = [e for e in verified_edges if e["relation_type"] in {"uses", "evaluates_on"}]
+    comp_edges = [
+        e for e in verified_edges
+        if e["relation_type"] in {"compares_with", "outperforms", "contradicts"}
+        or bool((e.get("argument_roles") or {}).get("comparison_baseline"))
+    ]
 
     queries: list[dict[str, Any]] = [
         {
@@ -344,13 +349,18 @@ def render_kg_markdown(graph: dict[str, Any], gaps: list[dict[str, Any]]) -> str
         lines.append(
             f"| `{p['source_id']}` | `{p['source_file']}` | `{p.get('doi') or 'not_reported'}` | {str(p.get('title') or 'not_reported')[:70]} | {p['paragraph_count']} |"
         )
-    lines.extend(["", "## 2. Directed Evidence-Backed Relations", ""])
+    lines.extend(["", "## 2. Directed Evidence-Backed Relations (Role-Verified & Deduplicated)", ""])
     if graph["relations"]:
-        lines.extend(["| Source Paper | Paragraph ID | Subject | Relation | Object | Condition | Attribution |", "|---|---|---|---|---|---|---|"])
+        lines.extend(["| Source Paper | Locator (`paragraph_id` / Page) | Subject → Relation → Object | Baseline / EvCnt | Verbatim Quote |", "|---|---|---|---|---|"])
         for e in graph["relations"]:
             ev = e["evidence"]
+            pg_tag = f" Page {ev['page']}" if "page" in ev else ""
+            ar = e.get("argument_roles") or {}
+            base_s = f"vs {ar['comparison_baseline']}" if ar.get("comparison_baseline") else "—"
+            cnt_s = f"ev={e.get('evidence_count', 1)}"
+            q_full = str(ev.get("quote") or "").replace("|", "\\|")
             lines.append(
-                f"| `{ev['source_id']}` | `{ev.get('paragraph_id')}` | {e['source_name']} | `{e['relation_type']}` | {e['target_name']} | {e.get('condition') or '—'} | `{e.get('attribution', 'author_reported')}` |"
+                f"| `{ev['source_id']}` | `{ev.get('paragraph_id')}`{pg_tag} | {e['source_name']} → `{e['relation_type']}` → {e['target_name']} | {base_s} ({cnt_s}) | {q_full} |"
             )
     else:
         lines.append("No directed relations met the explicit evidence threshold; see gaps and held candidates below.")
@@ -369,13 +379,22 @@ def render_kg_markdown(graph: dict[str, Any], gaps: list[dict[str, Any]]) -> str
     for q in graph["queries"]:
         lines.append(f"- **`{q['query_id']}`** ({q['answer_status']}): {q['description']}")
 
+    if graph.get("held_for_review"):
+        lines.extend(["", "## 5. Quarantined Candidates (`held_for_review`, Excluded from Verified Edges & Queries)", ""])
+        for h in graph["held_for_review"]:
+            hev = h.get("evidence") or {}
+            lines.append(
+                f"- **`{h['reason']}`**: `{h['source_name']}` —[`{h['candidate_relation']}`]→ `{h['target_name']}` "
+                f"(`{hev.get('source_id')}` @ `{hev.get('paragraph_id')}`)"
+            )
+
     if graph.get("conflicts"):
-        lines.extend(["", "## 5. Preserved Contradictions & Cross-Condition Disagreements", ""])
+        lines.extend(["", "## 6. Preserved Contradictions & Cross-Condition Disagreements", ""])
         for c in graph["conflicts"]:
             lines.append(f"- `{c['conflict_type']}` on {c['entities']}: {c.get('relations') or 'contradicts'} (policy: `{c['resolution_policy']}`)")
 
     if gaps:
-        lines.extend(["", "## 6. Coverage Gaps & Held Candidates", ""])
+        lines.extend(["", "## 7. Coverage Gaps", ""])
         for g in gaps:
             lines.append(f"- **{g['code']}**: {g.get('message') or g.get('count') or ''}")
     lines.append("")

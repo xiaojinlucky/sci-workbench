@@ -18,6 +18,7 @@
     "item_bank_audit",
     "scoreboards",
     "stability_summary",
+    "human_calibration",
     "failure_taxonomy_bank",
     "regression_item_drafts",
     "version_diff",

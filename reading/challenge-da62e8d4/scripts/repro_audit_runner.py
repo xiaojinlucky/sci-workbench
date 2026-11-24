@@ -27,9 +27,12 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -103,19 +106,621 @@ def _dotted_call_name(func: ast.AST) -> str:
 
 
 def capture_env_snapshot() -> dict[str, Any]:
-    pkgs: dict[str, str] = {}
-    for pkg in ("numpy", "pandas", "scipy", "scikit-learn", "torch", "matplotlib", "sympy"):
+    """Capture Python runtime and installed package versions even under `python -S -B` isolated mode."""
+    pkgs: dict[str, str] = {"python": platform.python_version()}
+    target_pkgs = (
+        "numpy", "pandas", "scipy", "scikit-learn", "torch", "matplotlib",
+        "sympy", "pdfplumber", "pypdf", "pip", "setuptools", "wheel",
+    )
+
+    # 1. Inspect current sys.path via importlib.metadata
+    for pkg in target_pkgs:
         try:
             pkgs[pkg] = importlib.metadata.version(pkg)
-        except importlib.metadata.PackageNotFoundError:
+        except Exception:
             pass
+
+    # 2. Under `python -S`, site-packages is omitted from sys.path; probe standard site-packages metadata read-only
+    search_dirs: list[str] = []
+    for base in {sys.prefix, sys.base_prefix}:
+        if not base:
+            continue
+        bp = Path(base)
+        for rel in (
+            Path("Lib") / "site-packages",
+            Path("lib") / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
+            Path("lib64") / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages",
+        ):
+            cand = bp / rel
+            if cand.is_dir():
+                s = str(cand)
+                if s not in search_dirs:
+                    search_dirs.append(s)
+
+    total_dists_seen = 0
+    if search_dirs:
+        try:
+            target_low = {p.lower(): p for p in target_pkgs}
+            for dist in importlib.metadata.distributions(path=search_dirs):
+                total_dists_seen += 1
+                name = (dist.metadata.get("Name") or "").strip() if dist.metadata else ""
+                ver = (dist.version or "").strip()
+                if not name or not ver:
+                    continue
+                low = name.lower().replace("_", "-")
+                if low in target_low and target_low[low] not in pkgs:
+                    pkgs[target_low[low]] = ver
+                elif len(pkgs) < 25 and low not in {k.lower() for k in pkgs}:
+                    pkgs[name] = ver
+        except Exception:
+            pass
+
+    # 3. Record loaded stdlib/module versions from sys.modules as guaranteed non-empty baseline
+    for mname, mod in list(sys.modules.items()):
+        if not mod or "." in mname or mname.startswith("_"):
+            continue
+        mver = getattr(mod, "__version__", None) or getattr(mod, "ZLIB_VERSION", None)
+        if isinstance(mver, str) and mver.strip() and mname not in pkgs and len(pkgs) < 30:
+            pkgs[mname] = mver.strip()
+    if "zlib" not in pkgs:
+        pkgs["zlib"] = getattr(zlib, "ZLIB_VERSION", "stdlib")
+
     return {
         "python_version": platform.python_version(),
+        "python_full_version": sys.version.splitlines()[0],
         "platform": sys.platform,
         "machine": platform.machine(),
         "cpu_count": os.cpu_count() or 1,
         "pythonhashseed": os.environ.get("PYTHONHASHSEED", "unset"),
-        "packages": pkgs,
+        "site_packages_probed": bool(search_dirs),
+        "installed_distributions_scanned": total_dists_seen,
+        "packages": dict(sorted(pkgs.items())),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Paper Prose Indexing & Exact Locator/Quote Anchoring
+# ---------------------------------------------------------------------------
+
+_PAPER_SKIP_NAMES = {
+    "case.json", "task.md", "requirements.txt", "environment.yml", "environment.yaml",
+    "pyproject.toml", "conda-lock.yml", "uv.lock", "poetry.lock", "dockerfile",
+}
+_PAGE_MARKER_RE = re.compile(r"(?:\[\s*Page\s*(\d+)\s*\]|^#+\s*\[?\s*Page\s*(\d+)\s*\]?|\bPage\s*(\d+)\b)", re.I)
+_SECTION_HEAD_RE = re.compile(
+    r"^(?:#{1,4}\s+(.+)|((?:ABSTRACT|INTRODUCTION|METHOD|METHODS|MATERIALS AND METHODS|RESULTS|DISCUSSION|CONCLUSION|SUPPLEMENTAL INFORMATION|PROTOCOL|BENCHMARK)[A-Z0-9 :\-]*))$"
+)
+_TABLE_FIG_EQ_RE = re.compile(r"\b(Table\s+\d+|Figure\s+\d+|Fig\.\s*\d+|Equation\s+\d+|Eq\.\s*\(?\d+\)?|Chart\s+\d+)\b", re.I)
+
+_PARAM_METRIC_ALIASES: dict[str, list[str]] = {
+    "learning_rate": ["learning rate", "lr", "step size"],
+    "batch_size": ["batch size", "minibatch"],
+    "regularization": ["regularization", "weight decay", "l2", "ridge", "lambda", "alpha"],
+    "ridge_alpha": ["ridge", "alpha", "l2 penalty", "regularization"],
+    "significance_level": ["significance level", "5% significance", "p<0.05", "alpha"],
+    "confidence_level": ["95% confidence interval", "95%ci", "confidence interval"],
+    "rate_multiplier": ["10,000 inhabitants", "per 10,000", "x10,000", "10000"],
+    "study_years": ["2007 to 2015", "2007-2015", "2007–2015", "study period"],
+    "mean_annual_cases": ["average of", "per year", "615.44", "5,539"],
+    "medicine_pct": ["medicine", "medicines", "28.5", "1,580"],
+    "girls_pct": ["girls", "53.1", "2,944"],
+    "accidental_pct": ["accidental", "18.2", "1,010"],
+    "apc_both_sexes": ["annual percent change", "apc", "12.7", "both"],
+    "train_ratio": ["train", "80%", "0.8", "split"],
+    "concrete_r2": ["r2", "r²", "coefficient of determination", "compressive strength", "ols"],
+    "concrete_rmse_mpa": ["rmse", "mpa", "compressive strength", "root mean squared error"],
+}
+
+
+def _decode_pdf_literal_string(raw_bytes: bytes) -> str:
+    """Decode PDF literal string escape sequences (\\n, \\r, \\t, \\(, \\), \\\\, octal \\ddd)."""
+    out = bytearray()
+    i = 0
+    n = len(raw_bytes)
+    while i < n:
+        ch = raw_bytes[i]
+        if ch == 92 and i + 1 < n:  # backslash
+            nxt = raw_bytes[i + 1]
+            if nxt in (110, 114, 116, 98, 102, 40, 41, 92):
+                esc_map = {110: 10, 114: 13, 116: 9, 98: 8, 102: 12, 40: 40, 41: 41, 92: 92}
+                out.append(esc_map[nxt])
+                i += 2
+                continue
+            if nxt in (10, 13):  # line continuation
+                i += 2
+                if nxt == 13 and i < n and raw_bytes[i] == 10:
+                    i += 1
+                continue
+            if 48 <= nxt <= 55:  # octal \ddd
+                oct_digits = bytes([nxt])
+                j = i + 2
+                while j < n and len(oct_digits) < 3 and 48 <= raw_bytes[j] <= 55:
+                    oct_digits += bytes([raw_bytes[j]])
+                    j += 1
+                out.append(int(oct_digits, 8) & 0xFF)
+                i = j
+                continue
+            out.append(nxt)
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    txt = out.decode("cp1252", errors="replace")
+    # Common ligature control bytes in SciELO/LaTeX Type1 fonts
+    return txt.replace("\x1f", "fi").replace("\x1e", "fl").replace("\x00", "")
+
+
+def _extract_text_from_pdf_stream(content: bytes) -> str:
+    """Extract readable lines from a decompressed PDF page content stream using stdlib only."""
+    lines: list[str] = []
+    cur_parts: list[str] = []
+    # Tokenize BT..ET blocks or direct Tj/TJ operators
+    token_re = re.compile(
+        rb"(\((?:\\.|[^()\\])*\))\s*(?:Tj|'|\"|\s+Tj)"
+        rb"|\[(.*?)\]\s*TJ"
+        rb"|(T\*|TD|Td|Tm|ET)",
+        re.S,
+    )
+    arr_elem_re = re.compile(rb"(\((?:\\.|[^()\\])*\))|([-+]?\d+(?:\.\d+)?)")
+    for m in token_re.finditer(content):
+        if m.group(1) is not None:
+            s = _decode_pdf_literal_string(m.group(1)[1:-1])
+            if s:
+                cur_parts.append(s)
+        elif m.group(2) is not None:
+            seg: list[str] = []
+            for am in arr_elem_re.finditer(m.group(2)):
+                if am.group(1) is not None:
+                    seg.append(_decode_pdf_literal_string(am.group(1)[1:-1]))
+                elif am.group(2) is not None:
+                    try:
+                        kern = float(am.group(2))
+                        if kern < -140.0:
+                            seg.append(" ")
+                    except ValueError:
+                        pass
+            if seg:
+                cur_parts.append("".join(seg))
+        elif m.group(3) is not None:
+            joined = "".join(cur_parts).strip()
+            if joined:
+                lines.append(joined)
+            cur_parts = []
+    if cur_parts:
+        joined = "".join(cur_parts).strip()
+        if joined:
+            lines.append(joined)
+    return "\n".join(lines)
+
+
+def _stdlib_zlib_pdf_extract(pdf_path: Path) -> tuple[list[tuple[int, str]], str]:
+    """Pure Python stdlib zlib fallback PDF text extractor preserving page numbers."""
+    data = pdf_path.read_bytes()
+    if not data.startswith(b"%PDF"):
+        return [], "not_a_pdf_header"
+
+    # Parse indirect objects: N gen obj ... endobj
+    obj_map: dict[int, bytes] = {}
+    for om in re.finditer(rb"(\d+)\s+\d+\s+obj\b(.*?)\bendobj", data, re.S):
+        obj_map[int(om.group(1))] = om.group(2)
+
+    def _decompress_obj(obj_body: bytes) -> bytes:
+        sm = re.search(rb"stream\r?\n(.*?)\r?\nendstream", obj_body, re.S)
+        if not sm:
+            return b""
+        raw_s = sm.group(1)
+        if b"FlateDecode" in obj_body[: obj_body.find(b"stream")]:
+            try:
+                return zlib.decompress(raw_s)
+            except Exception:
+                try:
+                    return zlib.decompress(raw_s, -zlib.MAX_WBITS)
+                except Exception:
+                    return b""
+        return raw_s
+
+    # Collect /Type /Page objects (excluding /Pages) in object order and resolve their /Contents
+    pages_out: list[tuple[int, str]] = []
+    page_objs = [
+        (oid, body)
+        for oid, body in sorted(obj_map.items())
+        if re.search(rb"/Type\s*/Page\b(?!s)", body)
+    ]
+    for p_idx, (_, pbody) in enumerate(page_objs, start=1):
+        c_refs: list[int] = []
+        m_arr = re.search(rb"/Contents\s*\[([^\]]+)\]", pbody, re.S)
+        if m_arr:
+            c_refs = [int(x) for x in re.findall(rb"(\d+)\s+\d+\s+R", m_arr.group(1))]
+        else:
+            m_one = re.search(rb"/Contents\s+(\d+)\s+\d+\s+R", pbody)
+            if m_one:
+                c_refs = [int(m_one.group(1))]
+        page_chunks: list[str] = []
+        for cid in c_refs:
+            cbody = obj_map.get(cid, b"")
+            dec = _decompress_obj(cbody)
+            if dec:
+                txt = _extract_text_from_pdf_stream(dec)
+                if txt.strip():
+                    page_chunks.append(txt.strip())
+        if page_chunks:
+            pages_out.append((p_idx, "\n".join(page_chunks)))
+
+    # Fallback: if /Type /Page references were compressed in ObjStm, scan all Flate streams directly
+    if not pages_out:
+        s_idx = 0
+        for sm in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, re.S):
+            raw_s = sm.group(1)
+            try:
+                dec = zlib.decompress(raw_s)
+            except Exception:
+                dec = raw_s
+            if b"BT" in dec and (b"Tj" in dec or b"TJ" in dec):
+                txt = _extract_text_from_pdf_stream(dec)
+                if len(txt.strip()) >= 20:
+                    s_idx += 1
+                    pages_out.append((s_idx, txt.strip()))
+
+    return pages_out, "stdlib_zlib" if pages_out else "stdlib_zlib_empty"
+
+
+def _pdf_text_with_diagnostics(pdf_path: Path) -> dict[str, Any]:
+    """Extract PDF text with per-page [PAGE N] markers via pdfplumber/pypdf/pdftotext/stdlib-zlib and full diagnostics."""
+    errors: list[str] = []
+    # 1. pdfplumber
+    try:
+        import pdfplumber  # type: ignore
+        with pdfplumber.open(str(pdf_path)) as doc:
+            pages = [(i, (p.extract_text() or "").strip()) for i, p in enumerate(doc.pages, 1)]
+        text = "\n\n".join(f"[PAGE {i}]\n{t}" for i, t in pages if t)
+        if len(re.sub(r"\s+", "", text)) >= 20:
+            return {"ok": True, "backend": "pdfplumber", "page_count": len(pages), "text": text, "errors": errors}
+        errors.append("pdfplumber: extracted empty text")
+    except Exception as exc:
+        errors.append(f"pdfplumber: {type(exc).__name__}")
+
+    # 2. pypdf
+    try:
+        from pypdf import PdfReader  # type: ignore
+        reader = PdfReader(str(pdf_path))
+        pages = [(i, (p.extract_text() or "").strip()) for i, p in enumerate(reader.pages, 1)]
+        text = "\n\n".join(f"[PAGE {i}]\n{t}" for i, t in pages if t)
+        if len(re.sub(r"\s+", "", text)) >= 20:
+            return {"ok": True, "backend": "pypdf", "page_count": len(pages), "text": text, "errors": errors}
+        errors.append("pypdf: extracted empty text")
+    except Exception as exc:
+        errors.append(f"pypdf: {type(exc).__name__}")
+
+    # 3. pdftotext (split on form-feed \f to preserve per-page [PAGE N] markers!)
+    bin_p = shutil.which("pdftotext")
+    if bin_p:
+        try:
+            proc = subprocess.run(
+                [bin_p, "-enc", "UTF-8", str(pdf_path), "-"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                raw_pages = [p.strip() for p in proc.stdout.split("\f")]
+                pages = [(i, t) for i, t in enumerate(raw_pages, 1) if t]
+                text = "\n\n".join(f"[PAGE {i}]\n{t}" for i, t in pages)
+                if len(re.sub(r"\s+", "", text)) >= 20:
+                    return {"ok": True, "backend": "pdftotext", "page_count": len(pages), "text": text, "errors": errors}
+                errors.append("pdftotext: extracted empty text")
+            else:
+                errors.append(f"pdftotext: rc={proc.returncode}")
+        except Exception as exc:
+            errors.append(f"pdftotext: {type(exc).__name__}")
+    else:
+        errors.append("pdftotext: binary not found")
+
+    # 4. Pure stdlib zlib fallback
+    try:
+        pages, note = _stdlib_zlib_pdf_extract(pdf_path)
+        text = "\n\n".join(f"[PAGE {i}]\n{t}" for i, t in pages if t)
+        if len(re.sub(r"\s+", "", text)) >= 20:
+            return {"ok": True, "backend": "stdlib_zlib", "page_count": len(pages), "text": text, "errors": errors}
+        errors.append(f"stdlib_zlib: {note}")
+    except Exception as exc:
+        errors.append(f"stdlib_zlib: {type(exc).__name__}: {exc}")
+
+    return {
+        "ok": False,
+        "backend": "none",
+        "page_count": 0,
+        "text": "",
+        "errors": errors,
+    }
+
+
+def _pdf_text_optional(pdf_path: Path) -> str:
+    return str(_pdf_text_with_diagnostics(pdf_path).get("text") or "")
+
+
+def _parse_text_into_anchored_blocks(raw: str, relpath: str) -> list[dict[str, Any]]:
+    """Split prose text into paragraph blocks retaining Page, Section, Table/Figure/Eq, and line span locators."""
+    blocks: list[dict[str, Any]] = []
+    cur_page: str | None = None
+    cur_section: str | None = None
+    lines = raw.splitlines()
+    buf: list[str] = []
+    start_ln = 1
+
+    def _flush(end_ln: int) -> None:
+        if not buf:
+            return
+        text = " ".join(x.strip() for x in buf if x.strip()).strip()
+        if not text:
+            return
+        tf_m = _TABLE_FIG_EQ_RE.search(text)
+        loc_parts: list[str] = []
+        if cur_page:
+            loc_parts.append(f"Page {cur_page}")
+        if cur_section:
+            loc_parts.append(f"Section: {cur_section}")
+        if tf_m:
+            loc_parts.append(tf_m.group(1))
+        loc_parts.append(f"L{start_ln}-L{end_ln}")
+        blocks.append({
+            "source_file": relpath,
+            "locator": " / ".join(loc_parts),
+            "page": cur_page,
+            "section": cur_section,
+            "table_or_eq": tf_m.group(1) if tf_m else None,
+            "line_start": start_ln,
+            "line_end": end_ln,
+            "text": text,
+        })
+
+    for idx, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped:
+            _flush(idx - 1)
+            buf = []
+            continue
+        pm = _PAGE_MARKER_RE.search(stripped)
+        if pm and (stripped.startswith("#") or stripped.upper().startswith("[PAGE")):
+            _flush(idx - 1)
+            buf = []
+            cur_page = pm.group(1) or pm.group(2) or pm.group(3)
+            continue
+        sm = _SECTION_HEAD_RE.match(stripped)
+        if sm:
+            _flush(idx - 1)
+            buf = []
+            heading = (sm.group(1) or sm.group(2) or "").strip(" #:")
+            if heading and not heading.lower().startswith("[page"):
+                cur_section = heading[:60]
+            continue
+        if not buf:
+            start_ln = idx
+        buf.append(stripped)
+    _flush(len(lines))
+    return blocks
+
+
+def collect_paper_blocks(
+    input_dir: Path,
+    case_data: dict[str, Any],
+    pdf_diagnostics: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Collect anchored prose blocks from case.json excerpts and all supplied MD/TXT/PDF/XML paper files."""
+    blocks: list[dict[str, Any]] = []
+    for idx, p in enumerate(case_data.get("paper_excerpts") or case_data.get("paragraphs") or [], start=1):
+        if isinstance(p, dict):
+            txt = str(p.get("text") or p.get("content") or "").strip()
+            loc = str(p.get("locator") or p.get("paragraph_id") or f"P{idx:03d}")
+            src = str(p.get("source_file") or "case.json")
+        else:
+            txt = str(p).strip()
+            loc = f"P{idx:03d}"
+            src = "case.json"
+        if txt:
+            blocks.append({"source_file": src, "locator": loc, "page": None, "text": txt})
+
+    for fp in sorted(p for p in input_dir.rglob("*") if p.is_file()):
+        low = fp.name.lower()
+        if low in _PAPER_SKIP_NAMES or low.startswith("requirements"):
+            continue
+        ext = fp.suffix.lower()
+        rel = fp.relative_to(input_dir).as_posix()
+        if ext in {".md", ".txt"}:
+            raw = fp.read_text(encoding="utf-8", errors="replace")
+            blocks.extend(_parse_text_into_anchored_blocks(raw, rel))
+        elif ext == ".pdf":
+            diag = _pdf_text_with_diagnostics(fp)
+            rec = {
+                "file": rel,
+                "sha256": sha256_file(fp),
+                "bytes": fp.stat().st_size,
+                "ok": diag["ok"],
+                "backend": diag["backend"],
+                "page_count": diag["page_count"],
+                "extracted_chars": len(diag["text"]),
+                "errors": diag["errors"],
+            }
+            if pdf_diagnostics is not None:
+                pdf_diagnostics.append(rec)
+            if diag["ok"] and diag["text"].strip():
+                blocks.extend(_parse_text_into_anchored_blocks(diag["text"], rel))
+        elif ext == ".xml":
+            try:
+                raw = fp.read_text(encoding="utf-8", errors="replace")
+                if not re.search(r"<!(?:DOCTYPE|ENTITY)\b", raw, re.I):
+                    root = ET.fromstring(raw)
+                    p_idx = 0
+                    for elem in root.iter():
+                        tag = elem.tag.split("}", 1)[-1].lower()
+                        if tag in ("p", "caption"):
+                            txt = " ".join("".join(elem.itertext()).split()).strip()
+                            if txt:
+                                p_idx += 1
+                                pid = elem.attrib.get("id") or f"{tag}{p_idx:03d}"
+                                blocks.append({"source_file": rel, "locator": f"XML:{pid}", "page": None, "text": txt})
+            except Exception:
+                pass
+    return blocks
+
+
+def _value_search_forms(val: Any) -> list[str]:
+    forms: list[str] = []
+    if val is None or isinstance(val, bool):
+        return forms
+    if isinstance(val, (int, float)):
+        fval = float(val)
+        if fval.is_integer():
+            iv = int(fval)
+            forms.append(str(iv))
+            if abs(iv) >= 1000:
+                forms.append(f"{iv:,}")
+        else:
+            forms.append(f"{fval:g}")
+            forms.append(f"{fval:.2f}")
+            forms.append(f"{fval:.1f}")
+            if 0 < fval < 1:
+                pct = fval * 100.0
+                if abs(pct - round(pct)) < 1e-6:
+                    forms.append(f"{int(round(pct))}%")
+                else:
+                    forms.append(f"{pct:.1f}%")
+    else:
+        s = str(val).strip()
+        if s:
+            forms.append(s)
+    dedup: list[str] = []
+    for x in forms:
+        if x and x not in dedup:
+            dedup.append(x)
+    return dedup
+
+
+def _infer_value_origin(
+    name: str,
+    explicit_origins: dict[str, str] | None,
+    anchor: dict[str, Any],
+    *,
+    is_code_only: bool = False,
+) -> str:
+    """Classify value provenance strictly into paper_reported / protocol_derived / observed."""
+    if is_code_only:
+        return "observed"
+    if explicit_origins:
+        for k, v in explicit_origins.items():
+            if _norm_key(k) == _norm_key(name) and v in ("paper_reported", "protocol_derived", "observed"):
+                return v
+    src = str(anchor.get("paper_source_file") or "").lower()
+    if "protocol" in src or "benchmark" in src or "readme" in src:
+        return "protocol_derived"
+    if src.endswith(".pdf") or anchor.get("paper_anchor_status") in ("anchored_exact", "anchored_context"):
+        return "paper_reported"
+    return "protocol_derived"
+
+
+def bind_paper_anchor(
+    name: str,
+    value: Any,
+    blocks: list[dict[str, Any]],
+    *,
+    is_code_only: bool = False,
+    pdf_extraction_failed: bool = False,
+) -> dict[str, Any]:
+    """Bind a paper hyperparameter or target metric to its exact paper source file, page, locator, and verbatim quote."""
+    if is_code_only:
+        return {
+            "paper_source_file": None,
+            "paper_page": None,
+            "paper_locator": None,
+            "paper_quote": "",
+            "paper_anchor_status": "not_applicable_code_only",
+        }
+    if not blocks:
+        return {
+            "paper_source_file": None,
+            "paper_page": None,
+            "paper_locator": None,
+            "paper_quote": "",
+            "paper_anchor_status": "unverified" if pdf_extraction_failed else "not_found_in_supplied_prose",
+        }
+
+    nk = _norm_key(name)
+    name_terms: list[str] = []
+    for t in [name, name.replace("_", " "), *(_PARAM_METRIC_ALIASES.get(nk) or [])]:
+        tl = t.strip().lower()
+        if tl and len(tl) >= 2 and tl not in name_terms:
+            name_terms.append(tl)
+    # Also include informative sub-words (>=3 chars)
+    sub_words = [w for w in nk.split("_") if len(w) >= 3 and w not in {"pct", "mpa", "val", "num", "both", "sexes"}]
+    val_forms = _value_search_forms(value)
+
+    best_score = 0
+    best_block: dict[str, Any] | None = None
+    best_match_pos = 0
+    best_status = "not_found_in_supplied_prose"
+
+    for blk in blocks:
+        txt = blk["text"]
+        low = txt.lower()
+        val_pos = -1
+        for vf in val_forms:
+            m = re.search(rf"(?<![0-9A-Za-z.]){re.escape(vf)}(?![0-9A-Za-z])", txt)
+            if m:
+                val_pos = m.start()
+                break
+
+        term_pos = -1
+        term_hits = 0
+        for nt in name_terms:
+            p = low.find(nt)
+            if p >= 0:
+                term_hits += 1
+                if term_pos < 0:
+                    term_pos = p
+        sub_hits = sum(1 for sw in sub_words if sw in low)
+
+        score = 0
+        status = "not_found_in_supplied_prose"
+        mpos = 0
+        if val_pos >= 0 and (term_hits > 0 or sub_hits > 0):
+            score = 100 + term_hits * 15 + sub_hits * 5 + (10 if blk.get("table_or_eq") else 0)
+            status = "anchored_exact"
+            mpos = val_pos
+        elif term_hits > 0:
+            score = 55 + term_hits * 10
+            status = "anchored_context"
+            mpos = term_pos
+        elif val_pos >= 0 and len(val_forms) > 0 and any(len(vf) >= 4 for vf in val_forms):
+            score = 40 + (10 if blk.get("table_or_eq") else 0)
+            status = "anchored_context"
+            mpos = val_pos
+
+        if score > best_score:
+            best_score = score
+            best_block = blk
+            best_match_pos = mpos
+            best_status = status
+
+    if best_block is None or best_score <= 0:
+        return {
+            "paper_source_file": None,
+            "paper_page": None,
+            "paper_locator": None,
+            "paper_quote": "",
+            "paper_anchor_status": "unverified" if pdf_extraction_failed else "not_found_in_supplied_prose",
+        }
+
+    full_txt = best_block["text"]
+    start = max(0, best_match_pos - 70)
+    quote = full_txt[start:start + 220].strip()
+    page_val = int(best_block["page"]) if str(best_block.get("page") or "").isdigit() else None
+    return {
+        "paper_source_file": best_block["source_file"],
+        "paper_page": page_val,
+        "paper_locator": best_block["locator"],
+        "paper_quote": quote,
+        "paper_anchor_status": best_status,
     }
 
 
@@ -318,8 +923,16 @@ def _values_equal(v1: Any, v2: Any) -> bool:
     return str(v1).strip().lower() == str(v2).strip().lower()
 
 
-def reconcile_parameters(paper_params: dict[str, Any], code_inspects: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Reconcile paper hyperparameters against all inspected scripts into 4 explicit provenance statuses."""
+def reconcile_parameters(
+    paper_params: dict[str, Any],
+    code_inspects: list[dict[str, Any]],
+    paper_blocks: list[dict[str, Any]] | None = None,
+    *,
+    param_origins: dict[str, str] | None = None,
+    pdf_extraction_failed: bool = False,
+) -> list[dict[str, Any]]:
+    """Reconcile paper hyperparameters against all inspected scripts with exact paper prose anchors and value_origin."""
+    blocks = paper_blocks or []
     by_norm: dict[str, list[dict[str, Any]]] = {}
     for ci in code_inspects:
         for ep in ci.get("extracted_parameters") or []:
@@ -331,15 +944,19 @@ def reconcile_parameters(paper_params: dict[str, Any], code_inspects: list[dict[
     for pkey, pval in paper_params.items():
         nk = _norm_key(pkey)
         paper_norms.add(nk)
+        anchor = bind_paper_anchor(pkey, pval, blocks, is_code_only=False, pdf_extraction_failed=pdf_extraction_failed)
+        origin = _infer_value_origin(pkey, param_origins, anchor, is_code_only=False)
         matches = by_norm.get(nk) or []
         if not matches:
             table.append({
                 "parameter": pkey,
                 "paper_value": pval,
+                "value_origin": origin,
                 "code_value": None,
                 "code_source": None,
                 "source_kind": None,
                 "provenance_status": "paper_only_missing_in_code",
+                **anchor,
             })
             continue
         # Record one row per candidate file where this parameter appears so conflicts in any candidate are never masked
@@ -354,12 +971,15 @@ def reconcile_parameters(paper_params: dict[str, Any], code_inspects: list[dict[
             table.append({
                 "parameter": pkey,
                 "paper_value": pval,
+                "value_origin": origin,
                 "code_value": chosen["value"],
+                "code_value_origin": "observed",
                 "code_source": fname,
                 "qualified_name": chosen["qualified_name"],
                 "source_kind": chosen["source_kind"],
                 "line": chosen["line"],
                 "provenance_status": "matched" if equal else "paper_code_conflict",
+                **anchor,
             })
 
     # Record code_only_undocumented parameters
@@ -379,12 +999,15 @@ def reconcile_parameters(paper_params: dict[str, Any], code_inspects: list[dict[
             table.append({
                 "parameter": ep["name"],
                 "paper_value": None,
+                "value_origin": "observed",
                 "code_value": ep["value"],
+                "code_value_origin": "observed",
                 "code_source": ci["file"],
                 "qualified_name": ep["qualified_name"],
                 "source_kind": ep["source_kind"],
                 "line": ep["line"],
                 "provenance_status": "code_only_undocumented",
+                **bind_paper_anchor(ep["name"], None, blocks, is_code_only=True),
             })
     return table
 
@@ -647,8 +1270,12 @@ def compare_against_tolerance(
     param_reconciliation: list[dict[str, Any]],
     env_audit: dict[str, Any],
     missing_materials: list[str],
+    paper_blocks: list[dict[str, Any]] | None = None,
+    target_origins: dict[str, str] | None = None,
+    pdf_extraction_failed: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Compare ONLY clean-exit runs against a priori tolerances; segregate failed runs separately."""
+    """Compare ONLY clean-exit runs against a priori tolerances with exact paper prose anchors and value_origin."""
+    blocks = paper_blocks or []
     comparisons: list[dict[str, Any]] = []
     excluded_failed: list[dict[str, Any]] = []
 
@@ -668,15 +1295,27 @@ def compare_against_tolerance(
     ok_runs = [r for r in run_summaries if r["status"] == "executed_ok"]
 
     for metric_name, target_raw in paper_targets.items():
+        anchor = bind_paper_anchor(
+            metric_name,
+            target_raw,
+            blocks,
+            is_code_only=False,
+            pdf_extraction_failed=pdf_extraction_failed,
+        )
+        t_origin = _infer_value_origin(metric_name, target_origins, anchor, is_code_only=False)
         if target_raw is None:
             comparisons.append({
                 "metric": metric_name,
                 "candidate": None,
                 "target": None,
+                "value_origin": t_origin,
+                "target_origin": t_origin,
+                "observed_origin": None,
                 "observed": None,
                 "status": "missing_paper_baseline",
                 "within_tolerance": None,
                 "reason": "Paper target metric not reported; retained as missing without inventing a baseline.",
+                **anchor,
             })
             continue
 
@@ -685,7 +1324,19 @@ def compare_against_tolerance(
         abs_tol = float(tol_cfg.get("abs_tol", default_abs))
         rel_tol = float(tol_cfg.get("rel_tol", default_rel))
 
-        for r in ok_runs:
+        # Only compare candidates that either emit this metric OR when none of the candidates emit it
+        emitting_runs = [
+            r for r in ok_runs
+            if isinstance((r.get("parsed_metrics") or {}).get(metric_name), (int, float))
+            and not isinstance((r.get("parsed_metrics") or {}).get(metric_name), bool)
+        ]
+        target_runs = emitting_runs if (emitting_runs and len(ok_runs) > 1 and any(
+            len(set((r.get("parsed_metrics") or {}).keys()) & set(paper_targets.keys())) > 0
+            and set((r.get("parsed_metrics") or {}).keys()).isdisjoint({metric_name})
+            for r in ok_runs
+        )) else ok_runs
+
+        for r in target_runs:
             obs = (r.get("parsed_metrics") or {}).get(metric_name)
             if not isinstance(obs, (int, float)) or isinstance(obs, bool):
                 attr = _attribute_discrepancy(
@@ -702,6 +1353,9 @@ def compare_against_tolerance(
                     "metric": metric_name,
                     "candidate": r["script"],
                     "target": target_val,
+                    "value_origin": t_origin,
+                    "target_origin": t_origin,
+                    "observed_origin": None,
                     "observed": None,
                     "abs_tol": abs_tol,
                     "rel_tol": rel_tol,
@@ -709,37 +1363,53 @@ def compare_against_tolerance(
                     "status": "metric_not_emitted",
                     "attribution_category": attr["primary_attribution_axis"],
                     **attr,
+                    **anchor,
                 })
                 continue
 
             obs_f = float(obs)
             abs_diff = abs(obs_f - target_val)
             rel_diff = abs_diff / max(1e-12, abs(target_val))
-            ok = (abs_diff <= abs_tol) or (rel_diff <= rel_tol)
+            metric_jitter = (r.get("jitter_metrics") or {}).get(metric_name)
+            has_metric_jitter = bool(metric_jitter and float(metric_jitter.get("spread") or 0.0) > 1e-12)
+            raw_ok = (abs_diff <= abs_tol) or (rel_diff <= rel_tol)
+            ok = raw_ok and not has_metric_jitter
+            comp_status = (
+                "within_tolerance"
+                if ok
+                else ("within_tolerance_unstable_jitter" if (raw_ok and has_metric_jitter) else "out_of_tolerance")
+            )
             entry: dict[str, Any] = {
                 "metric": metric_name,
                 "candidate": r["script"],
                 "target": target_val,
+                "value_origin": "observed",
+                "target_origin": t_origin,
+                "observed_origin": "observed",
                 "observed": round(obs_f, 8),
                 "abs_diff": round(abs_diff, 8),
                 "rel_diff": round(rel_diff, 8),
                 "abs_tol": abs_tol,
                 "rel_tol": rel_tol,
                 "within_tolerance": ok,
-                "deterministic": r.get("deterministic"),
-                "status": "within_tolerance" if ok else "out_of_tolerance",
+                "deterministic": not has_metric_jitter if metric_jitter is not None else r.get("deterministic"),
+                "metric_jitter": metric_jitter,
+                "status": comp_status,
+                **anchor,
             }
             if not ok:
                 attr = _attribute_discrepancy(
                     candidate_file=r["script"],
                     metric_name=metric_name,
-                    status="out_of_tolerance",
+                    status=comp_status,
                     run_summary=r,
                     code_inspect_map=code_inspect_map,
                     param_reconciliation=param_reconciliation,
                     env_audit=env_audit,
                     missing_materials=missing_materials,
                 )
+                if comp_status == "within_tolerance_unstable_jitter":
+                    attr["primary_attribution_axis"] = "environment_or_seed"
                 entry["attribution_category"] = attr["primary_attribution_axis"]
                 entry.update(attr)
             else:
@@ -785,22 +1455,34 @@ def render_reproduction_report_md(report: dict[str, Any], gaps: list[dict[str, A
             lines.append(f"- **[{act['severity'].upper()}] `{act['code']}`**: {act['action']}")
         lines.append("")
 
-    # Parameter Reconciliation
-    lines.append("## 3. Hyperparameter Reconciliation & Seed Hygiene")
+    # Parameter Reconciliation (with Paper Prose Anchors & Value Origin)
+    lines.append("## 3. Hyperparameter Reconciliation, Paper Anchors & Seed Hygiene")
     lines.append("")
     params = report.get("parameter_reconciliation") or []
     if not params:
         lines.append("No paper or code parameters extracted.")
         lines.append("")
     else:
-        lines.append("| Parameter | Paper Value | Code Value | Code Source | Source Kind | Status |")
-        lines.append("| --- | --- | --- | --- | --- | --- |")
+        lines.append("| Parameter | Paper Value | Value Origin | Paper Source & Locator | Anchor Status | Code Value | Code Source | Source Kind | Status |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for p in params:
+            loc_str = f"{p.get('paper_source_file')}:{p.get('paper_locator')}" if p.get("paper_source_file") else "none"
             lines.append(
-                f"| `{p['parameter']}` | `{p.get('paper_value')}` | `{p.get('code_value')}` | "
-                f"`{p.get('code_source') or 'none'}` | `{p.get('source_kind') or 'none'}` | `{p['provenance_status']}` |"
+                f"| `{p['parameter']}` | `{p.get('paper_value')}` | `{p.get('value_origin')}` | `{loc_str}` | `{p.get('paper_anchor_status')}` | "
+                f"`{p.get('code_value')}` | `{p.get('code_source') or 'none'}` | `{p.get('source_kind') or 'none'}` | `{p['provenance_status']}` |"
             )
         lines.append("")
+        anchored_p = [p for p in params if p.get("paper_quote")]
+        if anchored_p:
+            lines.append("### Verbatim Paper Parameter Quotes")
+            lines.append("")
+            seen_pq: set[str] = set()
+            for p in anchored_p:
+                if p["parameter"] in seen_pq:
+                    continue
+                seen_pq.add(p["parameter"])
+                lines.append(f"- `{p['parameter']}` (`{p.get('paper_source_file')}` @ `{p.get('paper_locator')}`): \"{p['paper_quote']}\"")
+            lines.append("")
 
     # Execution & Determinism
     lines.append("## 4. Isolated Execution & Repeat Determinism")
@@ -827,24 +1509,56 @@ def render_reproduction_report_md(report: dict[str, Any], gaps: list[dict[str, A
             lines.append(f"- `{ex['candidate']}`: status=`{ex['run_status']}`, rc=`{ex['returncode']}` — {ex['reason']}")
         lines.append("")
 
-    # Tolerance & 5-Axis Attribution
-    lines.append("## 5. A Priori Tolerance Comparison & Five-Axis Attribution")
+    # Tolerance & 5-Axis Attribution (with Paper Prose Anchors & Origin Tags)
+    lines.append("## 5. A Priori Tolerance Comparison, Paper Anchors & Five-Axis Attribution")
     lines.append("")
     comps = report.get("tolerance_comparisons") or []
     if comps:
-        lines.append("| Candidate | Metric | Target | Observed | Abs Diff | Rel Diff | Status | Primary Attribution |")
-        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        lines.append("| Candidate | Metric | Target | Target Origin | Paper Source & Locator | Anchor Status | Observed (Origin) | Abs Diff | Rel Diff | Status | Primary Attribution |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for c in comps:
+            loc_str = f"{c.get('paper_source_file')}:{c.get('paper_locator')}" if c.get("paper_source_file") else "none"
+            obs_lbl = f"{c.get('observed')} ({c.get('observed_origin') or 'none'})"
             lines.append(
-                f"| `{c.get('candidate') or 'none'}` | `{c['metric']}` | `{c.get('target')}` | `{c.get('observed')}` | "
-                f"`{c.get('abs_diff')}` | `{c.get('rel_diff')}` | `{c['status']}` | `{c.get('attribution_category') or 'none'}` |"
+                f"| `{c.get('candidate') or 'none'}` | `{c['metric']}` | `{c.get('target')}` | `{c.get('target_origin') or c.get('value_origin')}` | `{loc_str}` | `{c.get('paper_anchor_status')}` | "
+                f"`{obs_lbl}` | `{c.get('abs_diff')}` | `{c.get('rel_diff')}` | `{c['status']}` | `{c.get('attribution_category') or 'none'}` |"
             )
         lines.append("")
+        anchored_m = [c for c in comps if c.get("paper_quote")]
+        if anchored_m:
+            lines.append("### Verbatim Paper Metric Quotes")
+            lines.append("")
+            seen_mq: set[str] = set()
+            for c in anchored_m:
+                if c["metric"] in seen_mq:
+                    continue
+                seen_mq.add(c["metric"])
+                lines.append(f"- `{c['metric']}` (`{c.get('paper_source_file')}` @ `{c.get('paper_locator')}`): \"{c['paper_quote']}\"")
+            lines.append("")
         for c in comps:
             if c.get("attribution_evidence"):
                 lines.append(f"- Attribution evidence for `{c.get('candidate')}` / `{c['metric']}` (`{c.get('primary_attribution_axis')}`):")
                 for ev in c["attribution_evidence"]:
                     lines.append(f"  - {ev}")
+        lines.append("")
+
+    # Closed-Loop Remediation Verification (Before Fix vs After Fix)
+    rem_runs = report.get("remediation_closed_loop") or []
+    if rem_runs:
+        lines.append("## 5b. Closed-Loop Parameter Conflict Remediation (Before vs After)")
+        lines.append("")
+        lines.append("| Remediation Label | Script | Parameter Change | Before Status -> After Status | Before Metrics -> After Metrics | Input SHA-256 |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for rr in rem_runs:
+            pchanges = "; ".join(f"{k}: {v['before']} -> {v['after']}" for k, v in (rr.get("parameter_changes") or {}).items())
+            mchanges = "; ".join(
+                f"{k}: {v['before']} -> {v['after']} (target={v['target']})"
+                for k, v in (rr.get("metric_deltas") or {}).items()
+            )
+            lines.append(
+                f"| `{rr['label']}` | `{rr['script']}` | `{pchanges}` | "
+                f"`{rr['before_param_status']} -> {rr['after_param_status']}` | `{mchanges[:140]}` | `{rr['script_sha256'][:16]}` |"
+            )
         lines.append("")
 
     # Missing original materials
@@ -863,10 +1577,35 @@ def render_reproduction_report_md(report: dict[str, Any], gaps: list[dict[str, A
             lines.append(f"- `{g.get('code')}` ({g.get('severity', 'warning')}): {g.get('message')}")
         lines.append("")
 
+    # Execution Telemetry & Output Contract
+    tel = report.get("execution_telemetry") or {}
+    occ = report.get("output_contract_compliance") or {}
+    if tel or occ:
+        lines.append("## 8. Execution Telemetry & Output Contract Coverage")
+        lines.append("")
+        if tel:
+            lines.append(
+                f"- Total audit wall time: `{tel.get('total_elapsed_sec')}s` | Steps completed: `{tel.get('steps_completed')}` | "
+                f"Candidate repeat runs executed: `{tel.get('candidate_runs_executed')}` | Paper prose blocks indexed: `{tel.get('paper_blocks_indexed')}`"
+            )
+            if tel.get("phase_timings_sec"):
+                pt = ", ".join(f"{k}={v}s" for k, v in tel["phase_timings_sec"].items())
+                lines.append(f"- Phase timings: {pt}")
+        if occ:
+            lines.append(
+                f"- Dynamic `output_contract` coverage: `{occ.get('coverage_ratio')}` "
+                f"(declared={len(occ.get('declared_fields') or [])}, unpopulated={occ.get('unpopulated_fields') or []})"
+            )
+        lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
 
 
 def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, *, repeats: int = 2) -> dict[str, Any]:
+    t_total0 = time.monotonic()
+    phase_timings: dict[str, float] = {}
+    steps_completed = 0
+
     output_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -882,14 +1621,28 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, *, repeats: 
 
     result_path = output_dir / "result.json"
     result_guard.init_result(result_path, case_id=case_id, task_id="challenge-da62e8d4")
+    steps_completed += 1
 
     # 1. Environment snapshot + lockfile drift doctor
+    t0 = time.monotonic()
     budget_guard.tick_phase(budget_file, "env_lockfile_audit")
     env_snapshot = capture_env_snapshot()
     env_audit = env_lock_doctor.audit_environment_and_locks(input_dir)
     result_guard.atomic_write_json(work_dir / "env_doctor.json", env_audit)
+    phase_timings["env_lockfile_audit"] = round(time.monotonic() - t0, 4)
+    steps_completed += 1
 
-    # 2. Discover candidate Python scripts & perform deep AST inspection
+    # 2. Index supplied paper prose for exact locator & quote anchoring (with PDF diagnostics)
+    t0 = time.monotonic()
+    pdf_diagnostics: list[dict[str, Any]] = []
+    paper_blocks = collect_paper_blocks(input_dir, case_data, pdf_diagnostics=pdf_diagnostics)
+    failed_pdfs = [d for d in pdf_diagnostics if not d.get("ok")]
+    pdf_extraction_failed = bool(failed_pdfs)
+    phase_timings["paper_prose_indexing"] = round(time.monotonic() - t0, 4)
+    steps_completed += 1
+
+    # 3. Discover candidate Python scripts & perform deep AST inspection + paper-anchored parameter reconciliation
+    t0 = time.monotonic()
     candidate_scripts = sorted(
         p for p in input_dir.rglob("*.py")
         if p.is_file() and not p.name.startswith("test_")
@@ -898,9 +1651,20 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, *, repeats: 
     code_inspect_map = {ci["file"]: ci for ci in code_inspects}
 
     paper_params = case_data.get("paper_parameters") or case_data.get("hyperparameters") or {}
-    param_reconciliation = reconcile_parameters(paper_params, code_inspects)
+    param_origins = case_data.get("parameter_origins") or {}
+    target_origins = case_data.get("target_origins") or {}
+    param_reconciliation = reconcile_parameters(
+        paper_params,
+        code_inspects,
+        paper_blocks=paper_blocks,
+        param_origins=param_origins,
+        pdf_extraction_failed=pdf_extraction_failed,
+    )
+    phase_timings["ast_param_reconciliation"] = round(time.monotonic() - t0, 4)
+    steps_completed += 1
 
-    # 3. Isolated multi-run execution
+    # 4. Isolated multi-run execution
+    t0 = time.monotonic()
     budget_guard.tick_phase(budget_file, "run_candidate_methods")
     effective_repeats = int(case_data.get("repeats") or repeats)
     hashseed = str(case_data.get("pythonhashseed", "0"))
@@ -921,8 +1685,11 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, *, repeats: 
                 timeout_sec=timeout_sec,
             )
         )
+    phase_timings["candidate_execution"] = round(time.monotonic() - t0, 4)
+    steps_completed += 1
 
-    # 4. Missing original materials & tolerance comparisons
+    # 5. Missing original materials & paper-anchored tolerance comparisons
+    t0 = time.monotonic()
     missing_materials = [str(x) for x in (case_data.get("missing_materials") or [])]
     if not candidate_scripts:
         missing_materials.append("No candidate Python method scripts supplied in /input.")
@@ -939,7 +1706,98 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, *, repeats: 
         param_reconciliation=param_reconciliation,
         env_audit=env_audit,
         missing_materials=missing_materials,
+        paper_blocks=paper_blocks,
+        target_origins=target_origins,
+        pdf_extraction_failed=pdf_extraction_failed,
     )
+
+    # 5b. Closed-loop remediation re-runs for declared parameter conflict fixes (before vs after with SHA-256)
+    remediation_closed_loop: list[dict[str, Any]] = []
+    input_file_hashes = {
+        fp.relative_to(input_dir).as_posix(): sha256_file(fp)
+        for fp in sorted(p for p in input_dir.rglob("*") if p.is_file())
+    }
+    rem_specs = list(case_data.get("remediation_overrides") or [])
+    if not rem_specs:
+        # Auto-discover CLI argparse parameter conflict closed-loop verification when script accepts --<param>
+        for pc in param_reconciliation:
+            if pc.get("provenance_status") == "paper_code_conflict" and pc.get("source_kind") == "argparse_default":
+                flag = "--" + str(pc["parameter"]).replace("_", "-")
+                rem_specs.append({
+                    "label": f"post_fix_{pc['parameter']}",
+                    "script": pc["code_source"],
+                    "args": [flag, str(pc["paper_value"])],
+                    "fixed_parameters": {pc["parameter"]: pc["paper_value"]},
+                })
+    run_by_script = {r["script"]: r for r in run_summaries}
+    for rem in rem_specs:
+        rel_script = str(rem.get("script") or "")
+        sp_path = input_dir / rel_script
+        if not rel_script or not sp_path.is_file():
+            continue
+        rem_args = [str(a) for a in (rem.get("args") or [])]
+        after_run = execute_candidate_with_repeats(
+            sp_path,
+            rel_script,
+            work_dir / f"remediation_{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(rem.get('label') or 'fix'))}",
+            args=rem_args,
+            hashseed=hashseed,
+            repeats=effective_repeats,
+            timeout_sec=timeout_sec,
+        )
+        before_run = run_by_script.get(rel_script) or {}
+        fixed_map = rem.get("fixed_parameters") or {}
+        param_changes: dict[str, dict[str, Any]] = {}
+        all_fixed_matched = True
+        for pk, pv in fixed_map.items():
+            prev_row = next((p for p in param_reconciliation if p.get("code_source") == rel_script and _norm_key(p["parameter"]) == _norm_key(pk)), None)
+            paper_ref = paper_params.get(pk) if pk in paper_params else (prev_row.get("paper_value") if prev_row else None)
+            is_match = _values_equal(paper_ref, pv) if paper_ref is not None else False
+            if not is_match:
+                all_fixed_matched = False
+            param_changes[pk] = {
+                "paper_value": paper_ref,
+                "before": prev_row.get("code_value") if prev_row else None,
+                "after": pv,
+                "before_status": prev_row.get("provenance_status") if prev_row else "unknown",
+                "after_status": "matched" if is_match else "paper_code_conflict",
+                "value_origin": prev_row.get("value_origin") if prev_row else "paper_reported",
+            }
+        before_m = before_run.get("parsed_metrics") or {}
+        after_m = after_run.get("parsed_metrics") or {}
+        metric_deltas: dict[str, dict[str, Any]] = {}
+        for mk, tv in paper_targets.items():
+            if mk in before_m or mk in after_m:
+                bv = before_m.get(mk)
+                av = after_m.get(mk)
+                if bv != av or (isinstance(bv, (int, float)) and isinstance(tv, (int, float)) and abs(float(bv) - float(tv)) > 1.0):
+                    metric_deltas[mk] = {
+                        "target": tv,
+                        "before": bv,
+                        "after": av,
+                        "before_abs_diff": round(abs(float(bv) - float(tv)), 6) if isinstance(bv, (int, float)) and isinstance(tv, (int, float)) else None,
+                        "after_abs_diff": round(abs(float(av) - float(tv)), 6) if isinstance(av, (int, float)) and isinstance(tv, (int, float)) else None,
+                        "value_origin": "observed",
+                    }
+        remediation_closed_loop.append({
+            "label": str(rem.get("label") or f"fix_{rel_script}"),
+            "script": rel_script,
+            "script_sha256": sha256_file(sp_path),
+            "input_file_sha256": input_file_hashes,
+            "before_command": before_run.get("command"),
+            "after_command": after_run.get("command"),
+            "before_param_status": "paper_code_conflict",
+            "after_param_status": "matched" if all_fixed_matched else "paper_code_conflict",
+            "parameter_changes": param_changes,
+            "before_metrics": before_m,
+            "after_metrics": after_m,
+            "metric_deltas": metric_deltas,
+            "after_run_status": after_run["status"],
+            "after_returncode": after_run["returncode"],
+        })
+
+    phase_timings["tolerance_and_attribution"] = round(time.monotonic() - t0, 4)
+    steps_completed += 1
 
     # 5. Four-tier evidence ladder & honest reproducibility grade
     failed_runs = [r for r in run_summaries if r["status"] != "executed_ok"]
@@ -972,6 +1830,17 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, *, repeats: 
         repro_grade = "reproducible_within_tolerance"
 
     gaps: list[dict[str, Any]] = []
+    for fp_diag in failed_pdfs:
+        gaps.append({
+            "code": "PDF_TEXT_EXTRACTION_FAILED",
+            "severity": "error",
+            "blocking": True,
+            "source": fp_diag["file"],
+            "message": (
+                f"All PDF extraction backends (pdfplumber/pypdf/pdftotext/stdlib_zlib) failed or returned empty text "
+                f"for {fp_diag['file']} ({'; '.join(fp_diag.get('errors') or [])}). Dependent paper anchors marked unverified."
+            ),
+        })
     for mm in missing_materials:
         gaps.append({"code": "MISSING_ORIGINAL_MATERIAL", "severity": "info", "source": "repro_audit_runner", "message": mm})
     if env_audit["summary"]["conda_pip_mixed"] and not env_audit["summary"]["strict_lockfile_present"]:
@@ -1038,23 +1907,175 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, *, repeats: 
             "message": f"{len(missing_comparisons)} comparison(s) lacked a numeric observation or paper baseline.",
         })
 
+    paper_param_rows = [p for p in param_reconciliation if p["provenance_status"] != "code_only_undocumented"]
+    anchored_param_count = sum(1 for p in paper_param_rows if p.get("paper_anchor_status") in ("anchored_exact", "anchored_context"))
+    unanchored_params = sorted({p["parameter"] for p in paper_param_rows if p.get("paper_anchor_status") == "not_found_in_supplied_prose"})
+    anchored_metric_count = sum(1 for c in comparisons if c.get("paper_anchor_status") in ("anchored_exact", "anchored_context"))
+    unanchored_metrics = sorted({c["metric"] for c in comparisons if c.get("paper_anchor_status") == "not_found_in_supplied_prose"})
+    if paper_blocks and (unanchored_params or unanchored_metrics):
+        gaps.append({
+            "code": "PAPER_ANCHOR_UNVERIFIED",
+            "severity": "info",
+            "source": "bind_paper_anchor",
+            "message": f"Paper prose anchor not found in supplied text for params={unanchored_params} / metrics={unanchored_metrics}.",
+        })
+
+    # Dynamic case.json.output_contract absorption
+    raw_contract = case_data.get("output_contract")
+    contract_fields: list[str] = []
+    if isinstance(raw_contract, list):
+        contract_fields = [str(k) for k in raw_contract if k]
+    elif isinstance(raw_contract, dict):
+        if isinstance(raw_contract.get("required_fields"), list):
+            contract_fields = [str(k) for k in raw_contract["required_fields"] if k]
+        elif isinstance(raw_contract.get("fields"), list):
+            contract_fields = [str(k) for k in raw_contract["fields"] if k]
+        elif isinstance(raw_contract.get("properties"), dict):
+            contract_fields = [str(k) for k in raw_contract["properties"].keys() if k]
+        else:
+            contract_fields = [str(k) for k in raw_contract.keys() if k]
+
+    steps_completed += 1
+    total_runs_exec = sum(len(r.get("repeat_runs") or []) for r in run_summaries)
+    execution_telemetry: dict[str, Any] = {
+        "total_elapsed_sec": round(time.monotonic() - t_total0, 4),
+        "steps_completed": steps_completed,
+        "candidate_runs_executed": total_runs_exec,
+        "paper_blocks_indexed": len(paper_blocks),
+        "phase_timings_sec": phase_timings,
+    }
+
     report: dict[str, Any] = {
         "case_id": case_id,
         "reproducibility_grade": repro_grade,
         "evidence_ladder": evidence_ladder,
         "environment_snapshot": env_snapshot,
         "environment_lockfile_audit": env_audit,
+        "pdf_extraction_diagnostics": pdf_diagnostics,
         "candidate_scripts": code_inspects,
         "parameter_reconciliation": param_reconciliation,
         "execution_runs": run_summaries,
         "failed_runs_excluded": excluded_failed,
         "tolerance_comparisons": comparisons,
+        "remediation_closed_loop": remediation_closed_loop,
         "missing_original_materials": missing_materials,
+        "execution_telemetry": execution_telemetry,
         "scope_disclaimer": (
             "Verification covers supplied candidate scripts, runtime manifests, and a priori tolerances only; "
             "synthetic trials do not substitute for unavailable original author code, physical experiments, or full external PMLB datasets."
         ),
     }
+
+    metrics = {
+        "candidate_script_count": len(candidate_scripts),
+        "executed_ok_count": sum(1 for r in run_summaries if r["status"] == "executed_ok"),
+        "failed_run_count": len(failed_runs),
+        "non_deterministic_run_count": len(jitter_runs),
+        "unseeded_stochastic_script_count": len(unseeded_scripts),
+        "unpinned_dependency_count": env_audit["summary"]["unpinned_dependency_count"],
+        "conda_pip_mixed_flag": 1 if env_audit["summary"]["conda_pip_mixed"] else 0,
+        "parameter_conflict_count": len(param_conflicts),
+        "paper_only_missing_param_count": len(paper_only_missing),
+        "code_only_undocumented_param_count": len(code_only_undoc),
+        "paper_anchored_param_count": anchored_param_count,
+        "paper_anchored_metric_count": anchored_metric_count,
+        "within_tolerance_count": len(within_tol),
+        "out_of_tolerance_count": len(out_of_tol),
+        "total_elapsed_sec": execution_telemetry["total_elapsed_sec"],
+    }
+    metric_provenance = {
+        "candidate_script_count": "reproduction_audit_report.json:candidate_scripts",
+        "executed_ok_count": "reproduction_audit_report.json:execution_runs",
+        "failed_run_count": "reproduction_audit_report.json:failed_runs_excluded",
+        "non_deterministic_run_count": "reproduction_audit_report.json:execution_runs",
+        "unseeded_stochastic_script_count": "reproduction_audit_report.json:candidate_scripts",
+        "unpinned_dependency_count": "reproduction_audit_report.json:environment_lockfile_audit",
+        "conda_pip_mixed_flag": "reproduction_audit_report.json:environment_lockfile_audit",
+        "parameter_conflict_count": "reproduction_audit_report.json:parameter_reconciliation",
+        "paper_only_missing_param_count": "reproduction_audit_report.json:parameter_reconciliation",
+        "code_only_undocumented_param_count": "reproduction_audit_report.json:parameter_reconciliation",
+        "paper_anchored_param_count": "reproduction_audit_report.json:parameter_reconciliation",
+        "paper_anchored_metric_count": "reproduction_audit_report.json:tolerance_comparisons",
+        "within_tolerance_count": "reproduction_audit_report.json:tolerance_comparisons",
+        "out_of_tolerance_count": "reproduction_audit_report.json:tolerance_comparisons",
+        "total_elapsed_sec": "reproduction_audit_report.json:execution_telemetry",
+    }
+
+    patch: dict[str, Any] = {
+        "artifacts": ["result.json", "reproduction_audit_report.json", "reproduction_report.md"],
+        "reproducibility_grade": repro_grade,
+        "evidence_ladder": evidence_ladder,
+        "environment_snapshot": env_snapshot,
+        "environment_lockfile_summary": env_audit["summary"],
+        "pdf_extraction_diagnostics": pdf_diagnostics,
+        "parameter_reconciliation": param_reconciliation,
+        "execution_runs": run_summaries,
+        "failed_runs_excluded": excluded_failed,
+        "tolerance_comparisons": comparisons,
+        "remediation_closed_loop": remediation_closed_loop,
+        "missing_original_materials": missing_materials,
+        "execution_telemetry": execution_telemetry,
+        "metrics": metrics,
+        "metric_provenance": metric_provenance,
+        "findings": [
+            f"Audited {len(candidate_scripts)} candidate script(s) ({metrics['executed_ok_count']} clean exit, {metrics['failed_run_count']} failed excluded); "
+            f"grade={repro_grade}; within_tolerance={len(within_tol)}/{len(comparisons)}; "
+            f"paper_anchored_params={anchored_param_count}/{len(paper_param_rows)}, paper_anchored_metrics={anchored_metric_count}/{len(comparisons)}; "
+            f"param_conflicts={len(param_conflicts)}; jitter_runs={len(jitter_runs)}; "
+            f"unpinned_deps={metrics['unpinned_dependency_count']}."
+        ],
+        "gaps": gaps,
+    }
+
+    output_contract_compliance: dict[str, Any] = {}
+    if contract_fields:
+        paper_sources = sorted({b["source_file"] for b in paper_blocks})
+        alias_map = {
+            "sources": paper_sources or [c["file"] for c in code_inspects],
+            "uncertainty": gaps,
+            "environment_lockfile_audit": env_audit,
+            "candidate_scripts": code_inspects,
+            "discrepancy_attribution": [
+                {
+                    "candidate": c.get("candidate"),
+                    "metric": c.get("metric"),
+                    "status": c.get("status"),
+                    "primary_axis": c.get("primary_attribution_axis"),
+                    "supporting_axes": c.get("supporting_axes"),
+                    "evidence": c.get("attribution_evidence"),
+                }
+                for c in comparisons
+                if c.get("primary_attribution_axis")
+            ],
+            "summary": patch["findings"][0],
+            "research_repo_doctor_checklist": env_audit.get("research_repo_doctor_checklist"),
+        }
+        populated: list[str] = []
+        unpopulated: list[str] = []
+        for cf in contract_fields:
+            if cf in patch or cf in ("case_id", "status", "task_id", "schema_version", "output_contract_compliance"):
+                populated.append(cf)
+            elif cf in alias_map:
+                patch[cf] = alias_map[cf]
+                populated.append(cf)
+            else:
+                patch[cf] = None
+                unpopulated.append(cf)
+        if unpopulated:
+            gaps.append({
+                "code": "OUTPUT_CONTRACT_FIELD_UNPOPULATED",
+                "severity": "info",
+                "source": "output_contract",
+                "message": f"Declared output_contract field(s) had no computed mapping and were preserved as null: {unpopulated}.",
+            })
+        output_contract_compliance = {
+            "declared_fields": contract_fields,
+            "populated_fields": populated,
+            "unpopulated_fields": unpopulated,
+            "coverage_ratio": round(len(populated) / max(1, len(contract_fields)), 4),
+        }
+        patch["output_contract_compliance"] = output_contract_compliance
+        report["output_contract_compliance"] = output_contract_compliance
 
     report_path = output_dir / "reproduction_audit_report.json"
     result_guard.atomic_write_json(report_path, report)
@@ -1075,60 +2096,13 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path, *, repeats: 
             "failed_excluded": len(excluded_failed),
             "jitter_runs": len(jitter_runs),
             "comparisons": len(comparisons),
+            "paper_anchored_params": anchored_param_count,
+            "paper_anchored_metrics": anchored_metric_count,
+            "elapsed_sec": execution_telemetry["total_elapsed_sec"],
         },
         record_id=case_id,
     )
 
-    metrics = {
-        "candidate_script_count": len(candidate_scripts),
-        "executed_ok_count": sum(1 for r in run_summaries if r["status"] == "executed_ok"),
-        "failed_run_count": len(failed_runs),
-        "non_deterministic_run_count": len(jitter_runs),
-        "unseeded_stochastic_script_count": len(unseeded_scripts),
-        "unpinned_dependency_count": env_audit["summary"]["unpinned_dependency_count"],
-        "conda_pip_mixed_flag": 1 if env_audit["summary"]["conda_pip_mixed"] else 0,
-        "parameter_conflict_count": len(param_conflicts),
-        "paper_only_missing_param_count": len(paper_only_missing),
-        "code_only_undocumented_param_count": len(code_only_undoc),
-        "within_tolerance_count": len(within_tol),
-        "out_of_tolerance_count": len(out_of_tol),
-    }
-    metric_provenance = {
-        "candidate_script_count": "reproduction_audit_report.json:candidate_scripts",
-        "executed_ok_count": "reproduction_audit_report.json:execution_runs",
-        "failed_run_count": "reproduction_audit_report.json:failed_runs_excluded",
-        "non_deterministic_run_count": "reproduction_audit_report.json:execution_runs",
-        "unseeded_stochastic_script_count": "reproduction_audit_report.json:candidate_scripts",
-        "unpinned_dependency_count": "reproduction_audit_report.json:environment_lockfile_audit",
-        "conda_pip_mixed_flag": "reproduction_audit_report.json:environment_lockfile_audit",
-        "parameter_conflict_count": "reproduction_audit_report.json:parameter_reconciliation",
-        "paper_only_missing_param_count": "reproduction_audit_report.json:parameter_reconciliation",
-        "code_only_undocumented_param_count": "reproduction_audit_report.json:parameter_reconciliation",
-        "within_tolerance_count": "reproduction_audit_report.json:tolerance_comparisons",
-        "out_of_tolerance_count": "reproduction_audit_report.json:tolerance_comparisons",
-    }
-
-    patch = {
-        "artifacts": ["result.json", "reproduction_audit_report.json", "reproduction_report.md"],
-        "reproducibility_grade": repro_grade,
-        "evidence_ladder": evidence_ladder,
-        "environment_snapshot": env_snapshot,
-        "environment_lockfile_summary": env_audit["summary"],
-        "parameter_reconciliation": param_reconciliation,
-        "execution_runs": run_summaries,
-        "failed_runs_excluded": excluded_failed,
-        "tolerance_comparisons": comparisons,
-        "missing_original_materials": missing_materials,
-        "metrics": metrics,
-        "metric_provenance": metric_provenance,
-        "findings": [
-            f"Audited {len(candidate_scripts)} candidate script(s) ({metrics['executed_ok_count']} clean exit, {metrics['failed_run_count']} failed excluded); "
-            f"grade={repro_grade}; within_tolerance={len(within_tol)}/{len(comparisons)}; "
-            f"param_conflicts={len(param_conflicts)}; jitter_runs={len(jitter_runs)}; "
-            f"unpinned_deps={metrics['unpinned_dependency_count']}."
-        ],
-        "gaps": gaps,
-    }
     res = result_guard.update_result(result_path, patch, finalize=True)
     grounding = gap_gate.check_grounding(res, [input_dir])
     if not grounding["ok"]:

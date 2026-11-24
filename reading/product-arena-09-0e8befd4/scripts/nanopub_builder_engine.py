@@ -62,15 +62,15 @@ RELATIONS_ACTIVE: dict[str, str] = {
     "activates": r"activate[sd]?|induce[sd]?|promote[sd]?|upregulate[sd]?|激活|诱导|促进|上调",
     "regulates": r"regulate[sd]?|modulate[sd]?|control(?:s|led)?|调控|调节",
     "correlates_with": r"(?:positively\s+|negatively\s+)?correlate[sd]?\s+with|相关",
-    "associated_with": r"(?:is|was|are|were)\s+(?:significantly\s+)?associated\s+with|与.+相关",
+    "associated_with": r"(?:is|was|are|were|be)\s+(?:significantly\s+|strongly\s+|positively\s+|negatively\s+)?associated\s+with|与.+相关",
     "expresses": r"express(?:es|ed)?|高表达|表达",
     "reaches": r"reach(?:es|ed)?|attain(?:s|ed)?|达到",
     "achieves": r"achieve[sd]?|yield(?:s|ed)?|获得|实现",
     "outperforms": r"outperform(?:s|ed)?|exceed(?:s|ed)?|surpass(?:es|ed)?|优于|高于",
     "compares_with": r"compare[sd]?\s+with|相比|对比",
-    "uses": r"use[sd]?|employ(?:s|ed)?|utilize[sd]?|adopt(?:s|ed)?|使用|采用",
+    "uses": r"use[sd]?|employ(?:s|ed)?|utilize[sd]?|adopt(?:s|ed)?|(?:was|were|is|are)\s+(?:performed|analyzed|calculated|estimated)\s+(?:using|via|with)|使用|采用",
     "supports": r"support(?:s|ed)?|confirm(?:s|ed)?|corroborate[sd]?|支持|证实",
-    "contradicts": r"contradict(?:s|ed)?|refute[sd]?|challenge[sd]?|反驳|相矛盾",
+    "contradicts": r"contradict(?:s|ed)?|refute[sd]?|disagree[sd]?\s+with|conflicts?\s+with|反驳|相矛盾",
     "causes_direct": r"directly\s+cause[sd]?|causally\s+drive[sd]?|直接导致",
     "does_not_differ": r"(?:does|did|do)\s+not\s+(?:significantly\s+)?differ\s+from|无显著差异",
 }
@@ -95,23 +95,39 @@ NEGATION_RE = re.compile(
     re.I,
 )
 HEDGE_RE = re.compile(
-    r"\b(?:may|might|could|suggest(?:s|ed)?|indicat(?:es|ed)\s+that|possibly|potentially|appear(?:s|ed)\s+to|likely|uncertain|hypothesi[sz]e[sd]?)\b"
+    r"\b(?:may|might|could|suggest(?:s|ed)?|indicat(?:es|ed)\s+that|possibly|probably|potentially|appear(?:s|ed)\s+to|likely|uncertain|hypothesi[sz]e[sd]?)\b"
     r"|可能|提示|推测|尚未|不确定|似乎",
     re.I,
 )
 CITED_SECONDARY_RE = re.compile(
-    r"\b(?:previous(?:ly)?\s+stud(?:y|ies)|prior\s+work|et\s+al\.,?\s*\(?19\d\d|et\s+al\.,?\s*\(?20\d\d|reported\s+by|according\s+to)\b"
+    r"\b(?:previous(?:ly)?\s+stud(?:y|ies)|prior\s+work|et\s+al\.?(?:,?\s*\(?(?:19|20)\d\d)?|reported\s+by|according\s+to|"
+    r"in\s+a\s+study\s+conducted\s+in|in\s+line\s+with|similar\s+to\s+findings\s+(?:in|from)|cited\s+(?:study|literature|report))\b"
     r"|\[\d+(?:\s*[-,]\s*\d+)*\]|前人研究|既往报道",
     re.I,
 )
 INDIRECT_INFERENCE_RE = re.compile(
-    r"\b(?:suggest(?:s|ed)?|impli(?:es|ed)|inferred|likely\s+due\s+to|consistent\s+with\s+a\s+model|we\s+speculate|may\s+explain)\b"
+    r"\b(?:suggest(?:s|ed)?|impli(?:es|ed)|inferred|probably|likely\s+due\s+to|consistent\s+with\s+a\s+model|we\s+speculate|may\s+explain)\b"
     r"|推测|间接提示|可能归因于",
     re.I,
 )
 QUANTITY_RE = re.compile(
-    r"(?<![A-Za-z0-9_.])(?:[<>≤≥=]\s*)?[−-]?\d+(?:\.\d+)?(?:\s*(?:±\s*\d+(?:\.\d+)?)?)?"
-    r"(?:\s*(?:%|°C|K|mV|V|mA/cm\^?2|mA|A|mg/L|µg/mL|ug/mL|µM|uM|mM|nM|mol/L|M|nm|µm|um|mm|cm|m|kg|g|mg|µg|ug|h|hr|min|s|ms|Pa|kPa|MPa|eV|kJ/mol|ppm|ppb|fold|x)\b)?",
+    r"(?<![A-Za-z0-9_.])"
+    r"(?P<comparator>[<>≤≥=])?\s*"
+    r"(?P<value>[−-]?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:±\s*\d+(?:\.\d+)?))?)"
+    r"(?:\s*(?P<unit>%|°C|×|(?:mA/cm\^?2|kJ/mol|mol/L|mg/L|µg/mL|ug/mL|mg/dL|g/dL|µM|uM|mM|nM|mV|kPa|MPa|Pa|eV|ppm|ppb|fold|times|cm|mm|nm|µm|um|kg|mg|µg|ug|ms|min|hr|K|V|mA|A|M|m|g|h|s|x)\b))?"
+)
+UNRESOLVED_SUBJECT_RE = re.compile(
+    r"^(?:it|its|they|them|their|he|she|we|us|our|this|that|these|those|"
+    r"(?:this|the|our)\s+(?:present\s+)?(?:study|paper|work|article|report|analysis|author|authors|model|agent|method|system|tool|framework|approach|algorithm|result|results|finding|findings|data|dataset)|"
+    r"each\s+(?:tool|agent|model|method|study|paper)|本研究|该研究|本文|该模型|该代理|它|它们|其)$",
+    re.I,
+)
+PREDICATE_CORE_VERBS_RE = re.compile(
+    r"\b(?:increase[sd]?|enhance[sd]?|elevate[sd]?|boost(?:s|ed)?|decrease[sd]?|reduce[sd]?|lower(?:s|ed)?|diminish(?:es|ed)?|"
+    r"inhibit(?:s|ed)?|suppress(?:es|ed)?|block(?:s|ed)?|activate[sd]?|induce[sd]?|promote[sd]?|upregulate[sd]?|"
+    r"regulate[sd]?|modulate[sd]?|outperform(?:s|ed)?|exceed(?:s|ed)?|surpass(?:es|ed)?|achieve[sd]?|"
+    r"contradict(?:s|ed)?|refute[sd]?|support(?:s|ed)?|confirm(?:s|ed)?|cataly[sz]e[sd]?)\b",
+    re.I,
 )
 SCOPE_RE = re.compile(
     r"\b(?:only\s+(?:when|under|at|in)|except\s+(?:when|under|for|in)|under\s+[A-Za-z0-9°.\-\s]{2,35}|"
@@ -121,6 +137,11 @@ SCOPE_RE = re.compile(
 )
 COMPOUND_CLAUSE_SPLIT_RE = re.compile(
     r"\s*(?:;|\bwhereas\b|\bwhile\b|\bhowever,\s*|\balthough\b|\band\s+(?:also|simultaneously|in\s+contrast)\b|；|而|但是|然而)\s*",
+    re.I,
+)
+# Split ordinary "and" multi-predicate clauses (e.g., "X increases A and decreases B")
+AND_MULTI_PRED_SPLIT_RE = re.compile(
+    r",?\s+\band\b\s+(?=(?:[A-Za-z0-9\-]+\s+){0,3}(?:increase[sd]?|enhance[sd]?|elevate[sd]?|decrease[sd]?|reduce[sd]?|lower(?:s|ed)?|inhibit(?:s|ed)?|suppress(?:es|ed)?|activate[sd]?|induce[sd]?|promote[sd]?|outperform(?:s|ed)?|achieve[sd]?|support(?:s|ed)?|contradict(?:s|ed)?|helps?|ensures?)\b)",
     re.I,
 )
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\u4e00-\u9fff])|(?<=[。！？])")
@@ -142,25 +163,84 @@ def _norm_ws(text: str) -> str:
 
 
 def verify_exact_quote(quote: str, source_text: str) -> bool:
-    q = _norm_ws(quote).casefold()
-    s = _norm_ws(source_text).casefold()
+    """Case-sensitive verbatim substring check (only normalizes whitespace/linebreaks; blocks mM/mm or Co/CO tampering)."""
+    q = _norm_ws(quote)
+    s = _norm_ws(source_text)
     return len(q) >= 6 and q in s
 
 
-def _extract_quantities(text: str) -> set[str]:
-    out: set[str] = set()
-    for m in QUANTITY_RE.finditer(text or ""):
-        tok = _norm_ws(m.group(0)).replace("−", "-")
-        # Ignore bare years like 2024 or 1999 in citations
-        if re.fullmatch(r"(?:19|20)\d{2}", tok):
+def _extract_quantity_records(text: str) -> list[dict[str, Any]]:
+    """Extract structured quantity records bound to local entity context, unit, comparator, and char_span."""
+    records: list[dict[str, Any]] = []
+    if not text:
+        return records
+    for m in QUANTITY_RE.finditer(text):
+        raw_val = _norm_ws(m.group("value") or "").replace("−", "-")
+        comp = _norm_ws(m.group("comparator") or "")
+        unit = _norm_ws(m.group("unit") or "")
+        # Ignore bare years like 2024 or 1999 in citations when unitless
+        if not unit and not comp and re.fullmatch(r"(?:19|20)\d{2}", raw_val):
             continue
-        # Ignore tiny citation numbers inside brackets like [1]
         start = m.start()
         end = m.end()
         if start > 0 and end < len(text) and text[start - 1] == "[" and text[end] == "]":
             continue
-        out.add(tok)
-    return out
+        prefix_ctx = text[max(0, start - 20) : start]
+        if re.search(r"\b(?:Figure|Fig\.?|Table|Supplementary\s+Figure|Section|Eq\.?|Ref\.?)\s*$", prefix_ctx, re.I):
+            continue
+        # Extract local entity context tokens around the quantity (for cross-entity swap detection)
+        win_left = text[max(0, start - 36) : start]
+        win_right = text[end : min(len(text), end + 36)]
+        # Pull nearest content word anchor (metric or entity name)
+        ent_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-+]{2,}", win_left + " " + win_right)
+        stop = {"and", "for", "with", "the", "that", "this", "from", "were", "was", "are", "than", "more", "less", "over", "under", "about", "around", "across", "compared", "relative"}
+        entity_ctx = [t.lower() for t in ent_tokens if t.lower() not in stop][:4]
+        canonical = f"{comp}{raw_val}{(' ' + unit) if unit else ''}".strip()
+        records.append({
+            "entity_context": entity_ctx,
+            "comparator": comp or "=",
+            "value": raw_val,
+            "unit": unit or None,
+            "canonical": canonical,
+            "char_span": [start, end],
+        })
+    return records
+
+
+def _extract_quantities(text: str) -> set[str]:
+    return {r["canonical"] for r in _extract_quantity_records(text)}
+
+
+def _has_cross_entity_quantity_swap(quote_recs: list[dict[str, Any]], stmt_recs: list[dict[str, Any]]) -> bool:
+    """Detect if two quantities exist in both texts but had their local entity bindings swapped."""
+    if len(quote_recs) < 2 or len(stmt_recs) < 2:
+        return False
+    # Map canonical value -> set of entity context tokens in quote vs statement
+    q_by_val: dict[str, set[str]] = {}
+    for r in quote_recs:
+        q_by_val.setdefault(r["canonical"], set()).update(r["entity_context"])
+    s_by_val: dict[str, set[str]] = {}
+    for r in stmt_recs:
+        s_by_val.setdefault(r["canonical"], set()).update(r["entity_context"])
+    # Check if two distinct quantities exist whose contexts overlap better when swapped than aligned
+    common_vals = [v for v in q_by_val if v in s_by_val and q_by_val[v] and s_by_val[v]]
+    for i in range(len(common_vals)):
+        for j in range(i + 1, len(common_vals)):
+            v1, v2 = common_vals[i], common_vals[j]
+            aligned = len(q_by_val[v1] & s_by_val[v1]) + len(q_by_val[v2] & s_by_val[v2])
+            swapped = len(q_by_val[v1] & s_by_val[v2]) + len(q_by_val[v2] & s_by_val[v1])
+            if swapped > aligned and aligned == 0:
+                return True
+    return False
+
+
+def _has_unsplit_and_multi_predicate(statement: str) -> bool:
+    """Detect ordinary 'and' compound statements containing >=2 distinct independent predicate clauses."""
+    parts = [p.strip() for p in AND_MULTI_PRED_SPLIT_RE.split(statement or "") if p.strip()]
+    if len(parts) < 2:
+        return False
+    pred_hits = sum(1 for p in parts if PREDICATE_CORE_VERBS_RE.search(p))
+    return pred_hits >= 2
 
 
 def _strip_xml_ns(tag: str) -> str:
@@ -306,9 +386,11 @@ def _classify_evidence_type(text: str) -> str:
 
 
 def _classify_polarity(text: str) -> str:
-    if NEGATION_RE.search(text):
+    # Strip trailing non-restrictive relative clauses (", which do not ...") when checking main predicate negation
+    main_clause = re.split(r",\s+which\b", text, maxsplit=1, flags=re.I)[0]
+    if NEGATION_RE.search(main_clause):
         return "negated"
-    if HEDGE_RE.search(text):
+    if HEDGE_RE.search(main_clause):
         return "uncertain"
     return "affirmed"
 
@@ -356,10 +438,19 @@ def extract_candidate_claims_from_paragraphs(
             sent = _norm_ws(sent)
             if len(sent) < 20:
                 continue
-            clauses = [_norm_ws(c).strip(",; ") for c in COMPOUND_CLAUSE_SPLIT_RE.split(sent) if len(_norm_ws(c)) >= 24]
+            # Skip bibliography / reference-list entries (e.g., "12. Author AB. 2017 Annual Report... doi:...")
+            if re.search(r"\b(?:Annual\s+Report|REFERENCES|Available\s+from:|https?://|doi:\s*10\.)\b", sent, re.I) and len(sent) < 260:
+                continue
+            if re.match(r"^\d{1,3}\.\s+[A-Z][a-z]+(?:\s+[A-Z]{1,3})?,", sent):
+                continue
+            raw_clauses = [_norm_ws(c).strip(",; ") for c in COMPOUND_CLAUSE_SPLIT_RE.split(sent) if len(_norm_ws(c)) >= 24]
+            clauses: list[str] = []
+            for rc in raw_clauses:
+                sub_parts = [_norm_ws(sp).strip(",; ") for sp in AND_MULTI_PRED_SPLIT_RE.split(rc) if len(_norm_ws(sp)) >= 18]
+                clauses.extend(sub_parts if len(sub_parts) > 1 else [rc])
             for clause in clauses:
                 # Skip fragmented PDF snippets with unbalanced parentheses or starting mid-clause
-                if clause.count("(") != clause.count(")") or re.match(r"^(?:and|or|but|mainly|with|of|to|in|for)\b", clause):
+                if clause.count("(") != clause.count(")") or re.match(r"^(?:and|or|but|mainly|with|of|to|in|for|which|that)\b", clause, re.I):
                     continue
                 matched_pred = None
                 voice = "active"
@@ -375,10 +466,24 @@ def extract_candidate_claims_from_paragraphs(
                     for pred_name, pat in RELATIONS_ACTIVE.items():
                         m = re.search(rf"(?:^|\s)({pat})(?:\s|$|[,.;:])", clause, re.I)
                         if m:
-                            # Skip adjectival/passive-participle/nominal false positives (e.g., "a reduced number", "was used", "accidental use")
+                            raw_tok = m.group(1).strip()
+                            # Skip capitalized proper nouns (e.g., "Poison Control Centers", "Support Vector")
+                            if raw_tok and raw_tok[0].isupper():
+                                continue
+                            # Skip nominalized, adjectival, or passive-participle false positives
                             prev_ctx = clause[: m.start()].strip().lower()
-                            matched_tok = m.group(1).strip().lower()
-                            if re.search(r"\b(?:a|an|the|accidental|chronic|was|were|is|are|been|being)$", prev_ctx) and matched_tok in {"use", "used", "reduced", "increased", "decreased", "elevated", "lowered"}:
+                            matched_tok = raw_tok.lower()
+                            if re.search(
+                                r"\b(?:a|an|the|this|that|these|those|their|its|our|his|her|of|with|by|for|in|on|to|"
+                                r"most|more|widely|commonly|frequently|rarely|newly|previously|well|"
+                                r"accidental|indiscriminate|chronic|acute|rapid|gradual|significant|marked|sharp|slight|annual|overall|further|"
+                                r"was|were|is|are|be|been|being)$",
+                                prev_ctx,
+                            ) and matched_tok in {
+                                "use", "used", "uses", "decrease", "decreases", "decreased", "increase", "increases", "increased",
+                                "reduce", "reduced", "reduction", "elevated", "lowered", "support", "supports", "supported",
+                                "control", "controls", "controlled", "express", "expressed", "reach", "reached", "achieve", "achieved", "promote", "promoted",
+                            }:
                                 continue
                             matched_pred = pred_name
                             voice = "active"
@@ -395,15 +500,20 @@ def extract_candidate_claims_from_paragraphs(
                 if cond and cond in right_clean:
                     right_clean = _norm_ws(right_clean.replace(cond, "")).strip(",;:- .")
                 # Strip leading filler words from left/right
-                left = re.sub(r"^(?:in\s+this\s+study,\s*|we\s+found\s+that\s+|results\s+show\s+that\s+|specifically,\s*|furthermore,\s*|additionally,\s*|the\s+)", "", left, flags=re.I).strip()
-                right_clean = re.sub(r"^(?:the\s+|a\s+|an\s+)", "", right_clean, flags=re.I).strip()
+                left = re.sub(r"^(?:in\s+this\s+study,\s*|we\s+found\s+that\s+|results\s+show\s+that\s+|specifically,\s*|furthermore,\s*|additionally,\s*|moreover,\s*|notably,\s*|the\s+)", "", left, flags=re.I).strip()
+                right_clean = re.sub(r"^(?:the\s+|a\s+|an\s+|to\s+|by\s+)", "", right_clean, flags=re.I).strip()
+                # Reject dangling function-word boundaries that indicate broken NP spans
+                if re.search(r"\b(?:a|an|the|with|of|to|in|for|and|or|by|from|their|its|which|that|was|were|is|are|have|has|had)$", left, re.I):
+                    continue
+                if re.match(r"^(?:and|or|but|in|on|at|of|for|by|with|as|from|which|that|were|was|is|are)\b", right_clean, re.I):
+                    continue
                 # Bound entity span lengths
                 if len(left.split()) > 10:
                     left = " ".join(left.split()[-6:])
                 if len(right_clean.split()) > 12:
                     right_clean = " ".join(right_clean.split()[:8])
 
-                if len(left) < 2 or len(right_clean) < 2:
+                if len(left) < 3 or len(right_clean) < 3:
                     continue
                 if voice == "passive":
                     subj, obj = right_clean, left
@@ -456,9 +566,19 @@ def verify_and_build_nanopub(
     if fields["predicate"] not in RELATIONS_ACTIVE or fields["polarity"] not in POLARITIES:
         return None, {"code": "UNKNOWN_RELATION_OR_POLARITY", "predicate": fields["predicate"], "polarity": fields["polarity"]}
 
-    # Anti-overbroad assertion check (prevents dumping entire multi-sentence paragraphs into one assertion)
+    # Anti-overbroad assertion check (prevents dumping entire multi-sentence paragraphs or multi-predicate 'and' compounds)
     if len(fields["statement"].split()) > 65 or len(re.findall(r"[.!?。！？]\s+\S", fields["statement"])) >= 2:
         return None, {"code": "OVERBROAD_NON_ATOMIC_ASSERTION", "detail": "Assertion spans multiple sentences or >65 words; split into atomic claims."}
+    if _has_unsplit_and_multi_predicate(fields["statement"]):
+        return None, {"code": "COMPOUND_MULTI_PREDICATE_NOT_SPLIT", "detail": "Compound 'and' sentence contains >=2 independent predicates; split into atomic assertions."}
+
+    # Hard-block unresolved pronouns or generic deictic subjects (e.g., "it", "the agent", "The present study")
+    if UNRESOLVED_SUBJECT_RE.match(fields["subject"]):
+        return None, {
+            "code": "UNRESOLVED_PRONOUN_OR_DEICTIC_SUBJECT",
+            "subject": fields["subject"],
+            "detail": "Unresolved pronoun or generic deictic subject is forbidden; bind to an explicit named entity verified in the anchored paragraph.",
+        }
 
     locations = anchor_lookup.get((fields["source_file"], fields["paragraph_id"]), [])
     if len(locations) != 1:
@@ -474,16 +594,28 @@ def verify_and_build_nanopub(
         return None, {"code": "QUOTE_NOT_VERBATIM_IN_ANCHOR", "source_file": fields["source_file"], "paragraph_id": fields["paragraph_id"]}
 
     quote = fields["quote"]
-    if any(term.casefold() not in quote.casefold() for term in (fields["subject"], fields["object"])):
+    pronoun_in_quote = _norm_ws(str(proposal.get("pronoun_in_quote") or ""))
+    # Subject must appear verbatim in quote, OR be explicitly resolved from the SAME anchored paragraph with pronoun_in_quote
+    subj_in_quote = fields["subject"] in quote or fields["subject"].casefold() in quote.casefold()
+    subj_coref_valid = (
+        not subj_in_quote
+        and bool(pronoun_in_quote)
+        and (pronoun_in_quote.casefold() in quote.casefold())
+        and (fields["subject"].casefold() in para["text"].casefold())
+    )
+    obj_in_quote = fields["object"].casefold() in quote.casefold()
+    if (not subj_in_quote and not subj_coref_valid) or not obj_in_quote:
         return None, {"code": "SUBJECT_OR_OBJECT_NOT_IN_QUOTE", "subject": fields["subject"], "object": fields["object"]}
     if condition and condition.casefold() not in quote.casefold():
         return None, {"code": "CONDITION_NOT_IN_QUOTE", "condition": condition}
 
-    # Negation / hedging / polarity fidelity
-    quote_neg = bool(NEGATION_RE.search(quote))
-    stmt_neg = bool(NEGATION_RE.search(fields["statement"]))
-    quote_hedge = bool(HEDGE_RE.search(quote))
-    stmt_hedge = bool(HEDGE_RE.search(fields["statement"]))
+    # Negation / hedging / polarity fidelity (evaluate main clause; ignore non-restrictive ", which ..." aside)
+    main_quote = re.split(r",\s+which\b", quote, maxsplit=1, flags=re.I)[0]
+    main_stmt = re.split(r",\s+which\b", fields["statement"], maxsplit=1, flags=re.I)[0]
+    quote_neg = bool(NEGATION_RE.search(main_quote))
+    stmt_neg = bool(NEGATION_RE.search(main_stmt))
+    quote_hedge = bool(HEDGE_RE.search(main_quote))
+    stmt_hedge = bool(HEDGE_RE.search(main_stmt))
     if quote_neg != stmt_neg:
         return None, {"code": "NEGATION_NOT_PRESERVED"}
     if quote_hedge != stmt_hedge:
@@ -495,14 +627,26 @@ def verify_and_build_nanopub(
     if fields["polarity"] == "uncertain" and not stmt_hedge:
         return None, {"code": "UNCERTAIN_STATEMENT_MISSING_HEDGE"}
 
-    # Numeric/unit/comparator conservation
-    obs_qty = _extract_quantities(quote)
-    stmt_qty = _extract_quantities(fields["statement"])
+    # Structured entity-bound numeric/unit/comparator conservation (preserves %, °C, ×, mM/mm and catches cross-entity swaps)
+    obs_qty_recs = _extract_quantity_records(quote)
+    stmt_qty_recs = _extract_quantity_records(fields["statement"])
+    obs_qty = {r["canonical"] for r in obs_qty_recs}
+    stmt_qty = {r["canonical"] for r in stmt_qty_recs}
     if stmt_qty != obs_qty:
-        return None, {"code": "NUMERIC_VALUE_UNIT_OR_COMPARATOR_CHANGED", "quote_quantities": sorted(obs_qty), "statement_quantities": sorted(stmt_qty)}
+        return None, {
+            "code": "NUMERIC_VALUE_UNIT_OR_COMPARATOR_CHANGED",
+            "quote_quantities": sorted(obs_qty),
+            "statement_quantities": sorted(stmt_qty),
+        }
+    if _has_cross_entity_quantity_swap(obs_qty_recs, stmt_qty_recs):
+        return None, {
+            "code": "QUANTITY_ENTITY_BINDING_MISMATCH",
+            "detail": "Quantities appear swapped across distinct entities between quote and statement.",
+        }
 
     # Explicit directional relation check (active or passive)
-    q_dir_ok, q_voice = _check_relation_direction(quote, fields["subject"], fields["predicate"], fields["object"])
+    quote_subj_for_dir = pronoun_in_quote if subj_coref_valid else fields["subject"]
+    q_dir_ok, q_voice = _check_relation_direction(quote, quote_subj_for_dir, fields["predicate"], fields["object"])
     s_dir_ok, s_voice = _check_relation_direction(fields["statement"], fields["subject"], fields["predicate"], fields["object"])
     if not (q_dir_ok and s_dir_ok):
         return None, {"code": "DIRECTION_OR_RELATION_NEEDS_REVIEW", "quote_voice": q_voice, "statement_voice": s_voice}
@@ -511,10 +655,29 @@ def verify_and_build_nanopub(
     if SCOPE_RE.search(quote) and (not condition or condition.casefold() not in fields["statement"].casefold()):
         return None, {"code": "SOURCE_SCOPE_REQUIRES_EXPLICIT_CONDITION"}
 
-    # Evidence classification & identity separation
-    evidence_type = str(proposal.get("evidence_type") or _classify_evidence_type(quote))
-    if evidence_type not in EVIDENCE_TYPES:
-        evidence_type = _classify_evidence_type(quote)
+    # Deterministic evidence classification: block arbitrary draft override of cited_secondary / indirect_inference quotes!
+    detected_ev = _classify_evidence_type(quote)
+    proposed_ev = _norm_ws(str(proposal.get("evidence_type") or ""))
+    if proposed_ev and proposed_ev in EVIDENCE_TYPES:
+        # Strict guard: never allow draft to promote cited_secondary -> direct_empirical or indirect_inference -> direct_empirical
+        if detected_ev in {"cited_secondary", "indirect_inference"} and proposed_ev == "direct_empirical":
+            return None, {
+                "code": "EVIDENCE_TYPE_OVERRIDE_CONFLICT",
+                "proposed_evidence_type": proposed_ev,
+                "detected_evidence_type": detected_ev,
+                "detail": f"Draft proposed '{proposed_ev}' but quote exhibits deterministic '{detected_ev}' markers; override blocked.",
+            }
+        # Never allow draft to mislabel a cited_secondary quote as indirect_inference
+        if detected_ev == "cited_secondary" and proposed_ev != "cited_secondary":
+            return None, {
+                "code": "EVIDENCE_TYPE_OVERRIDE_CONFLICT",
+                "proposed_evidence_type": proposed_ev,
+                "detected_evidence_type": detected_ev,
+                "detail": "Quote contains secondary citation markers and must remain 'cited_secondary'.",
+            }
+        evidence_type = proposed_ev
+    else:
+        evidence_type = detected_ev
 
     raw_meta = source_meta.get(fields["source_file"]) or {}
     trusted_meta = {k: raw_meta[k] for k in ("doi", "authors", "year", "version", "license", "title") if raw_meta.get(k) is not None}
@@ -542,6 +705,7 @@ def verify_and_build_nanopub(
         "assertion_agent": assertion_agent,
         "asserted_by_distinct_agent": distinct_flag,
         "quantities": sorted(obs_qty),
+        "quantity_records": obs_qty_recs,
     }
     provenance_graph: dict[str, Any] = {
         "source_file": fields["source_file"],
@@ -620,31 +784,28 @@ def render_evidence_markdown(
     lines = [
         f"# Nanopublication 4-Graph Audit & Evidence Report ({case_id})",
         "",
-        f"- **Accepted Nanopublications**: {len(nanopubs)}",
-        f"- **Local Cryptographic Verification**: {sig_summary['valid_count']}/{sig_summary['checked_count']} valid (local-only, `no_external_publish=true`)",
-        f"- **Cross-Assertion Conflicts Detected**: {len(conflicts)}",
-        f"- **Gaps / Rejected Drafts**: {len(gaps)}",
+        f"- **Accepted Nanopublications**: {len(nanopubs)} | **Signatures Verified**: {sig_summary['valid_count']}/{sig_summary['checked_count']} (`no_external_publish=true`)",
+        f"- **Cross-Assertion Conflicts**: {len(conflicts)} | **Coverage Gaps / Rejected Drafts**: {len(gaps)}",
         "",
+        "| ID | Source & Locator | Assertion (`S -> P [pol] -> O`) | Evidence & Quantities | Roles (`assertion_agent` / `creator` / `signer`) | Trusty Code | Verbatim Quote |",
+        "|---|---|---|---|---|---|---|",
     ]
-    for npub in nanopubs:
+    for idx, npub in enumerate(nanopubs, start=1):
         a = npub["assertion"]
         p = npub["provenance"]
         pub = npub["publication_info"]
         integ = pub["integrity"]
-        lines.extend([
-            f"## {npub['nanopub_id']} (`{npub['uri']}`)",
-            "",
-            f"- **Assertion**: `{a['subject']}` —[**{a['predicate']}** (`{a['polarity']}`)]→ `{a['object']}`",
-            f"- **Atomic Statement**: {a['atomic_statement']}",
-            f"- **Condition / Scope**: {a.get('condition') or 'Not explicitly bounded in quote'}",
-            f"- **Evidence Type**: `{p['evidence_type']}` ({p['voice_verified']}-voice verified)",
-            f"- **Provenance Locator**: `{p['source_file']}` @ `{p['paragraph_id']}`" + (f" (page {p['page']})" if "page" in p else ""),
-            f"- **Identity Separation**: assertion_agent=`{a['assertion_agent']}` | creator=`{pub['creator']}` | signed_by=`{pub['signed_by']}`",
-            f"- **Trusty Artifact Code**: `{integ['trusty_artifact_code']}`",
-            "",
-            f"> {p['quote']}",
-            "",
-        ])
+        pg_tag = f" Page {p['page']}" if "page" in p else ""
+        loc = f"`{p['source_file']}` @ `{p['paragraph_id']}`{pg_tag}"
+        qty_s = ", ".join(a.get("quantities") or []) or "—"
+        cond_s = f" (cond: {a['condition']})" if a.get("condition") else ""
+        q_clean = p["quote"].replace("|", "\\|")
+        lines.append(
+            f"| `NP{idx}` (`{npub['nanopub_id'][:14]}`) | {loc} | `{a['subject']}` —**{a['predicate']}** (`{a['polarity']}`)→ `{a['object']}`{cond_s} | "
+            f"`{p['evidence_type']}` ({p['voice_verified']}); qty: {qty_s} | "
+            f"`{a['assertion_agent']}` / `{pub['creator']}` / `{pub['signed_by']}` | `{integ['trusty_artifact_code'][:16]}` | {q_clean} |"
+        )
+    lines.append("")
     if conflicts:
         lines.extend(["## Cross-Assertion Conflict & Condition Analysis", ""])
         for c in conflicts:
@@ -735,6 +896,14 @@ def run_pipeline(
             accepted_map[npub["nanopub_id"]] = npub
 
     accepted = list(accepted_map.values())
+    covered_sources = {n["provenance"]["source_file"] for n in accepted}
+    for sf in sorted({p["source_file"] for p in paragraphs}):
+        if sf not in covered_sources:
+            gaps.append({
+                "code": "SOURCE_FILE_ZERO_NANOPUBS_EXTRACTED",
+                "source_file": sf,
+                "message": f"Indexed source '{sf}' contributed 0 accepted Nanopublications; verify whether explicit atomic claims require manual drafting.",
+            })
     conflicts = detect_assertion_conflicts(accepted)
 
     # Local self-verification of every signed 4-graph Nanopublication
@@ -791,6 +960,9 @@ def run_pipeline(
             "rejected_proposals_count": len(rejected),
             "conflicts_detected": len(conflicts),
             "signatures_valid_count": sig_summary["valid_count"],
+            "direct_empirical_count": sum(1 for n in accepted if n["provenance"]["evidence_type"] == "direct_empirical"),
+            "indirect_inference_count": sum(1 for n in accepted if n["provenance"]["evidence_type"] == "indirect_inference"),
+            "cited_secondary_count": sum(1 for n in accepted if n["provenance"]["evidence_type"] == "cited_secondary"),
         },
         "metric_provenance": {
             "paragraphs_indexed": "work/source_paragraphs.json",
@@ -799,6 +971,9 @@ def run_pipeline(
             "rejected_proposals_count": "nanopublications.json:rejected_proposals",
             "conflicts_detected": "nanopublications.json:conflicts",
             "signatures_valid_count": "nanopub_signature_verifier.verify_nanopublication",
+            "direct_empirical_count": "nanopublications.json:nanopublications[*].provenance.evidence_type",
+            "indirect_inference_count": "nanopublications.json:nanopublications[*].provenance.evidence_type",
+            "cited_secondary_count": "nanopublications.json:nanopublications[*].provenance.evidence_type",
         },
         "findings": [
             f"Indexed {len(paragraphs)} paragraph(s) across {len({p['source_file'] for p in paragraphs})} source(s).",

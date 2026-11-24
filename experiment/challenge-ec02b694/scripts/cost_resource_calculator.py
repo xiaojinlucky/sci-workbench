@@ -36,8 +36,8 @@ def evaluate_plan_costs(contract: dict[str, Any], candidates: list[dict[str, Any
         missing_inputs: list[str] = []
         explicit_zeros: list[str] = []
 
-        # One-time setup fee: optional if not declared in contract or candidate, but null when declared is missing
-        if "one_time_setup_cost" in cand:
+        # One-time setup fee: prefer explicit candidate override, else contract.setup_cost (preserving null if both null when declared)
+        if cand.get("one_time_setup_cost") is not None:
             setup_cost = _finite_nonneg(cand.get("one_time_setup_cost"))
             if setup_cost is None:
                 missing_inputs.append("one_time_setup_cost")
@@ -49,19 +49,32 @@ def evaluate_plan_costs(contract: dict[str, Any], candidates: list[dict[str, Any
                 missing_inputs.append("contract.setup_cost")
             elif setup_cost == 0.0:
                 explicit_zeros.append("contract.setup_cost")
+        elif "one_time_setup_cost" in cand:
+            setup_cost = None
+            missing_inputs.append("one_time_setup_cost")
         else:
             setup_cost = 0.0
 
-        # Machine hours check
-        raw_mh = cand.get("machine_hours")
-        mh_per_run = _finite_nonneg(raw_mh)
-        if mh_per_run is None:
-            missing_inputs.append("machine_hours")
-            slot_hours = None
+        # Machine hours check: support explicit total_machine_hours OR per-run machine_hours * n_runs
+        if cand.get("total_machine_hours") is not None:
+            tot_mh = _finite_nonneg(cand.get("total_machine_hours"))
+            if tot_mh is None:
+                missing_inputs.append("total_machine_hours")
+                slot_hours = None
+            else:
+                if tot_mh == 0.0:
+                    explicit_zeros.append("total_machine_hours")
+                slot_hours = round(tot_mh, 4)
         else:
-            if mh_per_run == 0.0:
-                explicit_zeros.append("machine_hours")
-            slot_hours = round(mh_per_run * n_runs, 4)
+            raw_mh = cand.get("machine_hours_per_run", cand.get("machine_hours"))
+            mh_per_run = _finite_nonneg(raw_mh)
+            if mh_per_run is None:
+                missing_inputs.append("machine_hours")
+                slot_hours = None
+            else:
+                if mh_per_run == 0.0:
+                    explicit_zeros.append("machine_hours")
+                slot_hours = round(mh_per_run * n_runs, 4)
 
         # Resource consumption line items
         per_run_total = 0.0
@@ -111,10 +124,16 @@ def evaluate_plan_costs(contract: dict[str, Any], candidates: list[dict[str, Any
         within_time = None if (time_cap_hr is None or slot_hours is None) else (slot_hours <= time_cap_hr + 1e-9)
         arith_ok = verifiable and (within_budget is not False) and (within_time is not False)
 
+        # Machine hours provenance audit: bind explicit source_ref (never guess missing run duration)
+        mh_src_ref = str(cand.get("machine_hours_source_ref") or cand.get("source_ref") or "").strip() or None
+        unverified_mh = (slot_hours is not None and mh_src_ref is None)
+
         evaluated.append({
             "plan_id": pid,
             "planned_runs": n_runs,
             "total_machine_hours": slot_hours,
+            "machine_hours_source_ref": mh_src_ref,
+            "unverified_machine_hours_assumption": unverified_mh,
             "one_time_setup_cost": setup_cost if verifiable else None,
             "consumables_cost": round(per_run_total, 4) if verifiable else None,
             "machine_charge": machine_charge if verifiable else None,

@@ -218,11 +218,15 @@ def evaluate_plan_arithmetic(case: dict[str, Any]) -> dict[str, Any]:
     plan_reports: list[dict[str, Any]] = []
     for idx, plan in enumerate(case.get("candidate_plans") or [], start=1):
         ver = str(plan.get("version") or f"v{idx}")
-        arms = int(plan.get("arms", 0))
-        bio_reps = int(plan.get("biological_replicates", plan.get("replicates_per_arm", 0)))
-        tech_reps = int(plan.get("technical_replicates", 1))
-        qc_extra = int(plan.get("qc_extra_samples", 0))
-        total_samples = arms * bio_reps * tech_reps + qc_extra
+        arms = int(plan.get("arms") or 0)
+        bio_reps = int(plan.get("biological_replicates") or plan.get("replicates_per_arm") or 0)
+        tech_reps_raw = plan.get("technical_replicates")
+        tech_reps = int(tech_reps_raw) if tech_reps_raw is not None else 1
+        qc_extra_raw = plan.get("qc_extra_samples")
+        qc_extra = int(qc_extra_raw) if qc_extra_raw is not None else 0
+        # Separate independent biological sample pool demand from total assay measurements (technical replicates + QC)
+        biological_units_total = arms * bio_reps
+        total_samples = biological_units_total * tech_reps + qc_extra
 
         missing_cost_fields: list[str] = []
         explicit_zero_fields: list[str] = []
@@ -268,37 +272,36 @@ def evaluate_plan_arithmetic(case: dict[str, Any]) -> dict[str, Any]:
                 if bl is not None and bl == 0.0:
                     explicit_zero_fields.append(f"{rid}.booking_lead_days")
 
-                # Unit cost check (only required if step consumes units > 0)
-                units_raw = step.get("units", 0.0)
-                units = _finite_nonneg(units_raw)
-                if units is None:
-                    missing_cost_fields.append(f"{sname}.units")
+                # Billing-mode aware strict null-vs-zero:
+                # - Hourly resource with hours given does NOT require units.
+                # - Per-unit resource with units given does NOT require hours.
+                # - Missing both quantities (or missing required billable rate) flags missing_cost_fields.
+                units = _finite_nonneg(step.get("units"))
+                hours = _finite_nonneg(step.get("hours"))
+                uc = _finite_nonneg(rm.get("unit_cost"))
+                hr = _finite_nonneg(rm.get("rate_per_hr"))
+                if units is None and hours is None:
+                    missing_cost_fields.append(f"{sname}.units_or_hours")
                     step_cost_ok = False
-                elif units > 0:
-                    uc = _finite_nonneg(rm.get("unit_cost"))
-                    if uc is None:
-                        missing_cost_fields.append(f"{rid}.unit_cost")
-                        step_cost_ok = False
-                    else:
-                        if uc == 0.0:
-                            explicit_zero_fields.append(f"{rid}.unit_cost")
-                        step_cost += units * uc
-
-                # Machine hour rate check (only required if step uses hours > 0)
-                hours_raw = step.get("hours", 0.0)
-                hours = _finite_nonneg(hours_raw)
-                if hours is None:
-                    missing_cost_fields.append(f"{sname}.hours")
-                    step_cost_ok = False
-                elif hours > 0:
-                    hr = _finite_nonneg(rm.get("rate_per_hr"))
-                    if hr is None:
-                        missing_cost_fields.append(f"{rid}.rate_per_hr")
-                        step_cost_ok = False
-                    else:
-                        if hr == 0.0:
-                            explicit_zero_fields.append(f"{rid}.rate_per_hr")
-                        step_cost += hours * hr
+                else:
+                    if units is not None and units > 0:
+                        if uc is None:
+                            missing_cost_fields.append(f"{rid}.unit_cost")
+                            step_cost_ok = False
+                        else:
+                            if uc == 0.0:
+                                explicit_zero_fields.append(f"{rid}.unit_cost")
+                            step_cost += units * uc
+                    if hours is not None and hours > 0:
+                        if hr is None:
+                            missing_cost_fields.append(f"{rid}.rate_per_hr")
+                            step_cost_ok = False
+                        else:
+                            if hr == 0.0:
+                                explicit_zero_fields.append(f"{rid}.rate_per_hr")
+                            step_cost += hours * hr
+                    if (units == 0.0) and (hours is None or hours == 0.0):
+                        explicit_zero_fields.append(f"{sname}.units")
 
                 # Equipment capability / precision / maintenance checks
                 req_prec = _finite_nonneg(step.get("required_precision"))
@@ -410,14 +413,20 @@ def evaluate_plan_arithmetic(case: dict[str, Any]) -> dict[str, Any]:
 
         budget_ok = None if (budget_cap is None or total_cost is None) else (total_cost <= budget_cap + 1e-9)
         deadline_ok = None if (deadline_days is None or critical_days is None) else (critical_days <= deadline_days + 1e-9)
-        sample_ok = None if sample_pool is None else (total_samples <= sample_pool)
+        # Biological sample pool constrains independent biological units (not technical replicate injections)
+        sample_ok = None if sample_pool is None else (biological_units_total <= sample_pool)
 
         plan_reports.append({
             "version": ver,
+            "source_doc": plan.get("source_doc", ""),
             "source_ref": plan.get("source_ref", ""),
             "samples": {
                 "arms": arms,
                 "biological_replicates": bio_reps,
+                "biological_units_total": biological_units_total,
+                "technical_replicates_declared": tech_reps_raw,
+                "qc_extra_declared": qc_extra_raw,
+                "total_assay_measurements": total_samples,
                 "technical_replicates": tech_reps,
                 "qc_extra": qc_extra,
                 "total": total_samples,

@@ -17,7 +17,7 @@ Generate and evaluate **3 versioned, machine-executable parameter optimization s
 
 - **Skill root**: `/skills/weekly-skill` (scripts under `/skills/weekly-skill/scripts`, references under `/skills/weekly-skill/references`).
 - **Inputs**: Inspect `/input/case.json`, `/input/task.md`, equipment/material specs, finite parameter domains, historical/pilot run tables, and organizer prospective resource/price/booking contracts under `/input/`.
-- **Working directory**: `/app/work` (`env.json`, `.budget_state.json`, `blocks.json`, `domain_spec.json`, `pilot_data.json`, `contract_spec.json`, `candidates_3v.json`, `domain_validation.json`, `interaction_report.json`, `cost_audit.json`, `gaps.json`).
+- **Working directory**: `/app/work` (`env.json`, `.budget_state.json`, `blocks.json`, `domain_spec.json`, `pilot_runs.json`, `contract_spec.json`, `candidates_3v.json`, `domain_validation.json`, `interaction_report.json`, `cost_audit.json`, `gaps.json`).
 - **Deliverables**: `/app/output/optimization_plans.json`, `/app/output/optimization_plans.md` (plus any exact filename required by `/input/case.json`), and `/app/output/result.json` preserving `case_id` and every `output_contract` field.
 - **Execution budget**: 64 requests / 900 s / 16,384 output tokens per turn. Initialize `preflight_probe.py`, `budget_guard.py`, and `result_guard.py` on Turn 1.
 
@@ -82,7 +82,7 @@ python3 "$SCRIPTS/feasible_domain_validator.py" \
 # 3. (When pilot/historical data exist) Run interaction-reversal OLS & missing-cell estimability audit
 #    If no pilot data exist, omit --interaction-report in Step 5 to activate no_pilot_data_screening_mode automatically.
 python3 "$SCRIPTS/interaction_and_surrogate_analyzer.py" \
-  --pilot /app/work/pilot_data.json \
+  --pilot /app/work/pilot_runs.json \
   --domain /app/work/domain_spec.json \
   --candidates /app/work/candidates_3v.json \
   --out /app/work/interaction_report.json
@@ -118,3 +118,8 @@ python3 "$SCRIPTS/final_audit.py" --dir /app/output --result-file result.json --
 - **Never concatenate OFAT optima under interaction**: Always verify 2-way interaction sign flips when pilot data are present.
 - **Zero out-of-range recommendations**: Reject any point breaching device range, step increment, coupled inequality, or thermal/safety ceiling.
 - **Planning != Measured Outcome**: Never claim surrogate estimates as measured laboratory results or prospective contracts as confirmed quotes/approvals.
+## Multi-Format Intake & Schema-Variant Fallback Contract
+
+1. **Multi-Format Offline Indexing (`scripts/block_indexer.py`)**: Indexes `.md`, `.txt`, `.yaml/.yml`, `.m`, `.csv`/`.tsv`, `.xlsx` (stdlib `zipfile+XML` per-sheet), `.docx` (stdlib `zipfile+XML`), `.xml`/`.html`, `.json`, and `.pdf` via a 3-tier offline pipeline (`pypdf`/`PyPDF2` -> `pdftotext` -> pure-stdlib zlib PDF stream scan) with exact `file#L<line>`, `file#page=<p>`, or `file#<sheet>!R<row>` anchors. Scanned/image-only PDFs without an extractable text layer emit explicit `status: "UNPARSED_SOURCE"` (`manual_transcription_needed: true`) instead of silent `null`.
+2. **Table + Free-Form Prose Extraction (`scripts/source_to_plan_extractor.py`)**: Automatically extracts resource/pricing/booking tables, parameter domain tables, historical pilot runs, and natural-language prose constraints from raw `/input` documents with exact `source_ref` anchors, keeping unquoted costs and unverified approvals explicitly `null` under `NOT_FOUND_IN_SOURCE`.
+3. **LLM Direct-Fill Bridge**: When `/input` uses highly heterogeneous prose or scanned forms (`extraction_coverage.fallback_to_llm_matrix_recommended=true`), populate the structured draft / `aligned_matrix` directly from the indexed blocks in context while ALWAYS passing it through the offline deterministic arithmetic, feasible-domain, null-vs-zero firewall, and `validate_and_sync_result.py` gates.

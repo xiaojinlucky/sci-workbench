@@ -93,8 +93,13 @@ def rank_and_validate_plans(
         f_rec = feas_by_id.get(pid, {})
         c_rec = cost_by_id.get(pid, {})
         f_ok = bool(f_rec.get("feasible", False))
-        c_missing = c_rec.get("missing_rate_or_usage_keys") or []
+        c_missing = list(c_rec.get("missing_rate_or_usage_keys") or [])
         c_ok = bool(c_rec.get("arithmetic_ok", False))
+        src_conflicts = list(cand.get("source_conflicts") or [])
+        if c_rec.get("unverified_machine_hours_assumption"):
+            c_missing.append("unverified_machine_hours_source_ref")
+        if src_conflicts:
+            c_missing.append(f"unresolved_source_conflict:{[sc.get('field') for sc in src_conflicts]}")
 
         # Warn if interaction reversal was detected and candidate uses naive OFAT strategy
         if inter_rev and strat == "grid" and not cand.get("accounts_for_interaction", True):
@@ -103,6 +108,7 @@ def rank_and_validate_plans(
         entry = {
             "plan_id": pid,
             "version_label": cand.get("version_label", pid),
+            "source_ref": cand.get("source_ref", ""),
             "parameters": cand.get("parameters", {}),
             "search_strategy": strat,
             "stopping_criterion": cand.get("stopping_criterion", ""),
@@ -110,7 +116,8 @@ def rank_and_validate_plans(
             "feasible_domain": f_ok,
             "domain_violations": f_rec.get("violations", []),
             "within_budget_and_time": c_ok,
-            "missing_cost_inputs": c_missing,
+            "missing_cost_inputs": sorted(set(c_missing)),
+            "source_conflicts": src_conflicts,
             "total_estimated_cost": c_rec.get("total_estimated_cost"),
             "total_machine_hours": c_rec.get("total_machine_hours"),
             "predicted_response": pred_resp,
@@ -122,10 +129,20 @@ def rank_and_validate_plans(
 
         if not f_ok or (c_rec.get("within_budget") is False) or (c_rec.get("within_time_cap") is False) or plan_issues:
             infeasible_pruned.append(entry)
-        elif c_missing or pred_resp is None or pred_unc is None:
+        elif c_missing or src_conflicts or pred_resp is None or pred_unc is None:
             unresolved_missing.append(entry)
         else:
             feasible_ranked.append(entry)
+
+    # Hard conflict gate: if domain_conflicts exist (empty/contradictory feasible domain), block any recommendation!
+    dom_conflicts = list(domain_report.get("domain_conflicts") or [])
+    domain_conflict_blocker = len(dom_conflicts) > 0
+    if domain_conflict_blocker and feasible_ranked:
+        for fr in feasible_ranked:
+            fr["domain_violations"] = list(fr.get("domain_violations") or []) + ["GLOBAL_DOMAIN_CONFLICT_BLOCKER"]
+            infeasible_pruned.append(fr)
+        feasible_ranked = []
+        warnings.append("Global domain_conflicts detected; blocked all candidate recommendations until conflicting bounds are reconciled.")
 
     # Compute Pareto front & normalized multi-objective utility over feasible plans
     pareto_ids = _pareto_nondominated(feasible_ranked, direction=direction) if feasible_ranked else set()
@@ -147,7 +164,7 @@ def rank_and_validate_plans(
 
         feasible_ranked.sort(key=lambda x: (not x["pareto_optimal"], -x["composite_tradeoff_score"], x["total_estimated_cost"]))
 
-    recommended = feasible_ranked[0]["plan_id"] if feasible_ranked else None
+    recommended = None if domain_conflict_blocker else (feasible_ranked[0]["plan_id"] if feasible_ranked else None)
     all_infeasible = len(feasible_ranked) == 0 and len(unresolved_missing) == 0
 
     inter_provided = interaction_report is not None
@@ -160,13 +177,14 @@ def rank_and_validate_plans(
 
     return {
         "$schema": "candidate-optimization-ranking/v2",
-        "ok": len(issues) == 0 and (recommended is not None or bool(domain_report.get("domain_conflicts"))),
+        "ok": len(issues) == 0 and (recommended is not None or domain_conflict_blocker or len(unresolved_missing) > 0),
         "optimization_mode": opt_mode,
         "objective_direction": direction,
         "recommended_plan": recommended,
+        "domain_conflict_blocker": domain_conflict_blocker,
         "pareto_frontier_ids": sorted(pareto_ids),
         "all_infeasible": all_infeasible,
-        "domain_conflicts": domain_report.get("domain_conflicts", []),
+        "domain_conflicts": dom_conflicts,
         "interaction_reversal_detected": inter_rev if inter_provided else None,
         "issues": issues,
         "warnings": warnings,

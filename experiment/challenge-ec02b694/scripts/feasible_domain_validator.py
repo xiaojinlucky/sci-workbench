@@ -43,9 +43,52 @@ def _enumerate_param_grid(pdef: dict[str, Any], max_pts: int = 500) -> list[Any]
     return [round(lo + i * step, 8) for i in range(count)]
 
 
+def _normalize_param_defs(domain_spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Tolerate dict or list parameter domain schemas and alias bound keys (min/low/lower, max/high/upper, safety_max/safe_max)."""
+    raw = (
+        domain_spec.get("parameters")
+        or domain_spec.get("parameter_domains")
+        or (domain_spec.get("prospective_contract") or {}).get("parameter_domains")
+        or {}
+    )
+    items: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(raw, dict):
+        items = [(str(k), v) for k, v in raw.items() if isinstance(v, dict)]
+    elif isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, dict):
+                nm = str(entry.get("name") or entry.get("parameter") or entry.get("factor") or "").strip()
+                if nm:
+                    items.append((nm, entry))
+    out: dict[str, dict[str, Any]] = {}
+    for nm, pd in items:
+        norm = dict(pd)
+        if "min" not in norm:
+            for ak in ("low", "lower", "min_val", "lower_bound"):
+                if ak in norm:
+                    norm["min"] = norm[ak]
+                    break
+        if "max" not in norm:
+            for ak in ("high", "upper", "max_val", "upper_bound"):
+                if ak in norm:
+                    norm["max"] = norm[ak]
+                    break
+        if "safety_max" not in norm:
+            for ak in ("safe_max", "safety_limit", "safety_ceiling"):
+                if ak in norm:
+                    norm["safety_max"] = norm[ak]
+                    break
+        if "allowed_values" not in norm and "values" in norm and isinstance(norm["values"], list):
+            norm["allowed_values"] = norm["values"]
+        if "step" not in norm and "increment" in norm:
+            norm["step"] = norm["increment"]
+        out[nm] = norm
+    return out
+
+
 def check_candidate_feasibility(domain_spec: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     violations: list[str] = []
-    param_defs: dict[str, dict[str, Any]] = domain_spec.get("parameters", {})
+    param_defs = _normalize_param_defs(domain_spec)
 
     for pname, pdef in param_defs.items():
         if pname not in params or params[pname] is None:
@@ -125,7 +168,7 @@ def check_candidate_feasibility(domain_spec: dict[str, Any], params: dict[str, A
 
 def validate_all_candidates(domain_spec: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
     domain_conflicts: list[dict[str, Any]] = []
-    param_defs: dict[str, dict[str, Any]] = domain_spec.get("parameters", {})
+    param_defs = _normalize_param_defs(domain_spec)
 
     for pname, pdef in param_defs.items():
         lo = _finite_num(pdef.get("min"))

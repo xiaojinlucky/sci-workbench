@@ -54,16 +54,20 @@ def _compute_pareto(feasible: list[dict[str, Any]]) -> tuple[set[str], list[dict
     return front, dominance_pairs
 
 
-def _score_under_profile(
+def _unit_scale(score: float) -> float:
+    """Normalize either [0, 1] or [0, 100] scores onto a common [0, 1] utility scale."""
+    return max(0.0, min(1.0, score / 100.0 if score > 1.0 else score))
+
+
+def _dimension_utilities(
     row: dict[str, Any],
-    w: dict[str, float],
     budget_cap: float | None,
     deadline: float | None,
     max_cost: float,
     max_days: float,
-) -> float:
-    fit = float(row["scientific_fit_score"])
-    ev = float(row["evidence_score"])
+) -> dict[str, float]:
+    fit_u = _unit_scale(float(row["scientific_fit_score"]))
+    ev_u = _unit_scale(float(row["evidence_score"]))
     tcost = float(row["cost_breakdown_usd"]["total_usd"])
     tdays = float(row["schedule_breakdown_days"]["total_days"])
     rpen = _RISK_PENALTY.get(str(row.get("risk_level", "unspecified")).lower(), 0.25)
@@ -72,8 +76,28 @@ def _score_under_profile(
     day_denom = float(deadline) if (deadline and deadline > 0) else max(max_days, 1.0)
     c_util = max(0.0, 1.0 - tcost / cost_denom)
     d_util = max(0.0, 1.0 - tdays / day_denom)
-    r_util = max(0.0, 1.0 - rpen)
-    return round(w["fit"] * fit + w["ev"] * ev + w["cost"] * c_util + w["time"] * d_util + w["risk"] * r_util, 4)
+    # Zero schedule buffer penalty on risk utility when running right on the deadline ceiling
+    zero_slack_pen = 0.15 if (deadline is not None and (float(deadline) - tdays) <= 1e-9) else 0.0
+    r_util = max(0.0, 1.0 - rpen - zero_slack_pen)
+    return {
+        "fit": round(fit_u, 4),
+        "ev": round(ev_u, 4),
+        "cost": round(c_util, 4),
+        "time": round(d_util, 4),
+        "risk": round(r_util, 4),
+    }
+
+
+def _score_under_profile(
+    row: dict[str, Any],
+    w: dict[str, float],
+    budget_cap: float | None,
+    deadline: float | None,
+    max_cost: float,
+    max_days: float,
+) -> float:
+    u = _dimension_utilities(row, budget_cap, deadline, max_cost, max_days)
+    return round(100.0 * sum(w[k] * u[k] for k in ("fit", "ev", "cost", "time", "risk")), 4)
 
 
 def evaluate_plan_choice(case: dict[str, Any], matrix: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -136,6 +160,7 @@ def evaluate_plan_choice(case: dict[str, Any], matrix: dict[str, Any] | None = N
 
     for r in feasible:
         r["pareto_optimal"] = r["version"] in pareto_front
+        r["normalized_dimension_utilities"] = _dimension_utilities(r, budget_cap, deadline, max_cost, max_days)
         r["profile_scores"] = {
             pname: _score_under_profile(r, w, budget_cap, deadline, max_cost, max_days)
             for pname, w in WEIGHT_PROFILES.items()
@@ -192,16 +217,64 @@ def evaluate_plan_choice(case: dict[str, Any], matrix: dict[str, Any] | None = N
         for u in unresolved:
             remediation.append(f"Resolve for {u['version']}: {', '.join(u['unresolved_fields'])}")
 
+    # Capacity adequacy sensitivity (check max_samples vs planned_samples, consumables/kit & machine_hours per sample)
+    max_samples_cap = contract.get("sample_pool_available") or contract.get("max_samples")
+    samples_per_kit = contract.get("samples_per_unit") or contract.get("samples_per_kit") or 24
+    hours_per_sample = contract.get("machine_hours_per_sample") or 0.5
+    capacity_sensitivity: list[dict[str, Any]] = []
+    for row in matrix.get("rows", []):
+        ps = row.get("planned_samples")
+        units_alloc = float(row.get("allocated_consumable_units") or 0.0)
+        hrs_alloc = float(row.get("allocated_machine_hours") or 0.0)
+        cap_issues: list[str] = []
+        if max_samples_cap is not None and ps is not None and int(ps) > int(max_samples_cap):
+            cap_issues.append(f"CAPACITY_SHORTFALL: planned_samples({ps}) > max_samples({max_samples_cap})")
+        if max_samples_cap is not None and units_alloc > 0 and (units_alloc * float(samples_per_kit)) < int(max_samples_cap):
+            cap_issues.append(
+                f"SCALE_UP_KIT_WARNING: {units_alloc} kit units cover ~{int(units_alloc * float(samples_per_kit))} samples (< max_samples {max_samples_cap}); scaling to full pool requires additional procurement"
+            )
+        if max_samples_cap is not None and hrs_alloc > 0 and hrs_alloc < int(max_samples_cap) * float(hours_per_sample):
+            cap_issues.append(
+                f"SCALE_UP_MACHINE_HOUR_WARNING: {hrs_alloc}h covers ~{int(hrs_alloc / float(hours_per_sample))} samples at {hours_per_sample}h/sample (< max_samples {max_samples_cap})"
+            )
+        capacity_sensitivity.append({
+            "version": row["version"],
+            "planned_samples": ps,
+            "max_samples_contract": max_samples_cap,
+            "allocated_consumable_units": units_alloc,
+            "allocated_machine_hours": hrs_alloc,
+            "capacity_status": "SUFFICIENT_AT_PLANNED_SCALE_WITH_SCALEUP_NOTE" if any("SCALE_UP" in x for x in cap_issues) else ("CAPACITY_SHORTFALL" if cap_issues else "ADEQUATE"),
+            "notes": cap_issues,
+        })
+
+    selected_decision_criteria: dict[str, Any] = {}
+    if feasible:
+        win = feasible[0]
+        sc = str(win.get("stopping_criterion") or "").strip()
+        rt = str(win.get("risk_trigger") or "").strip()
+        fb = str(win.get("fallback_plan") or "").strip()
+        selected_decision_criteria = {
+            "selected_version": win["version"],
+            "primary_readout": win.get("primary_readout", "UNSPECIFIED"),
+            "inference_unit": win.get("inference_unit", "UNSPECIFIED"),
+            "stopping_criterion": sc or "MISSING_STOPPING_CRITERION_DEFINE_BEFORE_RUN",
+            "risk_trigger": rt or "MISSING_RISK_TRIGGER_DEFINE_BEFORE_RUN",
+            "fallback_plan": fb or "MISSING_FALLBACK_PLAN_DEFINE_BEFORE_RUN",
+            "schedule_formula": win["schedule_breakdown_days"].get("schedule_formula", ""),
+        }
+
     return {
         "$schema": "aligned-plan-choice-report/v2",
         "case_id": case.get("case_id", "unknown"),
         "title": case.get("title", ""),
         "selected_version": selected,
+        "selected_plan_decision_criteria": selected_decision_criteria,
         "all_infeasible": all_infeasible,
         "incomplete_comparison_warning": bool(unresolved),
         "pareto_frontier_versions": sorted(pareto_front),
         "pareto_dominance_pairs": dominance_pairs,
         "comparability_audit": matrix.get("comparability_audit", {}),
+        "capacity_sensitivity": capacity_sensitivity,
         "prospective_boundary_notice": (
             "Normalized cost/schedule rankings evaluate organizer prospective contracts only; "
             "they are not confirmed vendor quotes, booked instrument slots, or granted approvals."
@@ -258,6 +331,19 @@ def _render_markdown(rep: dict[str, Any]) -> str:
             f"- **Budget Slack (USD)**: `{sa.get('budget_slack_usd')}` | **Deadline Slack (d)**: `{sa.get('deadline_slack_days')}`",
             f"- **Flip Condition**: {sa.get('flip_condition')}",
         ])
+    if rep.get("selected_plan_decision_criteria"):
+        dc = rep["selected_plan_decision_criteria"]
+        lines.extend([
+            "", "## Selected Plan Executable Decision & Stopping Criteria", "",
+            f"- **Selected Version**: `{dc.get('selected_version')}` | **Schedule Formula**: `{dc.get('schedule_formula')}`",
+            f"- **Primary Readout / Inference Unit**: `{dc.get('primary_readout')}` / `{dc.get('inference_unit')}`",
+            f"- **Stopping Criterion**: {dc.get('stopping_criterion')}",
+            f"- **Risk Trigger**: {dc.get('risk_trigger')} | **Fallback Plan**: {dc.get('fallback_plan')}",
+        ])
+    if rep.get("capacity_sensitivity"):
+        lines.extend(["", "## Sample & Resource Capacity Sensitivity", ""])
+        for cs in rep["capacity_sensitivity"]:
+            lines.append(f"- `{cs['version']}`: status=`{cs['capacity_status']}` (planned={cs['planned_samples']}, max_contract={cs['max_samples_contract']}, units={cs['allocated_consumable_units']}, hours={cs['allocated_machine_hours']}) {'; '.join(cs['notes'])}")
     if rep["remediation_actions"]:
         lines.extend(["", "## Remediation / Missing-Evidence Actions", ""])
         for rem in rep["remediation_actions"]:

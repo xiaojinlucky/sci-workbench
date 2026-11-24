@@ -46,11 +46,15 @@ def validate_interpretation(doc: dict[str, Any]) -> dict[str, Any]:
         if not str(ano.get("reference_baseline", "")).strip():
             warnings.append(f"anomalies[{idx}] missing reference_baseline or control deviation context")
 
-    # 3. Ranked causal hypotheses audit (fail-loud on supporting/excluding/caveat/falsification_test)
+    # 3. Ranked causal hypotheses audit (fail-loud on supporting/excluding/caveat/falsification_test & anti-conflation)
+    OVERCLAIM_RE = re.compile(r"\b(?:proves?\s+that|definitely\s+caused\s+by|confirmed\s+root\s+cause\s+without|100%\s+caused)\b|必然导致|完全证实根因", re.I)
     layers_seen: set[str] = set()
     for idx, hyp in enumerate(doc.get("causal_hypotheses") or [], start=1):
         if hyp.get("rank") is None:
             warnings.append(f"causal_hypotheses[{idx}] should declare explicit rank (1..k)")
+        htxt = str(hyp.get("hypothesis", ""))
+        if hyp.get("confirmed_root_cause") is True or OVERCLAIM_RE.search(htxt):
+            issues.append(f"causal_hypotheses[{idx}] conflates statistical anomaly with proven root cause; must frame as falsifiable candidate hypothesis")
         layer = str(hyp.get("attribution_layer", "")).strip()
         if layer in VALID_ATTRIBUTION_LAYERS:
             layers_seen.add(layer)
@@ -95,6 +99,16 @@ def validate_interpretation(doc: dict[str, Any]) -> dict[str, Any]:
             warnings.append("Analysis status is no_valid_numeric_readings — do NOT report zero outliers as a clean run.")
         if int(gaps_sum.get("data_gap_count", 0)) > 0 and gaps_sum.get("analysis_status") == "complete":
             issues.append("data_gaps_summary reports status='complete' despite nonzero data_gap_count")
+
+    # 7. Independent experiment plan object (steps + readout_criteria + controls + equipment + cost_time + parameters + risks)
+    iep = doc.get("independent_experiment_plan")
+    if not isinstance(iep, dict):
+        issues.append("Missing required independent_experiment_plan object (must include steps, readout_criteria, controls, equipment_and_materials, time_and_cost, parameter_ranges, risks)")
+    else:
+        for req_k in ("hypothesis_and_variables", "controls", "steps", "readout_criteria", "equipment_and_materials", "time_and_cost", "parameter_ranges", "risks"):
+            val = iep.get(req_k)
+            if not val:
+                issues.append(f"independent_experiment_plan missing non-empty field {req_k!r}")
 
     if not isinstance(doc.get("six_element_traceability"), dict):
         warnings.append("Recommended: include six_element_traceability linking findings to hypothesis/controls/equipment/cost/parameters/risks")

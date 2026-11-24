@@ -7,12 +7,142 @@ import argparse
 import csv
 import json
 import math
+import random
 import re
 import statistics
 from pathlib import Path
 from typing import Any
 
-from multi_sheet_and_trace_profiler import _detect_header_row_idx, _read_xlsx_sheets
+from multi_sheet_and_trace_profiler import _detect_header_row_idx, _idx_to_col_letters, _read_xlsx_sheets_indexed
+
+# Exact two-sided Student-t critical values for 95% CI (alpha=0.05, t_{0.975, df})
+STUDENT_T_975: dict[int, float] = {
+    1: 12.7062, 2: 4.3027, 3: 3.1824, 4: 2.7764, 5: 2.5706,
+    6: 2.4469, 7: 2.3646, 8: 2.3060, 9: 2.2622, 10: 2.2281,
+    11: 2.2010, 12: 2.1788, 13: 2.1604, 14: 2.1448, 15: 2.1314,
+    16: 2.1199, 17: 2.1098, 18: 2.1009, 19: 2.0930, 20: 2.0860,
+    25: 2.0595, 30: 2.0423, 40: 2.0211, 60: 2.0003, 120: 1.9799,
+}
+
+
+def _student_t_crit_95(df: int) -> float:
+    if df <= 0:
+        return float("nan")
+    if df in STUDENT_T_975:
+        return STUDENT_T_975[df]
+    if df > 120:
+        return 1.9600
+    keys = sorted(STUDENT_T_975.keys())
+    for i in range(len(keys) - 1):
+        if keys[i] < df < keys[i + 1]:
+            lo, hi = keys[i], keys[i + 1]
+            w = (df - lo) / (hi - lo)
+            return round(STUDENT_T_975[lo] * (1.0 - w) + STUDENT_T_975[hi] * w, 4)
+    return 1.9600
+
+DEFAULT_THRESHOLDS: dict[str, Any] = {
+    "iqr_multiplier": 1.5,
+    "mad_z_threshold": 3.5,
+    "mad_z_sensitivity_grid": [2.5, 3.5, 4.5],
+    "kw_chi2_2grp": 3.84,
+    "kw_chi2_multi": 5.99,
+    "raw_f_threshold": 4.0,
+    "eta_sq_threshold": 0.25,
+    "shift_to_within_iqr_threshold": 1.5,
+    "trimmed_fraction": 0.15,
+    "bootstrap_resamples": 500,
+    "bootstrap_seed": 20261124,
+    "min_group_n_for_fencing": 4,
+}
+
+
+def load_thresholds(path: Path | None = None) -> dict[str, Any]:
+    cfg = dict(DEFAULT_THRESHOLDS)
+    cand = path or (Path(__file__).resolve().parent.parent / "config" / "thresholds.json")
+    if cand and cand.is_file():
+        try:
+            loaded = json.loads(cand.read_text(encoding="utf-8-sig"))
+            if isinstance(loaded, dict):
+                cfg.update(loaded)
+        except Exception:
+            pass
+    return cfg
+
+
+def _trimmed_mean(vals: list[float], frac: float = 0.15) -> float:
+    s = sorted(vals)
+    n = len(s)
+    k = int(math.floor(n * frac))
+    core = s[k : n - k] if (n - 2 * k) >= 1 else s
+    return statistics.mean(core)
+
+
+def _bootstrap_trimmed_spread_ci(
+    valid_groups: dict[str, list[float]],
+    *,
+    trim_frac: float = 0.15,
+    n_boot: int = 500,
+    seed: int = 20261124,
+) -> dict[str, Any]:
+    """Outlier-deletion-free batch-shift inference:
+    (1) Group-size-preserving permutation test on trimmed-mean spread (valid null distribution for non-negative range),
+    (2) Signed pairwise trimmed-mean difference (max_group - min_group) with seeded bootstrap 95% CI.
+    """
+    if len(valid_groups) < 2:
+        return {"evaluated": False}
+    keys = sorted(valid_groups.keys())
+    tmeans = {g: round(_trimmed_mean(valid_groups[g], trim_frac), 6) for g in keys}
+    max_g = max(keys, key=lambda g: tmeans[g])
+    min_g = min(keys, key=lambda g: tmeans[g])
+    obs_spread = round(tmeans[max_g] - tmeans[min_g], 6)
+
+    rng = random.Random(seed)
+    # 1. Exact group-size-preserving permutation null test for non-negative spread
+    pooled = [v for g in keys for v in valid_groups[g]]
+    sizes = [len(valid_groups[g]) for g in keys]
+    ge_count = 0
+    for _ in range(n_boot):
+        perm = list(pooled)
+        rng.shuffle(perm)
+        pos = 0
+        p_means: list[float] = []
+        for sz in sizes:
+            p_means.append(_trimmed_mean(perm[pos : pos + sz], trim_frac))
+            pos += sz
+        if (max(p_means) - min(p_means)) >= obs_spread - 1e-12:
+            ge_count += 1
+    perm_p = round((1 + ge_count) / (1 + n_boot), 6)
+
+    # 2. Signed pairwise trimmed-mean difference bootstrap 95% CI (can cross zero!)
+    vs_hi = valid_groups[max_g]
+    vs_lo = valid_groups[min_g]
+    signed_diffs: list[float] = []
+    for _ in range(n_boot):
+        s_hi = [vs_hi[rng.randrange(len(vs_hi))] for _ in range(len(vs_hi))]
+        s_lo = [vs_lo[rng.randrange(len(vs_lo))] for _ in range(len(vs_lo))]
+        signed_diffs.append(_trimmed_mean(s_hi, trim_frac) - _trimmed_mean(s_lo, trim_frac))
+    signed_diffs.sort()
+    lo_idx = max(0, int(0.025 * len(signed_diffs)))
+    hi_idx = min(len(signed_diffs) - 1, int(0.975 * len(signed_diffs)))
+    s_ci_lo, s_ci_hi = round(signed_diffs[lo_idx], 6), round(signed_diffs[hi_idx], 6)
+    signed_excludes_zero = (s_ci_lo > 1e-9) or (s_ci_hi < -1e-9)
+
+    return {
+        "evaluated": True,
+        "trim_fraction": trim_frac,
+        "permutation_resamples": n_boot,
+        "bootstrap_resamples": n_boot,
+        "group_trimmed_means": tmeans,
+        "trimmed_mean_spread": obs_spread,
+        "permutation_p_value_trimmed_spread": perm_p,
+        "signed_max_minus_min_pair": f"{max_g} - {min_g}",
+        "signed_pair_trimmed_diff": obs_spread,
+        "signed_pair_bootstrap_95ci": [s_ci_lo, s_ci_hi],
+        "signed_pair_ci_excludes_zero": signed_excludes_zero,
+        # Backward-compat alias (explicitly populated from valid signed pairwise CI, never non-negative range!)
+        "bootstrap_95ci_trimmed_spread": [s_ci_lo, s_ci_hi],
+        "bootstrap_ci_excludes_zero": bool(perm_p < 0.05 and signed_excludes_zero),
+    }
 
 BELOW_LOD_RE = re.compile(r"^(?:<\s*(?:lod|lloq|loq|\d+(?:\.\d+)?)|blq|nd|bql|not\s+detected)$", re.I)
 SAT_RE = re.compile(r"^(?:>?\s*(?:ulq|uloq|ovr|over|sat|saturated|inf)|>\s*\d+(?:\.\d+)?)$", re.I)
@@ -29,32 +159,49 @@ def _float_or_none(v: Any) -> float | None:
 
 
 def _load_table_rows(file_path: Path, sheet_name: str = "") -> tuple[list[dict[str, Any]], str]:
+    """Load CSV/XLSX rows preserving TRUE 1-based physical Excel row numbers and column letters."""
     if file_path.suffix.lower() == ".xlsx":
-        _, sheets = _read_xlsx_sheets(file_path)
+        _, sheets = _read_xlsx_sheets_indexed(file_path)
         target_name = sheet_name.strip()
         chosen = None
-        for sname, raw_rows in sheets:
+        for sname, raw_pairs in sheets:
             if not target_name or sname == target_name:
-                chosen = (sname, raw_rows)
+                chosen = (sname, raw_pairs)
                 break
         if chosen is None:
             return [], f"sheet_not_found:{target_name}"
-        sname, raw_rows = chosen
-        non_empty = [r for r in raw_rows if any(c is not None and str(c).strip() != "" for c in r)]
-        if not non_empty:
+        sname, raw_pairs = chosen
+        non_empty_pairs = [(rno, r) for rno, r in raw_pairs if any(c is not None and str(c).strip() != "" for c in r)]
+        if not non_empty_pairs:
             return [], sname
-        hdr_idx = _detect_header_row_idx(non_empty)
-        headers = [str(c).strip() if (c is not None and str(c).strip()) else f"col_{i}" for i, c in enumerate(non_empty[hdr_idx], start=1)]
+        hdr_idx = _detect_header_row_idx([r for _, r in non_empty_pairs])
+        _, hdr_cells = non_empty_pairs[hdr_idx]
+        headers = [str(c).strip() if (c is not None and str(c).strip()) else f"col_{i}" for i, c in enumerate(hdr_cells, start=1)]
+        col_letters = {headers[i]: _idx_to_col_letters(i) for i in range(len(headers))}
         rows: list[dict[str, Any]] = []
-        for r in non_empty[hdr_idx + 1 :]:
-            rows.append({headers[i]: (r[i] if i < len(r) else None) for i in range(len(headers))})
+        for phys_r, r in non_empty_pairs[hdr_idx + 1 :]:
+            rec: dict[str, Any] = {headers[i]: (r[i] if i < len(r) else None) for i in range(len(headers))}
+            rec["_physical_row"] = phys_r
+            rec["_col_letters"] = col_letters
+            rec["_is_xlsx"] = True
+            rows.append(rec)
         return rows, sname
 
     with file_path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
         sample = fh.read(2048)
         fh.seek(0)
         delim = "\t" if ("\t" in sample.splitlines()[0] if sample.splitlines() else False) else ","
-        return list(csv.DictReader(fh, delimiter=delim)), file_path.name
+        reader = csv.DictReader(fh, delimiter=delim)
+        fnames = list(reader.fieldnames or [])
+        col_letters = {fn: _idx_to_col_letters(i) for i, fn in enumerate(fnames)}
+        rows_csv: list[dict[str, Any]] = []
+        for lno, row in enumerate(reader, start=2):
+            rec_c: dict[str, Any] = dict(row)
+            rec_c["_physical_row"] = lno
+            rec_c["_col_letters"] = col_letters
+            rec_c["_is_xlsx"] = False
+            rows_csv.append(rec_c)
+        return rows_csv, file_path.name
 
 
 def _one_way_anova_stats(valid_groups: dict[str, list[float]]) -> tuple[float, float]:
@@ -110,8 +257,10 @@ def _analyze_batch_shift(
     grouped: dict[str, list[tuple[int, str, float]]],
     *,
     excluded_row_ids: set[tuple[str, int]] | None = None,
+    cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Compute raw one-way F, outlier-excluded one-way F, nonparametric Kruskal-Wallis H, and median spread ratio."""
+    """Compute raw F, nonparametric Kruskal-Wallis H, outlier-free trimmed-mean bootstrap CI, and conditional outlier-excluded F."""
+    th = cfg or load_thresholds()
     valid_groups = {g: [x[2] for x in pts] for g, pts in grouped.items() if len(pts) >= 2}
     if len(valid_groups) < 2:
         return {"evaluated": False, "reason": "fewer_than_2_groups_with_n>=2"}
@@ -121,8 +270,14 @@ def _analyze_batch_shift(
     n_tot = len(all_vals)
     f_stat, eta_sq = _one_way_anova_stats(valid_groups)
     kw_h = _kruskal_wallis_h(valid_groups)
+    boot_trim = _bootstrap_trimmed_spread_ci(
+        valid_groups,
+        trim_frac=float(th.get("trimmed_fraction", 0.15)),
+        n_boot=int(th.get("bootstrap_resamples", 500)),
+        seed=int(th.get("bootstrap_seed", 20261124)),
+    )
 
-    # Outlier-excluded F-stat so a single extreme point outlier (e.g. S_007) cannot mask systematic batch drift
+    # Conditional outlier-excluded F-stat (strictly annotated as conditional; NEVER standalone proof of batch shift)
     excl_set = excluded_row_ids or set()
     clean_groups = {
         g: [x[2] for x in pts if (g, x[0]) not in excl_set]
@@ -146,13 +301,16 @@ def _analyze_batch_shift(
     med_within_iqr = statistics.median(within_iqrs) if within_iqrs else 0.0
     shift_ratio = round(med_spread / med_within_iqr, 3) if med_within_iqr > 1e-12 else None
 
-    # Robust systematic batch-shift gate combining raw F, outlier-excluded F, Kruskal-Wallis H, and median/IQR ratio
-    kw_thresh = 3.84 if k == 2 else 5.99
+    # Primary systematic batch-shift gate uses valid permutation null p-value + Kruskal-Wallis H + raw F (never non-negative range CI!)
+    kw_thresh = float(th.get("kw_chi2_2grp", 3.84)) if k == 2 else float(th.get("kw_chi2_multi", 5.99))
+    raw_f_th = float(th.get("raw_f_threshold", 4.0))
+    eta_th = float(th.get("eta_sq_threshold", 0.25))
+    iqr_ratio_th = float(th.get("shift_to_within_iqr_threshold", 1.5))
+    perm_p = boot_trim.get("permutation_p_value_trimmed_spread")
     shift_flag = (
-        (f_stat >= 4.0 and eta_sq >= 0.25)
-        or (excl_f_stat >= 4.0 and excl_eta_sq >= 0.25)
+        (f_stat >= raw_f_th and eta_sq >= eta_th)
         or (kw_h >= kw_thresh and (shift_ratio is None or shift_ratio >= 1.2))
-        or (shift_ratio is not None and shift_ratio >= 1.5 and excl_eta_sq >= 0.20)
+        or (perm_p is not None and perm_p < 0.05 and bool(boot_trim.get("signed_pair_ci_excludes_zero")) and shift_ratio is not None and shift_ratio >= iqr_ratio_th)
     )
     drifting_groups = []
     overall_med = statistics.median(all_vals)
@@ -168,10 +326,20 @@ def _analyze_batch_shift(
         "total_n": n_tot,
         "one_way_f_stat": f_stat,
         "eta_squared": eta_sq,
+        "kruskal_wallis_h": kw_h,
+        "trimmed_mean_spread": boot_trim.get("trimmed_mean_spread"),
+        "group_trimmed_means": boot_trim.get("group_trimmed_means"),
+        "permutation_p_value_trimmed_spread": perm_p,
+        "signed_max_minus_min_pair": boot_trim.get("signed_max_minus_min_pair"),
+        "signed_pair_trimmed_diff": boot_trim.get("signed_pair_trimmed_diff"),
+        "signed_pair_bootstrap_95ci": boot_trim.get("signed_pair_bootstrap_95ci"),
+        "signed_pair_ci_excludes_zero": boot_trim.get("signed_pair_ci_excludes_zero"),
+        "bootstrap_95ci_trimmed_spread": boot_trim.get("bootstrap_95ci_trimmed_spread"),
+        "bootstrap_ci_excludes_zero": boot_trim.get("bootstrap_ci_excludes_zero"),
         "outlier_excluded_f_stat": excl_f_stat,
         "outlier_excluded_eta_squared": excl_eta_sq,
         "excluded_point_outlier_count": len(excl_set),
-        "kruskal_wallis_h": kw_h,
+        "outlier_excluded_f_caveat": "Conditional on excluding flagged point outliers; reported alongside raw F, Kruskal-Wallis H, and permutation p-value / signed pairwise bootstrap CI only — NOT standalone proof of systematic batch shift.",
         "group_medians": group_medians,
         "between_median_spread": med_spread,
         "median_within_iqr": round(med_within_iqr, 6),
@@ -195,16 +363,24 @@ def detect_outliers_table(
     if src_label.startswith("sheet_not_found:"):
         return {"$schema": "stratified-outlier-report/v2", "ok": False, "analysis_status": src_label, "file": file_path.name}
 
-    grouped: dict[str, list[tuple[int, str, float]]] = {}
+    # Tuple: (physical_row, cell_ref, sample_id, val)
+    grouped_uncensored: dict[str, list[tuple[int, str, str, float]]] = {}
+    grouped_all_numeric: dict[str, list[tuple[int, str, str, float]]] = {}
     data_gaps: list[dict[str, Any]] = []
     valid_reading_count = 0
     explicit_zero_count = 0
     below_lod_count = 0
     saturated_count = 0
 
-    for ri, row in enumerate(rows, start=1):
+    for seq_i, row in enumerate(rows, start=1):
+        phys_r = int(row.get("_physical_row") or seq_i)
+        col_map = row.get("_col_letters") or {}
+        col_let = col_map.get(value_col, "")
+        is_xlsx = bool(row.get("_is_xlsx"))
+        cell_ref = f"{src_label}!{col_let}{phys_r}" if (is_xlsx and col_let) else (f"{src_label}!R{phys_r}" if is_xlsx else f"{file_path.name}#L{phys_r}")
+
         grp = str(row.get(group_col, "ALL")).strip() if group_col else "ALL"
-        sid = str(row.get(id_col, f"row_{ri}")).strip() if id_col else f"row_{ri}"
+        sid = str(row.get(id_col, f"row_{phys_r}")).strip() if id_col else f"row_{phys_r}"
         raw_value = row.get(value_col)
         val = _float_or_none(raw_value)
         if val is None:
@@ -220,27 +396,48 @@ def detect_outliers_table(
             else:
                 status = "invalid_or_non_finite"
             data_gaps.append({
-                "row_idx": ri, "sample_id": sid, "group": grp, "column": value_col,
+                "row_idx": phys_r, "cell_ref": cell_ref, "sample_id": sid, "group": grp, "column": value_col,
                 "raw_value": raw_value, "status": status,
             })
             continue
 
+        grouped_all_numeric.setdefault(grp, []).append((phys_r, cell_ref, sid, val))
         if upper_rail is not None and val >= upper_rail - 1e-9:
             saturated_count += 1
             data_gaps.append({
-                "row_idx": ri, "sample_id": sid, "group": grp, "column": value_col,
+                "row_idx": phys_r, "cell_ref": cell_ref, "sample_id": sid, "group": grp, "column": value_col,
                 "raw_value": val, "status": "saturated_at_upper_rail",
+                "censoring_action": "excluded_from_uncensored_mean_sd_reported_in_censored_sensitivity",
             })
+            # Exclude right-censored saturated observations from uncensored point estimates!
+            continue
         if abs(val) < 1e-12:
             explicit_zero_count += 1
         valid_reading_count += 1
-        grouped.setdefault(grp, []).append((ri, sid, val))
+        grouped_uncensored.setdefault(grp, []).append((phys_r, cell_ref, sid, val))
+
+    # Build censored sensitivity summary comparing uncensored vs all-numeric (if any right-censored saturated points exist)
+    censored_sensitivity: dict[str, Any] = {"has_right_censored_points": saturated_count > 0, "per_group": []}
+    if saturated_count > 0:
+        for grp in sorted(grouped_all_numeric.keys()):
+            unc_v = [x[3] for x in grouped_uncensored.get(grp, [])]
+            all_v = [x[3] for x in grouped_all_numeric[grp]]
+            censored_sensitivity["per_group"].append({
+                "group": grp,
+                "uncensored_n": len(unc_v),
+                "all_numeric_n": len(all_v),
+                "right_censored_count": len(all_v) - len(unc_v),
+                "uncensored_mean": round(statistics.mean(unc_v), 6) if unc_v else None,
+                "uncensored_median": round(statistics.median(unc_v), 6) if unc_v else None,
+                "including_saturated_rail_mean": round(statistics.mean(all_v), 6) if all_v else None,
+                "including_saturated_rail_median": round(statistics.median(all_v), 6) if all_v else None,
+            })
 
     outliers: list[dict[str, Any]] = []
     group_stats: list[dict[str, Any]] = []
 
-    for grp, pts in sorted(grouped.items()):
-        vals = sorted(x[2] for x in pts)
+    for grp, pts in sorted(grouped_uncensored.items()):
+        vals = sorted(x[3] for x in pts)
         n = len(vals)
         if n < 4:
             group_stats.append({
@@ -262,13 +459,14 @@ def detect_outliers_table(
             "q1": round(q1, 6), "q3": round(q3, 6), "iqr_fence": [round(lo, 6), round(hi, 6)], "mad": round(mad, 6),
         })
 
-        for ri, sid, v in pts:
+        for phys_r, cell_ref, sid, v in pts:
             iqr_flag = (v < lo or v > hi) if iqr > 0 else False
             mad_z = round(0.6745 * (v - med) / mad, 3) if mad > 1e-12 else 0.0
             mad_flag = abs(mad_z) > mad_z_thresh
             if iqr_flag or mad_flag:
                 outliers.append({
-                    "row_idx": ri,
+                    "row_idx": phys_r,
+                    "cell_ref": cell_ref,
                     "sample_id": sid,
                     "group": grp,
                     "column": value_col,
@@ -280,13 +478,38 @@ def detect_outliers_table(
                     "threshold_rule": f"IQR_1.5=[{lo:.4f}, {hi:.4f}] or |MAD_Z|>{mad_z_thresh}",
                 })
 
+    # MAD-Z threshold sensitivity table across configurable grid (default {2.5, 3.5, 4.5})
+    th_cfg = load_thresholds()
+    sens_grid = [float(x) for x in th_cfg.get("mad_z_sensitivity_grid", [2.5, 3.5, 4.5])]
+    mad_sensitivity: list[dict[str, Any]] = []
+    for thr in sens_grid:
+        hits = []
+        for grp, pts in sorted(grouped_uncensored.items()):
+            vals = sorted(x[3] for x in pts)
+            if len(vals) < int(th_cfg.get("min_group_n_for_fencing", 4)):
+                continue
+            med = statistics.median(vals)
+            mad = statistics.median([abs(v - med) for v in vals])
+            if mad <= 1e-12:
+                continue
+            for _, _, sid, v in pts:
+                if abs(0.6745 * (v - med) / mad) > thr:
+                    hits.append(sid)
+        mad_sensitivity.append({"mad_z_threshold": thr, "flagged_count": len(hits), "flagged_ids": hits[:25]})
+
     excl_ids = {(o["group"], o["row_idx"]) for o in outliers}
-    batch_shift = _analyze_batch_shift(grouped, excluded_row_ids=excl_ids) if group_col else {"evaluated": False, "reason": "no_group_col_supplied"}
+    grouped_for_shift = {g: [(r, sid, v) for r, _, sid, v in pts] for g, pts in grouped_uncensored.items()}
+    batch_shift = _analyze_batch_shift(grouped_for_shift, excluded_row_ids=excl_ids, cfg=th_cfg) if group_col else {"evaluated": False, "reason": "no_group_col_supplied"}
     analysis_status = "no_valid_numeric_readings" if valid_reading_count == 0 else ("partial" if data_gaps else "complete")
     return {
         "$schema": "stratified-outlier-report/v2",
         "ok": valid_reading_count > 0,
         "analysis_status": analysis_status,
+        "thresholds_used": {
+            "iqr_multiplier": th_cfg.get("iqr_multiplier", 1.5),
+            "mad_z_threshold": mad_z_thresh,
+            "trimmed_fraction": th_cfg.get("trimmed_fraction", 0.15),
+        },
         "file": file_path.name,
         "sheet_or_source": src_label,
         "value_col": value_col,
@@ -296,9 +519,11 @@ def detect_outliers_table(
         "explicit_zero_count": explicit_zero_count,
         "below_lod_count": below_lod_count,
         "saturated_count": saturated_count,
+        "censored_sensitivity_summary": censored_sensitivity,
         "data_gap_count": len(data_gaps),
         "data_gaps": data_gaps,
         "outlier_count": len(outliers),
+        "mad_z_sensitivity_table": mad_sensitivity,
         "batch_shift_analysis": batch_shift,
         "group_stats": group_stats,
         "outliers": outliers,
@@ -360,12 +585,18 @@ def summarize_multi_split_estimators(csv_path: Path, split_col: str, estimator_c
             wins_1 = sum(1 for d in deltas if d > 1e-12)
             wins_2 = sum(1 for d in deltas if d < -1e-12)
             ties = len(deltas) - wins_1 - wins_2
+            df_sp = len(deltas) - 1
+            t_crit = _student_t_crit_95(df_sp) if df_sp >= 1 else None
+            ci_t = [round(mean_d - t_crit * se_d, 6), round(mean_d + t_crit * se_d, 6)] if (t_crit is not None and math.isfinite(t_crit)) else [round(mean_d, 6), round(mean_d, 6)]
             pairwise.append({
                 "pair": f"{e1} - {e2}",
                 "shared_splits": len(shared),
+                "df": df_sp,
+                "t_critical_95": t_crit,
                 "mean_paired_delta": round(mean_d, 6),
                 "sd_paired_delta": round(sd_d, 6),
-                "approx_95ci": [round(mean_d - 1.96 * se_d, 6), round(mean_d + 1.96 * se_d, 6)],
+                "paired_95ci_student_t": ci_t,
+                "approx_95ci": ci_t,
                 "paired_t_stat": t_stat,
                 "wins_first": wins_1,
                 "ties": ties,

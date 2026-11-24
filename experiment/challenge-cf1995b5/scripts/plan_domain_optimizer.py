@@ -202,28 +202,28 @@ def _evaluate_candidate_cost(
             if rm is None:
                 unverified.append(f"resource:{rid}")
                 continue
-            units = _finite_nonneg(st.get("units", 0.0))
-            hours = _finite_nonneg(st.get("hours", 0.0))
-            if units is None:
-                unverified.append(f"steps[{idx}].units")
-            elif units > 0:
+            if rm is not None:
+                units = _finite_nonneg(st.get("units"))
+                hours = _finite_nonneg(st.get("hours"))
                 uc = _finite_nonneg(rm.get("unit_cost"))
-                if uc is None:
-                    unverified.append(f"{rid}.unit_cost")
-                else:
-                    if uc == 0.0:
-                        explicit_zeros.append(f"{rid}.unit_cost")
-                    consumables += units * uc
-            if hours is None:
-                unverified.append(f"steps[{idx}].hours")
-            elif hours > 0:
                 hr_rate = _finite_nonneg(rm.get("rate_per_hr"))
-                if hr_rate is None:
-                    unverified.append(f"{rid}.rate_per_hr")
+                if units is None and hours is None:
+                    unverified.append(f"steps[{idx}].units_or_hours")
                 else:
-                    if hr_rate == 0.0:
-                        explicit_zeros.append(f"{rid}.rate_per_hr")
-                    machine_cost += hours * hr_rate
+                    if units is not None and units > 0:
+                        if uc is None:
+                            unverified.append(f"{rid}.unit_cost")
+                        else:
+                            if uc == 0.0:
+                                explicit_zeros.append(f"{rid}.unit_cost")
+                            consumables += units * uc
+                    if hours is not None and hours > 0:
+                        if hr_rate is None:
+                            unverified.append(f"{rid}.rate_per_hr")
+                        else:
+                            if hr_rate == 0.0:
+                                explicit_zeros.append(f"{rid}.rate_per_hr")
+                            machine_cost += hours * hr_rate
         # Optional per-sample consumable addon if declared in contract
         ps_raw = contract.get("per_sample_cost_usd")
         if ps_raw is not None:
@@ -460,10 +460,25 @@ def optimize_plan_versions(case: dict[str, Any], control_audit: dict[str, Any] |
     evaluated: list[dict[str, Any]] = []
     for idx, cand in enumerate(case.get("finite_candidates") or [], start=1):
         ver = str(cand.get("version") or f"v{idx}")
-        arms = int(cand.get("treatment_arms", cand.get("dose_arms", 1)))
-        bio_reps = int(cand.get("biological_replicates", cand.get("replicates", 3)))
-        tech_reps = int(cand.get("technical_replicates", 1))
-        qc_extra = int(cand.get("qc_extra_samples", 0))
+        # Per-candidate SOP version pinning conflict check (eLabFTW #3815 paradigm: never mix two versions of the same SOP!)
+        sop_conflicts_cand: list[str] = []
+        by_sop_id: dict[str, set[str]] = {}
+        for sref in cand.get("sop_versions") or []:
+            if isinstance(sref, dict):
+                sid_k = str(sref.get("sop_id", "")).strip()
+                sver_k = str(sref.get("version", "")).strip().lower()
+                if sid_k:
+                    by_sop_id.setdefault(sid_k, set()).add(sver_k or "unpinned")
+        for sid_k, vers in sorted(by_sop_id.items()):
+            if len(vers) > 1:
+                sop_conflicts_cand.append(f"SOP_VERSION_CONFLICT: {sid_k} mixes versions {sorted(vers)}")
+            elif "latest" in vers or "unpinned" in vers:
+                sop_conflicts_cand.append(f"SOP_UNPINNED_VERSION: {sid_k} uses {sorted(vers)} instead of pinned vN")
+
+        arms = int(cand.get("treatment_arms") if cand.get("treatment_arms") is not None else (cand.get("dose_arms") if cand.get("dose_arms") is not None else 1))
+        bio_reps = int(cand.get("biological_replicates") if cand.get("biological_replicates") is not None else (cand.get("replicates") if cand.get("replicates") is not None else 3))
+        tech_reps = int(cand.get("technical_replicates") if cand.get("technical_replicates") is not None else 1)
+        qc_extra = int(cand.get("qc_extra_samples") or 0)
         total_arms = arms + ctrl_count
         total_independent_units = total_arms * bio_reps
         total_samples = total_independent_units * tech_reps + qc_extra
@@ -485,6 +500,7 @@ def optimize_plan_versions(case: dict[str, Any], control_audit: dict[str, Any] |
             }
 
         params, violations = _check_parameters_and_coupled(cand, domains, coupled)
+        violations.extend(sop_conflicts_cand)
 
         # Resource availability check for step-bound resources
         for st in cand.get("steps") or []:
@@ -494,7 +510,7 @@ def optimize_plan_versions(case: dict[str, Any], control_audit: dict[str, Any] |
                 violations.append(f"resource {rid} unavailable (no active substitute bound)")
 
         if not cost_bk["verifiable"]:
-            violations.append(f"unverified cost inputs: {', '.join(cost_bk['unverified_cost_inputs'])}")
+            violations.append(f"UNVERIFIED_COST_INPUT: {', '.join(cost_bk['unverified_cost_inputs'])}")
         elif budget_cap is not None and cost_bk["total_usd"] > budget_cap + 1e-9:
             violations.append(f"cost ${cost_bk['total_usd']} > budget_cap ${budget_cap}")
 
@@ -543,6 +559,37 @@ def optimize_plan_versions(case: dict[str, Any], control_audit: dict[str, Any] |
     recommended = feasible_list[0]["version"] if feasible_list else None
     version_diffs = _build_version_diffs(evaluated)
 
+    # Synthesize actionable minimal_feasible_revision when all_infeasible=True (never stop at bare rejection)
+    minimal_feasible_revision: dict[str, Any] | None = None
+    if len(feasible_list) == 0 and evaluated:
+        # Rank candidates by fewest violations to choose closest base plan
+        closest = min(evaluated, key=lambda e: (len(e["violations"]), e["estimated_cost_usd"] if e["estimated_cost_usd"] is not None else 1e9))
+        design_additions: list[str] = []
+        if not control_audit.get("ok", True):
+            for err in control_audit.get("errors") or []:
+                design_additions.append(f"Resolve audit gate: {err}")
+        for seg in control_audit.get("secondary_endpoint_gaps") or []:
+            design_additions.append(seg["remediation"])
+        for fm in control_audit.get("factorial_label_mismatches") or []:
+            design_additions.append(fm["remediation"])
+        constraint_revisions: list[str] = []
+        for v in closest["violations"]:
+            constraint_revisions.append(f"Fix on {closest['version']}: {v}")
+        if budget_cap is not None and closest["estimated_cost_usd"] is not None and closest["estimated_cost_usd"] > budget_cap:
+            over = round(closest["estimated_cost_usd"] - budget_cap, 2)
+            constraint_revisions.append(f"Reduce cost by >= ${over} (or expand budget_cap from ${budget_cap} to ${closest['estimated_cost_usd']})")
+        if deadline is not None and closest["estimated_days"] is not None and closest["estimated_days"] > deadline:
+            over_d = round(closest["estimated_days"] - deadline, 2)
+            constraint_revisions.append(f"Compress critical path by >= {over_d}d (or relax deadline from {deadline}d to {closest['estimated_days']}d)")
+        minimal_feasible_revision = {
+            "closest_base_version": closest["version"],
+            "closest_base_cost_usd": closest["estimated_cost_usd"],
+            "closest_base_days": closest["estimated_days"],
+            "required_design_and_audit_revisions": design_additions,
+            "required_constraint_revisions": constraint_revisions,
+            "status": "ACTIONABLE_REVISION_REQUIRED_BEFORE_EXECUTION",
+        }
+
     return {
         "$schema": "optimized-experimental-plan/v2",
         "case_id": case.get("case_id", "unknown"),
@@ -550,6 +597,7 @@ def optimize_plan_versions(case: dict[str, Any], control_audit: dict[str, Any] |
         "research_type": case.get("research_type", "empirical_causal"),
         "recommended_plan_version": recommended,
         "all_infeasible": len(feasible_list) == 0,
+        "minimal_feasible_revision": minimal_feasible_revision,
         "control_audit": control_audit,
         "confirmation_items": confirmation_items,
         "version_diffs": version_diffs,

@@ -65,9 +65,18 @@ def _col_letters_to_idx(ref: str) -> int:
     return max(0, idx - 1)
 
 
-def _read_xlsx_stdlib(xlsx_path: Path) -> list[tuple[str, list[list[Any]]]]:
-    """Pure-stdlib XLSX reader fallback via zipfile + XML (works without openpyxl)."""
-    sheets_data: list[tuple[str, list[list[Any]]]] = []
+def _idx_to_col_letters(idx: int) -> str:
+    n = idx + 1
+    out: list[str] = []
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out.append(chr(ord("A") + rem))
+    return "".join(reversed(out)) or "A"
+
+
+def _read_xlsx_stdlib_indexed(xlsx_path: Path) -> list[tuple[str, list[tuple[int, list[Any]]]]]:
+    """Pure-stdlib XLSX reader preserving exact 1-based physical Excel row numbers from <row r='N'>."""
+    sheets_data: list[tuple[str, list[tuple[int, list[Any]]]]] = []
     ns_main = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
     ns_rel = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
@@ -100,8 +109,12 @@ def _read_xlsx_stdlib(xlsx_path: Path) -> list[tuple[str, list[list[Any]]]]:
             if target not in zf.namelist():
                 continue
             s_root = ET.fromstring(zf.read(target))
-            rows_out: list[list[Any]] = []
+            rows_out: list[tuple[int, list[Any]]] = []
+            seq_r = 0
             for row_el in s_root.findall(f".//{ns_main}sheetData/{ns_main}row"):
+                seq_r += 1
+                r_attr = row_el.attrib.get("r", "")
+                phys_r = int(r_attr) if r_attr.isdigit() else seq_r
                 row_map: dict[int, Any] = {}
                 max_c = -1
                 for c_el in row_el.findall(f"{ns_main}c"):
@@ -128,26 +141,37 @@ def _read_xlsx_stdlib(xlsx_path: Path) -> list[tuple[str, list[list[Any]]]]:
                             val = fv if fv is not None else raw
                     row_map[ci] = val
                 if max_c >= 0:
-                    rows_out.append([row_map.get(i) for i in range(max_c + 1)])
+                    rows_out.append((phys_r, [row_map.get(i) for i in range(max_c + 1)]))
             sheets_data.append((sname, rows_out))
     return sheets_data
 
 
-def _read_xlsx_sheets(xlsx_path: Path) -> tuple[str, list[tuple[str, list[list[Any]]]]]:
+def _read_xlsx_sheets_indexed(xlsx_path: Path) -> tuple[str, list[tuple[str, list[tuple[int, list[Any]]]]]]:
+    """Read XLSX sheets preserving exact 1-based physical Excel row numbers."""
     try:
         from openpyxl import load_workbook  # type: ignore
 
         wb = load_workbook(str(xlsx_path), read_only=True, data_only=True)
-        out: list[tuple[str, list[list[Any]]]] = []
+        out: list[tuple[str, list[tuple[int, list[Any]]]]] = []
         try:
             for sname in wb.sheetnames:
                 ws = wb[sname]
-                out.append((sname, [list(r) for r in ws.iter_rows(values_only=True)]))
+                out.append((sname, [(rno, list(r)) for rno, r in enumerate(ws.iter_rows(values_only=True), start=1)]))
         finally:
             wb.close()
         return "openpyxl", out
     except Exception:
-        return "stdlib_xml", _read_xlsx_stdlib(xlsx_path)
+        return "stdlib_xml", _read_xlsx_stdlib_indexed(xlsx_path)
+
+
+def _read_xlsx_stdlib(xlsx_path: Path) -> list[tuple[str, list[list[Any]]]]:
+    """Pure-stdlib XLSX reader fallback via zipfile + XML (works without openpyxl)."""
+    return [(sname, [cells for _, cells in rpairs]) for sname, rpairs in _read_xlsx_stdlib_indexed(xlsx_path)]
+
+
+def _read_xlsx_sheets(xlsx_path: Path) -> tuple[str, list[tuple[str, list[list[Any]]]]]:
+    backend, indexed = _read_xlsx_sheets_indexed(xlsx_path)
+    return backend, [(sname, [cells for _, cells in rpairs]) for sname, rpairs in indexed]
 
 
 def _detect_header_row_idx(non_empty: list[list[Any]]) -> int:
@@ -257,7 +281,13 @@ def profile_xlsx_workbook(xlsx_path: Path) -> dict[str, Any]:
 
 def _infer_prefix(filename: str) -> str:
     stem = Path(filename).stem
-    m = re.match(r"^([A-Za-z0-9]+(?:[-_][A-Za-z]+)?)", stem)
+    parts = re.split(r"[-_]+", stem)
+    if len(parts) >= 2:
+        # e.g. Batch_1_S001 -> Batch_1; B1_S001 -> B1; G2_014 -> G2
+        if re.match(r"^(?:batch|grp|group|lot|run|plate)$", parts[0], re.I) and len(parts) >= 3:
+            return f"{parts[0]}_{parts[1]}"
+        return parts[0]
+    m = re.match(r"^([A-Za-z]+)", stem)
     return m.group(1) if m else "ALL"
 
 
@@ -318,22 +348,48 @@ def profile_trace_file(fp: Path) -> dict[str, Any]:
     inflections = 0
     plateau_tail_cv = None
     saturated_runs = 0
+    linear_r2 = None
+    monotonic_inc_frac = None
+    curve_regime = "insufficient_points"
     if n >= 4:
         diffs = [ys[i + 1] - ys[i] for i in range(n - 1)]
         signs = [1 if d > 1e-9 else (-1 if d < -1e-9 else 0) for d in diffs]
         nz = [sg for sg in signs if sg != 0]
         inflections = sum(1 for i in range(len(nz) - 1) if nz[i] != nz[i + 1])
+        monotonic_inc_frac = round(sum(1 for d in diffs if d >= -1e-9) / max(len(diffs), 1), 4)
+        # Deterministic linear trend R^2 (y vs x)
+        mx, my = statistics.mean(xs), statistics.mean(ys)
+        sxx = sum((x - mx) ** 2 for x in xs)
+        syy = sum((y - my) ** 2 for y in ys)
+        sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        if sxx > 1e-12 and syy > 1e-12:
+            linear_r2 = round((sxy * sxy) / (sxx * syy), 4)
         tail = ys[max(0, int(n * 0.8)) :]
         if len(tail) >= 2 and abs(statistics.mean(tail)) > 1e-9:
             plateau_tail_cv = round(statistics.stdev(tail) / abs(statistics.mean(tail)), 4)
+        # Noise-tolerant saturation detection (0.2% full-scale band near upper/lower rail for >=5 consecutive points)
+        span_y = vmax - vmin
+        rail_tol = max(1e-6, 0.002 * span_y)
         cur_run = 0
         for v in ys:
-            if abs(v - vmax) < 1e-9 or abs(v - vmin) < 1e-9:
+            if abs(v - vmax) <= rail_tol or abs(v - vmin) <= rail_tol:
                 cur_run += 1
                 if cur_run == 5:
                     saturated_runs += 1
             else:
                 cur_run = 0
+        if span_y < 1e-9:
+            curve_regime = "flatline"
+        elif saturated_runs > 0:
+            curve_regime = "rail_saturated_or_plateau"
+        elif post_drop_pct is not None and post_drop_pct >= 25.0:
+            curve_regime = "peak_and_post_peak_drop"
+        elif linear_r2 is not None and linear_r2 >= 0.92:
+            curve_regime = "linear_trend"
+        elif plateau_tail_cv is not None and plateau_tail_cv < 0.03:
+            curve_regime = "saturating_plateau"
+        else:
+            curve_regime = "nonlinear_or_oscillatory"
 
     flatline = (vmax - vmin) < 1e-9 and n >= 3
     return {
@@ -349,6 +405,9 @@ def profile_trace_file(fp: Path) -> dict[str, Any]:
         "initial_slope": initial_slope,
         "auc_trapezoid": round(auc, 6),
         "post_peak_drop_pct": post_drop_pct,
+        "linear_r2": linear_r2,
+        "monotonic_inc_frac": monotonic_inc_frac,
+        "curve_regime": curve_regime,
         "inflection_count": inflections,
         "plateau_tail_cv": plateau_tail_cv,
         "saturation_flag": saturated_runs > 0,
@@ -438,11 +497,14 @@ def profile_experiment_dir(input_dir: Path) -> dict[str, Any]:
                 })
 
     text_units: dict[str, list[str]] = {}
+    text_thresholds: list[str] = []
     for tp in sorted(input_dir.rglob("*.md")):
         txt = tp.read_text(encoding="utf-8", errors="ignore")
         us = sorted(set(UNIT_RE.findall(txt)))
         if us:
             text_units[tp.name] = us
+        for m in THRESH_RE.finditer(txt):
+            text_thresholds.append(f"{tp.name} -> {m.group(0).strip()}")
 
     # Flag truncated traces relative to median point count when >= 5 traces exist
     ok_traces = [t for t in traces if t.get("ok")]
@@ -451,7 +513,44 @@ def profile_experiment_dir(input_dir: Path) -> dict[str, Any]:
         for t in ok_traces:
             t["truncated_flag"] = t["points"] < 0.6 * med_pts
 
+    # Build per-batch trace summary rollup so 197+ trace suites are immediately actionable
+    by_batch: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for t in ok_traces:
+        by_batch[str(t.get("batch_prefix") or "ALL")].append(t)
+    batch_summary = []
+    for bname, btrs in sorted(by_batch.items()):
+        peaks = [float(t["peak_y"]) for t in btrs if t.get("peak_y") is not None]
+        batch_summary.append({
+            "batch_prefix": bname,
+            "trace_count": len(btrs),
+            "median_peak_y": round(statistics.median(peaks), 4) if peaks else None,
+            "truncated_count": sum(1 for t in btrs if t.get("truncated_flag")),
+            "saturated_count": sum(1 for t in btrs if t.get("saturation_flag")),
+            "flatline_count": sum(1 for t in btrs if t.get("flatline_flag")),
+        })
+
     ambiguities = _flag_cross_source_ambiguities(workbooks, ok_traces, matlab_params, text_units)
+
+    # Detect cross-source threshold conflicts (e.g. RSD 2.0% in workbook vs RSD 5.0% in paper)
+    all_thresh_pairs: dict[str, set[str]] = defaultdict(set)
+    for wb in workbooks:
+        for th in wb.get("thresholds_detected", []):
+            key_m = re.match(r".*->\s*([A-Za-z_-]+)\s*[:=<>\s]+\s*([0-9]+(?:\.[0-9]+)?%?)", th)
+            if key_m:
+                all_thresh_pairs[key_m.group(1).lower()].add(f"{key_m.group(2)} ({th.split(' -> ')[0]})")
+    for th in text_thresholds:
+        key_m = re.match(r".*->\s*([A-Za-z_-]+)\s*[:=<>\s]+\s*([0-9]+(?:\.[0-9]+)?%?)", th)
+        if key_m:
+            all_thresh_pairs[key_m.group(1).lower()].add(f"{key_m.group(2)} ({th.split(' -> ')[0]})")
+    for tkey, tvals in sorted(all_thresh_pairs.items()):
+        uniq_nums = {v.split(" ")[0] for v in tvals}
+        if len(uniq_nums) > 1:
+            ambiguities.append({
+                "type": "threshold_discrepancy",
+                "metric_key": tkey,
+                "values_observed": sorted(tvals)[:10],
+                "guidance": "Retain both workbook and manuscript acceptance thresholds explicitly; do not silently pick one cutoff.",
+            })
 
     return {
         "$schema": "experiment-trace-workbook-profile/v2",
@@ -461,6 +560,7 @@ def profile_experiment_dir(input_dir: Path) -> dict[str, Any]:
         "valid_trace_count": len(ok_traces),
         "matlab_param_count": len(matlab_params),
         "detected_ambiguities": ambiguities,
+        "batch_trace_summary": batch_summary,
         "workbooks": workbooks,
         "traces": traces[:500],
         "matlab_parameters": matlab_params[:120],

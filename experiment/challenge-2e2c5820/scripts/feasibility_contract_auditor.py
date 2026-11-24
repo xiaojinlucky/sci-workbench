@@ -334,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     case = json.loads(Path(args.case).read_text(encoding="utf-8-sig"))
-    arith = json.loads(Path(args.arith).read_text(encoding="utf-8-sig")) if args.arith else None
+    arith = json.loads(Path(args.arith).read_text(encoding="utf-8-sig")) if (args.arith and Path(args.arith).is_file()) else None
     rep = review_case(case, arith_report=arith)
 
     out_dir = Path(args.out_dir)

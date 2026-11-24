@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -270,6 +271,65 @@ def audit_controls_and_hypothesis(case: dict[str, Any]) -> dict[str, Any]:
     if sop_audit["unpinned_sops"]:
         warnings.append(f"Unpinned SOP versions (add explicit sop_version): {sop_audit['unpinned_sops']}")
 
+    # Claim-to-Endpoint Mapping Audit: catch secondary guardrail clauses in hypothesis lacking a declared DV/objective
+    secondary_endpoint_gaps: list[dict[str, Any]] = []
+    hyp_stmt = str(hyp.get("statement") or "")
+    dv_blob = " ".join([
+        str(hyp.get("dv") or ""),
+        " ".join(str(x) for x in (hyp.get("secondary_endpoints") or [])),
+        " ".join(str(o.get("name", "") if isinstance(o, dict) else o) for o in (case.get("objectives") or [])),
+    ]).lower()
+    guardrail_pats = [
+        re.compile(r"\bwithout\s+(?:accelerating|increasing|degrading|compromising|inducing|causing)\s+([A-Za-z0-9_\-\s]{3,50}?)(?:[.,;]|$)", re.I),
+        re.compile(r"\bwhile\s+(?:maintaining|preserving|avoiding)\s+([A-Za-z0-9_\-\s]{3,50}?)(?:[.,;]|$)", re.I),
+        re.compile(r"(?:不加速|且不增加|同时保持)([^，。；\n]{2,25})"),
+    ]
+    stop_w = {"the", "a", "an", "of", "in", "to", "for", "and", "or", "with", "at", "by", "on", "catalyst", "sample", "rate"}
+    for gpat in guardrail_pats:
+        for gm in gpat.finditer(hyp_stmt):
+            clause = gm.group(1).strip()
+            toks = [t.lower() for t in re.findall(r"[A-Za-z0-9_]{4,}|[\u4e00-\u9fff]{2,}", clause) if t.lower() not in stop_w]
+            if toks and not any(tok in dv_blob for tok in toks):
+                secondary_endpoint_gaps.append({
+                    "code": "UNMEASURED_SECONDARY_CLAIM_ENDPOINT",
+                    "claim_clause": gm.group(0).strip(),
+                    "missing_endpoint_terms": toks,
+                    "remediation": f"Declare an explicit secondary readout/assay (method, unit, sampling timepoint, pass/fail threshold) for '{clause}' (e.g., ICP-OES/MS dissolved metal concentration for dissolution).",
+                })
+                errors.append(f"UNMEASURED_SECONDARY_CLAIM_ENDPOINT: hypothesis clause '{gm.group(0).strip()}' has no declared DV/secondary endpoint in {hyp.get('dv')!r}")
+
+    # Factorial Label Consistency Audit: catch candidates claiming AxB / factorial design with only 1 scalar point or too few arms
+    factorial_mismatches: list[dict[str, Any]] = []
+    fac_re = re.compile(r"(\d+)\s*[x×]\s*(\d+)(?:\s*[x×]\s*(\d+))?", re.I)
+    for cand in case.get("finite_candidates") or []:
+        ver = str(cand.get("version") or cand.get("plan_id") or "")
+        label_txt = f"{ver} {cand.get('rationale', '')} {cand.get('design_description', '')}"
+        m_fac = fac_re.search(label_txt)
+        if m_fac:
+            dims = [int(g) for g in m_fac.groups() if g is not None]
+            req_cells = 1
+            for d in dims:
+                req_cells *= d
+            params = cand.get("parameters") or {}
+            multi_level_factors = sum(1 for v in params.values() if isinstance(v, (list, tuple)) and len(v) >= 2)
+            cand_arms = cand.get("treatment_arms") or cand.get("arms") or 0
+            cand_cells = len(cand.get("design_cells") or case.get("design_cells") or [])
+            if multi_level_factors < len(dims) and int(cand_arms or 0) < req_cells and cand_cells < req_cells:
+                factorial_mismatches.append({
+                    "code": "FACTORIAL_LABEL_LEVEL_MISMATCH",
+                    "version": ver,
+                    "claimed_factorial": m_fac.group(0),
+                    "required_cells": req_cells,
+                    "declared_arms": cand_arms,
+                    "multi_level_factors_specified": multi_level_factors,
+                    "parameters_specified": params,
+                    "remediation": f"Expand {ver} parameters/design_cells to enumerate all {req_cells} factor combinations or rename plan to reflect single-point / {cand_arms}-arm design.",
+                })
+                errors.append(
+                    f"FACTORIAL_LABEL_LEVEL_MISMATCH: candidate '{ver}' claims '{m_fac.group(0)}' ({req_cells} cells) "
+                    f"but only specifies {cand_arms} arm(s) and {multi_level_factors} multi-level factor(s)"
+                )
+
     eln_missing = [k for k in ("experiment_id_pattern", "raw_data_binding", "deviation_log_fields") if not eln.get(k)]
     if eln_missing:
         warnings.append(f"ELN handover traceability incomplete (missing {eln_missing})")
@@ -291,6 +351,8 @@ def audit_controls_and_hypothesis(case: dict[str, Any]) -> dict[str, Any]:
         "power_audit": power_audit,
         "estimability_audit": estimability,
         "sop_pin_audit": sop_audit,
+        "secondary_endpoint_gaps": secondary_endpoint_gaps,
+        "factorial_label_mismatches": factorial_mismatches,
         "eln_handover_complete": len(eln_missing) == 0,
         "errors": errors,
         "warnings": warnings,

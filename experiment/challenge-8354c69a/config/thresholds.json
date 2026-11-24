@@ -1,0 +1,16 @@
+{
+  "schema_version": "experiment-anomaly-thresholds/v1",
+  "iqr_multiplier": 1.5,
+  "mad_z_threshold": 3.5,
+  "mad_z_sensitivity_grid": [2.5, 3.5, 4.5],
+  "kw_chi2_2grp": 3.84,
+  "kw_chi2_multi": 5.99,
+  "raw_f_threshold": 4.0,
+  "eta_sq_threshold": 0.25,
+  "shift_to_within_iqr_threshold": 1.5,
+  "trimmed_fraction": 0.15,
+  "bootstrap_resamples": 500,
+  "bootstrap_seed": 20261124,
+  "min_group_n_for_fencing": 4,
+  "small_n_fallback_note": "For groups with n<4, IQR/MAD outlier fencing is suppressed and nonparametric Kruskal-Wallis / bootstrap trimmed-mean spread is prioritized."
+}

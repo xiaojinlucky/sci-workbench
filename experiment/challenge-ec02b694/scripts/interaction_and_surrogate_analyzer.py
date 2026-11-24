@@ -68,6 +68,7 @@ def _fit_ols(X: list[list[float]], y: list[float]) -> dict[str, Any] | None:
     if n == 0 or not X:
         return None
     p = len(X[0])
+    raw_dof = n - p
     Xt = _mat_transpose(X)
     XtX = _mat_mul(Xt, X)
     XtX_inv = _invert_matrix(XtX, ridge=1e-7)
@@ -81,26 +82,131 @@ def _fit_ols(X: list[list[float]], y: list[float]) -> dict[str, Any] | None:
     y_mean = statistics.mean(y)
     sst = sum((yi - y_mean) ** 2 for yi in y)
     r2 = 1.0 - (sse / sst) if sst > 1e-12 else 0.0
-    dof = max(1, n - p)
-    rmse = math.sqrt(sse / dof)
-    return {"beta": beta, "xtx_inv": XtX_inv, "r2": round(r2, 4), "rmse": round(rmse, 6), "n": n, "p": p, "dof": dof}
+    underdetermined = raw_dof <= 0
+    rmse = math.sqrt(sse / raw_dof) if raw_dof > 0 else None
+    mse = (sse / raw_dof) if raw_dof > 0 else None
+    # Diagonal hat-matrix leverages h_ii, exact analytical LOOCV PRESS / LOOCV-R^2, and Cook's D proxy
+    leverages: list[float] = []
+    cooks: list[float] = []
+    loocv_sq_errs: list[float] = []
+    loocv_valid = True
+    for xi, ei in zip(X, resid):
+        hx = _mat_vec(XtX_inv, xi)
+        h_ii = max(0.0, min(0.9999, sum(a * b for a, b in zip(xi, hx))))
+        leverages.append(round(h_ii, 4))
+        if h_ii >= 0.995:
+            loocv_valid = False
+        else:
+            e_loo = ei / (1.0 - h_ii)
+            loocv_sq_errs.append(e_loo * e_loo)
+        if mse and mse > 1e-12 and h_ii < 0.999:
+            cd = (ei * ei / (p * mse)) * (h_ii / ((1.0 - h_ii) ** 2))
+            cooks.append(round(cd, 4))
+    max_lev = max(leverages) if leverages else 0.0
+    max_cook = max(cooks) if cooks else None
+    press = round(sum(loocv_sq_errs), 6) if (loocv_valid and loocv_sq_errs) else None
+    loocv_r2 = round(1.0 - (press / sst), 4) if (press is not None and sst > 1e-12) else None
+    loocv_rmse = round(math.sqrt(press / n), 6) if (press is not None and n > 0) else None
+    adj_r2 = round(1.0 - (1.0 - r2) * (n - 1) / raw_dof, 4) if raw_dof > 0 else None
+    overfit_gap = round(r2 - loocv_r2, 4) if loocv_r2 is not None else None
+    return {
+        "beta": beta, "xtx_inv": XtX_inv, "r2": round(r2, 4), "adj_r2": adj_r2,
+        "loocv_r2": loocv_r2, "press": press, "loocv_rmse": loocv_rmse, "r2_minus_loocv_r2": overfit_gap,
+        "rmse": round(rmse, 6) if rmse is not None else None,
+        "n": n, "p": p, "dof": raw_dof,
+        "underdetermined_model": underdetermined,
+        "small_sample_warning": raw_dof < 5,
+        "overfit_warning": bool(raw_dof < 5 or (loocv_r2 is None) or (loocv_r2 < 0.30) or (overfit_gap is not None and overfit_gap > 0.25)),
+        "max_leverage": max_lev,
+        "high_leverage_threshold": round(2.0 * p / max(n, 1), 4),
+        "max_cooks_d": max_cook,
+    }
+
+
+RESPONSE_ALIASES = ("response", "yield", "overpotential", "activity", "metric", "score", "purity", "efficiency", "output", "value", "y")
+META_COLS = {"run_id", "id", "run", "index", "batch", "notes", "source_ref", "comment", "operator"}
+
+
+def _read_xlsx_first_table(xlsx_path: Path) -> list[dict[str, Any]]:
+    import xml.etree.ElementTree as ET
+    import zipfile
+    ns_m = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    with zipfile.ZipFile(str(xlsx_path), "r") as zf:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in zf.namelist():
+            for si in ET.fromstring(zf.read("xl/sharedStrings.xml")).findall(f"{ns_m}si"):
+                shared.append("".join(t.text or "" for t in si.iter(f"{ns_m}t")))
+        sheet_files = sorted(n for n in zf.namelist() if n.startswith("xl/worksheets/sheet") and n.endswith(".xml"))
+        if not sheet_files:
+            return []
+        rows: list[list[str]] = []
+        for row_el in ET.fromstring(zf.read(sheet_files[0])).findall(f".//{ns_m}sheetData/{ns_m}row"):
+            vals: list[str] = []
+            for c_el in row_el.findall(f"{ns_m}c"):
+                ct = c_el.attrib.get("t", "")
+                if ct == "inlineStr":
+                    v = "".join(t.text or "" for t in c_el.iter(f"{ns_m}t"))
+                else:
+                    ve = c_el.find(f"{ns_m}v")
+                    raw = ve.text if ve is not None else ""
+                    v = shared[int(raw)] if ct == "s" and raw.isdigit() and int(raw) < len(shared) else (raw or "")
+                vals.append(v.strip())
+            if any(vals):
+                rows.append(vals)
+    if len(rows) < 2:
+        return []
+    hdr = rows[0]
+    return [{hdr[i]: (r[i] if i < len(r) else "") for i in range(len(hdr))} for r in rows[1:]]
+
+
+def _infer_resp_and_factors(rows: list[dict[str, Any]], resp_hint: str = "", factors_hint: list[str] | None = None) -> tuple[list[str], str]:
+    headers = list(rows[0].keys()) if rows else []
+    resp_col = resp_hint
+    if not resp_col or resp_col not in headers:
+        for h in headers:
+            if h.lower() in RESPONSE_ALIASES or any(a in h.lower() for a in RESPONSE_ALIASES[:-1]):
+                resp_col = h
+                break
+        if not resp_col and headers:
+            resp_col = headers[-1]
+    factors = list(factors_hint or [])
+    if not factors and rows:
+        factors = [
+            h for h in headers
+            if h != resp_col and h.lower() not in META_COLS and any(_to_float(r.get(h)) is not None for r in rows[:10])
+        ]
+    return factors, resp_col or "response"
 
 
 def _load_pilot_rows(pilot_path: Path) -> tuple[list[dict[str, Any]], list[str], str, str]:
-    if pilot_path.suffix.lower() == ".csv":
+    suf = pilot_path.suffix.lower()
+    if suf in {".csv", ".tsv"}:
+        delim = "\t" if suf == ".tsv" else ","
         with pilot_path.open("r", encoding="utf-8-sig", newline="") as fh:
-            rows = list(csv.DictReader(fh))
-        headers = list(rows[0].keys()) if rows else []
-        resp_col = headers[-1] if headers else "response"
-        factors = [h for h in headers[:-1] if h.lower() not in {"run_id", "id", "batch", "notes"}]
+            rows = list(csv.DictReader(fh, delimiter=delim))
+        factors, resp_col = _infer_resp_and_factors(rows)
+        return rows, factors, resp_col, "maximize"
+    if suf == ".xlsx":
+        rows = _read_xlsx_first_table(pilot_path)
+        factors, resp_col = _infer_resp_and_factors(rows)
         return rows, factors, resp_col, "maximize"
     doc = json.loads(pilot_path.read_text(encoding="utf-8-sig"))
-    rows = doc.get("runs") or doc.get("observations") or []
-    factors = list(doc.get("factors") or [])
-    resp_col = str(doc.get("response_metric") or "response")
-    direction = str(doc.get("objective_direction") or "maximize").lower()
-    if not factors and rows:
-        factors = [k for k in rows[0] if k not in {resp_col, "run_id", "id", "batch", "notes"} and _to_float(rows[0][k]) is not None]
+    if isinstance(doc, list):
+        rows = doc
+        factors, resp_col = _infer_resp_and_factors(rows)
+        return rows, factors, resp_col, "maximize"
+    rows = (
+        doc.get("runs")
+        or doc.get("observations")
+        or doc.get("historical_runs")
+        or doc.get("trials")
+        or doc.get("data")
+        or (doc.get("historical_observations") or {}).get("runs")
+        or []
+    )
+    resp_hint = str(doc.get("response_metric") or doc.get("response_col") or doc.get("objective_metric") or "")
+    direction = str(doc.get("objective_direction") or doc.get("direction") or "maximize").lower()
+    factors, resp_col = _infer_resp_and_factors(rows, resp_hint=resp_hint, factors_hint=list(doc.get("factors") or []))
     return rows, factors, resp_col, direction
 
 
@@ -222,18 +328,19 @@ def analyze_interactions_and_surrogate(
         offset_idx = 1 + len(factors)
         for idx, (f1, f2) in enumerate(pair_names):
             coef = fit_int["beta"][offset_idx + idx]
-            se = fit_int["rmse"] * math.sqrt(max(0.0, fit_int["xtx_inv"][offset_idx + idx][offset_idx + idx]))
-            t_stat = (coef / se) if se > 1e-12 else 0.0
+            rmse_val = fit_int["rmse"]
+            se = (rmse_val * math.sqrt(max(0.0, fit_int["xtx_inv"][offset_idx + idx][offset_idx + idx]))) if rmse_val is not None else None
+            t_stat = (coef / se) if (se is not None and se > 1e-12) else None
             interaction_terms.append({
                 "pair": f"{f1}:{f2}",
                 "std_coeff": round(coef, 4),
-                "approx_se": round(se, 4),
-                "approx_t": round(t_stat, 3),
-                "strong_interaction": abs(t_stat) >= 2.0,
+                "approx_se": round(se, 4) if se is not None else None,
+                "approx_t": round(t_stat, 3) if t_stat is not None else None,
+                "strong_interaction": (abs(t_stat) >= 2.0) if t_stat is not None else False,
             })
 
     # Predict candidate responses + prediction uncertainty + extrapolation flag
-    use_model = fit_int if (fit_int is not None and (fit_main is None or fit_int["r2"] >= fit_main["r2"] + 0.05)) else fit_main
+    use_model = fit_int if (fit_int is not None and not fit_int.get("underdetermined_model") and (fit_main is None or fit_int["r2"] >= fit_main["r2"] + 0.05)) else fit_main
     use_inter = (use_model is fit_int and fit_int is not None)
     cand_preds: list[dict[str, Any]] = []
     if use_model is not None and candidates:
@@ -247,38 +354,88 @@ def analyze_interactions_and_surrogate(
             extrap = [f for f in factors if fv[f] < min(levels_by_f[f]) - 1e-9 or fv[f] > max(levels_by_f[f]) + 1e-9]
             x_row = _encode_inter(fv) if use_inter else _encode_main(fv)
             pred_y = sum(b * xi for b, xi in zip(use_model["beta"], x_row))
-            # Prediction SE: rmse * sqrt(1 + x^T (X^T X)^-1 x)
             v_x = _mat_vec(use_model["xtx_inv"], x_row)
             lev = max(0.0, sum(a * b for a, b in zip(x_row, v_x)))
-            pred_se = use_model["rmse"] * math.sqrt(1.0 + lev)
-            # Check if exact combination was already observed
-            already_obs = any(all(abs(pt[0][f] - fv[f]) < 1e-9 for f in factors) for pt in valid_pts)
+            pred_se = (use_model["rmse"] * math.sqrt(1.0 + lev)) if use_model.get("rmse") is not None else None
+            obs_matches = [pt[1] for pt in valid_pts if all(abs(pt[0][f] - fv[f]) < 1e-9 for f in factors)]
+            already_obs = len(obs_matches) > 0
+            obs_anchor_mean = round(statistics.mean(obs_matches), 4) if obs_matches else None
+            pred_minus_obs = round(pred_y - obs_anchor_mean, 4) if obs_anchor_mean is not None else None
             cand_preds.append({
                 "plan_id": pid,
                 "predicted": True,
                 "model_used": "ols_main_plus_2way_interaction" if use_inter else "ols_main_effects",
                 "surrogate_predicted_response": round(pred_y, 4),
-                "surrogate_prediction_se": round(pred_se, 4),
+                "surrogate_prediction_se": round(pred_se, 4) if pred_se is not None else None,
+                "observed_anchor_mean": obs_anchor_mean,
+                "prediction_minus_observed": pred_minus_obs,
+                "reconciliation_note": (
+                    f"Surrogate smooths observed cell {obs_anchor_mean} to {round(pred_y, 4)} (delta={pred_minus_obs:+.4f}, linear-interaction residual); treat observed anchor as empirical reference and confirm via replicate run."
+                    if obs_anchor_mean is not None
+                    else "Untested combination; surrogate estimate is prospective only and requires confirmatory run."
+                ),
+                "small_sample_se_caution": bool(use_model.get("small_sample_warning")),
+                "overfit_warning": bool(use_model.get("overfit_warning")),
                 "extrapolated_factors": extrap,
                 "previously_untested_cell": not already_obs,
                 "independent_confirmation_required": True,
             })
 
     r2_lift = round(fit_int["r2"] - fit_main["r2"], 4) if (fit_int and fit_main) else None
-    inter_detected = bool(reversals) or any(t["strong_interaction"] for t in interaction_terms) or (r2_lift is not None and r2_lift >= 0.10)
+    raw_inter_detected = bool(reversals) or any(t["strong_interaction"] for t in interaction_terms) or (r2_lift is not None and r2_lift >= 0.10)
+    int_overfit = bool(fit_int and fit_int.get("overfit_warning"))
+    if not raw_inter_detected:
+        inter_status = "not_detected"
+    elif int_overfit:
+        inter_status = "provisional_small_sample_or_overfit_risk"
+    else:
+        inter_status = "confirmed_cross_validated"
+
+    # Lack-of-fit check when replicate cells exist
+    cell_groups: dict[tuple[float, ...], list[float]] = defaultdict(list)
+    for fv, y in valid_pts:
+        cell_groups[tuple(fv[f] for f in factors)].append(y)
+    pure_err_ss = sum(sum((y - statistics.mean(ys)) ** 2 for y in ys) for ys in cell_groups.values() if len(ys) >= 2)
+    pure_err_dof = sum(len(ys) - 1 for ys in cell_groups.values() if len(ys) >= 2)
+    lack_of_fit = {"evaluated": False, "reason": "no_replicate_cells_in_pilot_data"}
+    if pure_err_dof > 0 and use_model is not None and use_model["dof"] > pure_err_dof:
+        tot_sse = (use_model["rmse"] ** 2) * use_model["dof"] if use_model.get("rmse") is not None else 0.0
+        lof_ss = max(0.0, tot_sse - pure_err_ss)
+        lof_dof = use_model["dof"] - pure_err_dof
+        ms_pe = pure_err_ss / pure_err_dof
+        ms_lof = lof_ss / lof_dof if lof_dof > 0 else 0.0
+        lack_of_fit = {
+            "evaluated": True, "pure_error_dof": pure_err_dof, "lof_dof": lof_dof,
+            "lof_f_stat": round(ms_lof / ms_pe, 4) if ms_pe > 1e-12 else None,
+        }
+
+    def _fit_summary(fit: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not fit:
+            return None
+        return {
+            "r2": fit["r2"], "adj_r2": fit["adj_r2"], "loocv_r2": fit["loocv_r2"],
+            "press": fit["press"], "loocv_rmse": fit["loocv_rmse"], "r2_minus_loocv_r2": fit["r2_minus_loocv_r2"],
+            "rmse": fit["rmse"], "n": fit["n"], "p": fit["p"], "dof": fit["dof"],
+            "underdetermined_model": fit["underdetermined_model"],
+            "small_sample_warning": fit["small_sample_warning"],
+            "overfit_warning": fit["overfit_warning"],
+            "max_leverage": fit["max_leverage"], "max_cooks_d": fit["max_cooks_d"],
+        }
 
     return {
-        "$schema": "interaction-surrogate-report/v1",
+        "$schema": "interaction-surrogate-report/v2",
         "ok": True,
         "response_metric": response_col,
         "objective_direction": direction,
         "factors": factors,
         "valid_run_count": len(valid_pts),
         "skipped_rows": skipped_rows,
-        "main_effects_model": {"r2": fit_main["r2"], "rmse": fit_main["rmse"]} if fit_main else None,
-        "interaction_model": {"r2": fit_int["r2"], "rmse": fit_int["rmse"]} if fit_int else None,
+        "main_effects_model": _fit_summary(fit_main),
+        "interaction_model": _fit_summary(fit_int),
+        "lack_of_fit_test": lack_of_fit,
         "r2_lift_from_interactions": r2_lift,
-        "interaction_reversal_detected": inter_detected,
+        "interaction_reversal_detected": raw_inter_detected,
+        "interaction_reversal_status": inter_status,
         "empirical_sign_reversals": reversals,
         "interaction_terms": interaction_terms,
         "ofat_marginal_optimum": marginal_best,

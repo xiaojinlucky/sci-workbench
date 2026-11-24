@@ -81,6 +81,16 @@
     "saturated_count": 0,
     "data_gap_count": 2
   },
+  "independent_experiment_plan": {
+    "hypothesis_and_variables": "Testing whether Batch_3 systematic recovery drop (-14.3 pp) is caused by Day-3 mobile-phase/calibration drift vs formulation lot change (IV: mobile_phase_lot x sample_batch; DV: assay recovery %).",
+    "controls": ["Certified reference standard (100% nominal)", "Solvent blank (explicit zero)", "Archived Batch_1 retention QC vials"],
+    "steps": ["1. Inspect Cal_Curves slope & internal-standard area for Batch_3", "2. Re-prepare fresh mobile phase and re-inject 3 Batch_1 + 3 Batch_3 retained vials in interleaved randomized order", "3. Audit autosampler pressure trace for S_014"],
+    "readout_criteria": "Batch_3 recovery returning to 95-105% on fresh mobile phase falsifies formulation lot defect; persistent <90% confirms batch formulation issue.",
+    "equipment_and_materials": "HPLC-UV C18 system, fresh mobile-phase batch, archived Batch_1 and Batch_3 retention vials",
+    "time_and_cost": "6 QC/re-injection runs (~90 min instrument time; ~150 USD prospective consumable estimate)",
+    "parameter_ranges": "Nominal acceptance window 95-105% recovery, RSD <= 2.0% (or <= 5.0% per manuscript stability clause)",
+    "risks": "Archived vials may have degraded if stored >48h at room temp; mitigate by comparing against freshly prepared certified standard"
+  },
   "six_element_traceability": {
     "hypothesis_variables": "Assay recovery (%) across 3 production batches",
     "controls": "Certified reference standard + solvent blank (explicit zero)",

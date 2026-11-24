@@ -28,7 +28,7 @@ Every candidate version MUST be audited item by item with explicit `source_ref` 
 1. **Hypotheses, Operationalized Variables & Inference Unit (`1_hypothesis_variables`)**:
    - Verify testable hypothesis, explicit `iv`/`dv`, readout method/unit, and separation of independent experimental/biological units from technical replicates. Unwritten IV/DV or unit -> `MISSING_INFO`.
 2. **Control Arms & Design Estimability (`2_controls`)**:
-   - Require >= 2 complementary control arms (e.g., `blank/vehicle` + `positive/standard`) covering declared confounders. Single control -> `CONDITIONAL`; zero controls -> `FAIL`. If controls are absent from one or more blocks/timepoints, flag augmented-design estimability limits.
+   - Evaluate control adequacy by study design: comparative/causal designs require >= 2 complementary control arms (e.g., `blank/vehicle` + `positive/standard`) covering declared confounders (single control -> `CONDITIONAL`, zero controls -> `FAIL`), whereas single-arm descriptive or baseline-calibration studies explicitly record study-design control justification rather than mechanical failure. If controls are absent from one or more blocks/timepoints, flag augmented-design estimability limits.
 3. **Equipment, Materials, Capability & Maintenance (`3_equipment_materials`)**:
    - Classify EVERY required item strictly into one of four states:
      - `available` (`已具备`): verified in-house, calibrated, and capable.
@@ -37,7 +37,7 @@ Every candidate version MUST be audited item by item with explicit `source_ref` 
      - `unavailable` (`不具备`): hard `FAIL` unless a verified substitute with matching precision/range is bound.
    - Any missing resource record, unspecified status, expired quote, overdue calibration/maintenance, or unverified precision match -> `MISSING_INFO` or `FAIL` (never `PASS`).
 4. **Schedule, Budget, Sample Pool & Stability Arithmetic (`4_time_budget_samples`)**:
-   - Compute exact `total_samples = arms * biological_replicates * technical_replicates + qc_extra_samples` and verify against `sample_pool_available`.
+   - Separate independent biological sample pool demand (`biological_units_total = arms * biological_replicates`, verified against `sample_pool_available`) from total assay measurements (`total_assay_measurements = biological_units_total * technical_replicates + qc_extra_samples`, used for reagent/consumable and instrument throughput sizing) — never conflate technical replicate injections with independent biological donors/subjects.
    - Compute **DAG critical path** over `steps[].depends_on` incorporating `duration_days`, `booking_lead_days`, and procurement `lead_days` via `plan_arithmetic_verifier.py`.
    - **Strict Null-vs-Zero Firewall**: Explicit `0` (`unit_cost: 0`, `lead_days: 0`) is preserved as `verified_zero`. Missing or `null` cost rates, setup fees, or lead times stay `null` and trigger `MISSING_INFO` — NEVER coerced to `0.0`.
    - **Sample Preservation vs Lead-Time Cross-Check**: If `sample_stability_days` is shorter than `approval_lead_days + procurement_lead_days + wait_days`, flag `FAIL` (specimen degrades before execution can start).
@@ -106,3 +106,8 @@ python3 "$SCRIPTS/final_audit.py" --dir /app/output --result-file result.json --
 - **Unwritten != Satisfied**: Never infer missing approvals, missing unit prices, or unlisted equipment as available or zero-cost.
 - **Prospective != Live Execution**: Preserve the explicit prospective boundary notice — scenarios under organizer contracts are NOT confirmed lab bookings, vendor quotes, or granted ethics/safety approvals.
 - **Traceable Locators**: Cite exact file, section, table row, or contract key in `source_ref` for every `PASS`, `CONDITIONAL`, `MISSING_INFO`, and `FAIL` judgment.
+## Multi-Format Intake & Schema-Variant Fallback Contract
+
+1. **Multi-Format Offline Indexing (`scripts/block_indexer.py`)**: Indexes `.md`, `.txt`, `.yaml/.yml`, `.m`, `.csv`/`.tsv`, `.xlsx` (stdlib `zipfile+XML` per-sheet), `.docx` (stdlib `zipfile+XML`), `.xml`/`.html`, `.json`, and `.pdf` via a 3-tier offline pipeline (`pypdf`/`PyPDF2` -> `pdftotext` -> pure-stdlib zlib PDF stream scan) with exact `file#L<line>`, `file#page=<p>`, or `file#<sheet>!R<row>` anchors. Scanned/image-only PDFs without an extractable text layer emit explicit `status: "UNPARSED_SOURCE"` (`manual_transcription_needed: true`) instead of silent `null`.
+2. **Table + Free-Form Prose Extraction (`scripts/source_to_plan_extractor.py`)**: Automatically extracts resource/pricing/booking tables, parameter domain tables, historical pilot runs, and natural-language prose constraints from raw `/input` documents with exact `source_ref` anchors, keeping unquoted costs and unverified approvals explicitly `null` under `NOT_FOUND_IN_SOURCE`.
+3. **LLM Direct-Fill Bridge**: When `/input` uses highly heterogeneous prose or scanned forms (`extraction_coverage.fallback_to_llm_matrix_recommended=true`), populate the structured draft / `aligned_matrix` directly from the indexed blocks in context while ALWAYS passing it through the offline deterministic arithmetic, feasible-domain, null-vs-zero firewall, and `validate_and_sync_result.py` gates.

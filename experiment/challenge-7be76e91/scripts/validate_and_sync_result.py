@@ -105,6 +105,15 @@ def validate_input_payload(doc: dict[str, Any], mode: str) -> dict[str, Any]:
     else:
         issues.append(f"Unsupported validation mode: {mode!r}")
 
+    # Fail-loud extraction coverage gate when source_to_plan_extractor metadata is present
+    ep = doc.get("extraction_provenance") if isinstance(doc, dict) else None
+    if isinstance(ep, dict):
+        cov_blk = ep.get("extraction_coverage") or {}
+        if cov_blk.get("gate_status") == "BLOCKING_LOW_COVERAGE":
+            issues.append(f"extraction_coverage gate BLOCKING_LOW_COVERAGE: {cov_blk.get('blocking_reasons', [])}")
+        if ep.get("unparsed_sources"):
+            warnings.append(f"unparsed_sources detected ({len(ep['unparsed_sources'])}); manual transcription required")
+
     cov = round(100.0 * src_refs_present / src_refs_checked, 1) if src_refs_checked else 100.0
     return {
         "$schema": "input-schema-source-ref-audit/v1",

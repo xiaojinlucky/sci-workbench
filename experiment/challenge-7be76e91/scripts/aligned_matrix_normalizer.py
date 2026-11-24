@@ -124,14 +124,90 @@ def _compute_step_span(
             bl = _finite_nonneg(rm.get("booking_lead_days"))
             if status in {"needs_procurement", "outsourceable"} and pl is None:
                 missing.append(f"{rid}.lead_days")
-            max_span = max(max_span, dur_eff, pl or 0.0, bl or 0.0)
+            # Step executes only after procurement/booking lead completes (consistent with DAG branch)
+            step_finish = max(pl or 0.0, bl or 0.0) + dur_eff
+            max_span = max(max_span, step_finish)
         else:
             max_span = max(max_span, dur_eff)
     return (None if missing else round(max_span, 2)), missing, hard_viols, False
 
 
+def _audit_prepopulated_matrix(case: dict[str, Any]) -> dict[str, Any]:
+    """Audit LLM-populated aligned_matrix rows with strict null-vs-zero cost quarantine and comparability checks."""
+    raw_rows = case.get("aligned_matrix") or case.get("rows") or []
+    rows: list[dict[str, Any]] = []
+    readouts_seen: set[str] = set()
+    units_seen: set[str] = set()
+    for idx, r in enumerate(raw_rows, start=1):
+        ver = str(r.get("version") or r.get("plan_id") or f"v{idx}")
+        pr = str(r.get("primary_readout") or "").strip()
+        iu = str(r.get("inference_unit") or "").strip()
+        if pr and pr.upper() != "UNSPECIFIED":
+            readouts_seen.add(pr)
+        if iu and iu.upper() != "UNSPECIFIED":
+            units_seen.add(iu)
+        cb = r.get("cost_breakdown_usd") if isinstance(r.get("cost_breakdown_usd"), dict) else {}
+        sb = r.get("schedule_breakdown_days") if isinstance(r.get("schedule_breakdown_days"), dict) else {}
+        tot_cost = _finite_nonneg(cb.get("total_usd", r.get("total_cost_usd")))
+        tot_days = _finite_nonneg(sb.get("total_days", r.get("total_days")))
+        missing_cost = list(r.get("missing_cost_fields") or [])
+        missing_sched = list(r.get("missing_schedule_fields") or [])
+        if tot_cost is None and not missing_cost:
+            missing_cost.append("total_usd_unquoted_or_null")
+        if tot_days is None and not missing_sched:
+            missing_sched.append("total_days_unquoted_or_null")
+        cost_comp = (tot_cost is not None) and (len(missing_cost) == 0)
+        sched_comp = (tot_days is not None) and (len(missing_sched) == 0)
+        rows.append({
+            "version": ver,
+            "source_ref": str(r.get("source_ref") or ""),
+            "primary_readout": pr or "UNSPECIFIED",
+            "inference_unit": iu or "UNSPECIFIED",
+            "control_count": int(r.get("control_count") or 0),
+            "approval_status": str(r.get("approval_status") or "UNVERIFIED"),
+            "cost_comparable": cost_comp,
+            "cost_breakdown_usd": {"total_usd": round(tot_cost, 2) if cost_comp and tot_cost is not None else None, **{k: v for k, v in cb.items() if k != "total_usd"}},
+            "schedule_comparable": sched_comp,
+            "schedule_breakdown_days": {"total_days": round(tot_days, 2) if sched_comp and tot_days is not None else None, **{k: v for k, v in sb.items() if k != "total_days"}},
+            "risk_level": str(r.get("risk_level") or "UNSPECIFIED"),
+            "risk_trigger": str(r.get("risk_trigger") or ""),
+            "fallback_plan": str(r.get("fallback_plan") or ""),
+            "evidence_score": _finite_num(r.get("evidence_score")),
+            "scientific_fit_score": _finite_num(r.get("scientific_fit_score")),
+            "evidence_provenance_pct": _finite_num(r.get("evidence_provenance_pct")) or (100.0 if str(r.get("source_ref") or "").strip() else 50.0),
+            "missing_cost_fields": sorted(set(missing_cost)),
+            "missing_schedule_fields": sorted(set(missing_sched)),
+            "missing_fields": sorted(set(missing_cost + missing_sched + list(r.get("missing_fields") or []))),
+            "explicit_zero_fields": list(r.get("explicit_zero_fields") or []),
+            "hard_domain_or_resource_violations": list(r.get("hard_domain_or_resource_violations") or []),
+        })
+    incomparable_dims: list[str] = []
+    if len(readouts_seen) > 1:
+        incomparable_dims.append(f"heterogeneous primary_readout across plans: {sorted(readouts_seen)}")
+    if len(units_seen) > 1:
+        incomparable_dims.append(f"heterogeneous inference_unit across plans: {sorted(units_seen)}")
+    return {
+        "$schema": "aligned-plan-matrix/v2",
+        "case_id": case.get("case_id", "unknown"),
+        "intake_mode": "llm_prepopulated_matrix_audited",
+        "aligned_columns": [
+            "primary_readout", "inference_unit", "control_count", "approval_status",
+            "cost_breakdown_usd.total_usd", "schedule_breakdown_days.total_days",
+            "risk_level", "evidence_score", "scientific_fit_score",
+        ],
+        "comparability_audit": {
+            "readouts_aligned": len(readouts_seen) <= 1,
+            "inference_units_aligned": len(units_seen) <= 1,
+            "incomparable_dimensions": incomparable_dims,
+        },
+        "rows": rows,
+    }
+
+
 def normalize_plans_matrix(case: dict[str, Any]) -> dict[str, Any]:
     """Normalize heterogeneous candidate plans onto aligned schema with strict null-vs-zero firewall."""
+    if not case.get("candidate_plans") and (case.get("aligned_matrix") or case.get("rows")):
+        return _audit_prepopulated_matrix(case)
     contract = case.get("prospective_contract") or {}
     resources = contract.get("resources") or {}
     domains = contract.get("parameter_domains") or {}
@@ -198,28 +274,33 @@ def normalize_plans_matrix(case: dict[str, Any]) -> dict[str, Any]:
                 missing_cost.append(f"resource:{rid}")
                 continue
             if rm is not None:
-                units = _finite_nonneg(step.get("units", 0.0))
-                hours = _finite_nonneg(step.get("hours", 0.0))
-                if units is None:
-                    missing_cost.append(f"{sname}.units")
-                elif units > 0:
-                    uc = _finite_nonneg(rm.get("unit_cost"))
-                    if uc is None:
-                        missing_cost.append(f"{rid}.unit_cost")
-                    else:
-                        if uc == 0.0:
-                            explicit_zeros.append(f"{rid}.unit_cost")
-                        consumables_cost += units * uc
-                if hours is None:
-                    missing_cost.append(f"{sname}.hours")
-                elif hours > 0:
-                    hr = _finite_nonneg(rm.get("rate_per_hr"))
-                    if hr is None:
-                        missing_cost.append(f"{rid}.rate_per_hr")
-                    else:
-                        if hr == 0.0:
-                            explicit_zeros.append(f"{rid}.rate_per_hr")
-                        machine_cost += hours * hr
+                units = _finite_nonneg(step.get("units"))
+                hours = _finite_nonneg(step.get("hours"))
+                uc = _finite_nonneg(rm.get("unit_cost"))
+                hr = _finite_nonneg(rm.get("rate_per_hr"))
+                # Billing-mode aware strict null-vs-zero:
+                # - Hourly resource with hours given does NOT require units.
+                # - Per-unit resource with units given does NOT require hours.
+                # - Missing both quantities (or unquoted billable rate) triggers missing_cost!
+                if units is None and hours is None:
+                    missing_cost.append(f"{sname}.units_or_hours")
+                else:
+                    if units is not None and units > 0:
+                        if uc is None:
+                            missing_cost.append(f"{rid}.unit_cost")
+                        else:
+                            if uc == 0.0:
+                                explicit_zeros.append(f"{rid}.unit_cost")
+                            consumables_cost += units * uc
+                    if hours is not None and hours > 0:
+                        if hr is None:
+                            missing_cost.append(f"{rid}.rate_per_hr")
+                        else:
+                            if hr == 0.0:
+                                explicit_zeros.append(f"{rid}.rate_per_hr")
+                            machine_cost += hours * hr
+                    if (units == 0.0) and (hours is None or hours == 0.0):
+                        explicit_zeros.append(f"{sname}.units")
 
         step_span, span_missing, span_viols, _ = _compute_step_span(steps, resources)
         missing_sched.extend(span_missing)
@@ -302,15 +383,25 @@ def normalize_plans_matrix(case: dict[str, Any]) -> dict[str, Any]:
         if ev_score == 0.0:
             explicit_zeros.append("evidence_score")
 
-        # Source provenance completeness
-        src_checks = [
-            bool(str(plan.get("source_ref", "")).strip()),
-            bool(ctrls),
-            bool(str(plan.get("risk_trigger", "") or (plan.get("risks") or "")).strip()),
-            cost_comparable,
-            sched_comparable,
-        ]
-        prov_pct = round(100.0 * sum(src_checks) / len(src_checks), 1)
+        # Source provenance completeness with explicit numerator / denominator breakdown
+        slot_status = {
+            "source_ref": bool(str(plan.get("source_ref", "")).strip()),
+            "controls": bool(ctrls),
+            "risk_or_fallback": bool(str(plan.get("risk_trigger", "") or plan.get("stop_loss", "") or (plan.get("risks") or "")).strip()),
+            "cost_comparable": cost_comparable,
+            "schedule_comparable": sched_comparable,
+        }
+        anchored_n = sum(1 for v in slot_status.values() if v)
+        total_slots = len(slot_status)
+        prov_pct = round(100.0 * anchored_n / total_slots, 1)
+        uses_dag = any(isinstance(s.get("depends_on"), list) and len(s.get("depends_on") or []) > 0 for s in steps)
+        sched_mode = "dag" if uses_dag else "parallel_with_lead"
+        arms_n = _finite_nonneg(plan.get("treatment_arms", plan.get("arms")))
+        reps_n = _finite_nonneg(plan.get("biological_replicates", plan.get("replicates_per_arm")))
+        tech_n = _finite_nonneg(plan.get("technical_replicates")) or 1.0
+        planned_samples = int(round(arms_n * reps_n * tech_n)) if (arms_n is not None and reps_n is not None) else None
+        step_units_tot = sum((_finite_nonneg(s.get("units")) or 0.0) for s in steps)
+        step_hours_tot = sum((_finite_nonneg(s.get("hours")) or 0.0) for s in steps) or (_finite_nonneg(plan.get("machine_hours")) or 0.0)
 
         all_missing = sorted(set(missing_cost + missing_sched + missing_other))
         rows.append({
@@ -318,7 +409,11 @@ def normalize_plans_matrix(case: dict[str, Any]) -> dict[str, Any]:
             "source_ref": plan.get("source_ref", ""),
             "primary_readout": pr or "UNSPECIFIED",
             "inference_unit": iu or "UNSPECIFIED",
-            "control_count": len(ctrls),
+            "control_count": len(ctrls) if ctrls else None,
+            "controls_list": list(ctrls),
+            "planned_samples": planned_samples,
+            "allocated_consumable_units": round(step_units_tot, 2),
+            "allocated_machine_hours": round(step_hours_tot, 2),
             "approval_status": approval_status,
             "cost_comparable": cost_comparable,
             "cost_breakdown_usd": {
@@ -331,17 +426,26 @@ def normalize_plans_matrix(case: dict[str, Any]) -> dict[str, Any]:
             },
             "schedule_comparable": sched_comparable,
             "schedule_breakdown_days": {
+                "schedule_mode": sched_mode,
                 "prep": prep_days,
                 "critical_step_or_lead": step_span,
                 "qc_turnaround": qc_days,
                 "total_days": total_days,
+                "schedule_formula": f"prep({prep_days}) + critical_path[{sched_mode}]({step_span}) + qc({qc_days}) = {total_days}" if sched_comparable else "UNVERIFIABLE_MISSING_SCHEDULE_FIELD",
             },
             "risk_level": str(plan.get("risk_level", "UNSPECIFIED")),
-            "risk_trigger": plan.get("risk_trigger", ""),
-            "fallback_plan": plan.get("fallback_plan", ""),
+            "risk_trigger": str(plan.get("risk_trigger") or plan.get("stop_loss") or ""),
+            "fallback_plan": str(plan.get("fallback_plan") or plan.get("fallback_path") or ""),
+            "stopping_criterion": str(plan.get("stopping_criterion") or ""),
             "evidence_score": ev_score,
             "scientific_fit_score": fit_score,
             "evidence_provenance_pct": prov_pct,
+            "evidence_provenance_breakdown": {
+                "anchored_slots": anchored_n,
+                "total_required_slots": total_slots,
+                "pct": prov_pct,
+                "slot_status": slot_status,
+            },
             "missing_cost_fields": sorted(set(missing_cost)),
             "missing_schedule_fields": sorted(set(missing_sched)),
             "missing_fields": all_missing,

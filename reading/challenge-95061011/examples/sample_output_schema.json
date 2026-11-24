@@ -1,0 +1,47 @@
+{
+  "_synthetic_notice": "SYNTHETIC ILLUSTRATIVE OUTPUT SCHEMA ONLY — NOT A REAL EXECUTION OUTPUT",
+  "case_id": "synthetic-compare-example-01",
+  "status": "partial_with_gaps",
+  "citation_legend": [
+    {
+      "citation_number": 1,
+      "citation_tag": "[1]",
+      "source_document_id": "SYN-DOC-A",
+      "title": "Visible-light degradation of methylene blue over TiO2-N (Synthetic Example)",
+      "doi": "10.5555/syn.compare.001",
+      "version_status": "version_of_record"
+    },
+    {
+      "citation_number": 2,
+      "citation_tag": "[2]",
+      "source_document_id": "SYN-DOC-B",
+      "title": "Photocatalytic removal of rhodamine B over N-doped TiO2 (Synthetic Example)",
+      "doi": "10.5555/syn.compare.002",
+      "version_status": "version_of_record"
+    }
+  ],
+  "comparability_assessment": {
+    "multi_document_satisfied": true,
+    "pooling_allowed": false,
+    "comparable_subgroups": [],
+    "noncomparable_pairs": [
+      {
+        "pair": ["SYN-DOC-A", "SYN-DOC-B"],
+        "mismatched_axes": [{"axis": "pollutant", "SYN-DOC-A": "methylene blue", "SYN-DOC-B": "rhodamine B"}],
+        "pooling_blocked": true
+      }
+    ],
+    "indeterminate_pairs": []
+  },
+  "consensus_conflict_matrix": {
+    "consensus": [],
+    "partial_agreement": [],
+    "conflicts": [
+      {
+        "topic": "main_conclusion",
+        "attribution_dimensions": ["condition"],
+        "attribution_rationale": "SYN-DOC-A tested methylene blue while SYN-DOC-B tested rhodamine B; unlike dyes must not be pooled."
+      }
+    ]
+  }
+}

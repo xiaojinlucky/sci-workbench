@@ -1,0 +1,82 @@
+{
+  "_example_notice": "Illustrative synthetic output schema example only; not an official evaluation result.",
+  "case_id": "example-qa-01",
+  "paper_id": "PAPER-SYNTH-2025-CAT",
+  "material_version": "v3-example",
+  "answers": [
+    {
+      "question_id": "Q1",
+      "answer": "Cat-X 的法拉第效率为 88.5%，在 25 °C、pH 7.4、0.1 M KHCO3 电解液及 5 mg 催化剂载量（n = 3）条件下测得；与基线 Cu 电极（62.0%）相比绝对提升 26.5 个百分点。",
+      "conditions": ["25 °C", "pH 7.4", "5 mg catalyst loading", "n = 3 independent electrodes"],
+      "status": "answered",
+      "claims": [
+        {
+          "claim_id": "Q1-C1",
+          "text": "Cat-X achieved 88.5% Faradaic efficiency vs 62.0% for baseline Cu at 25 °C and pH 7.4.",
+          "kind": "reported",
+          "evidence": [
+            {
+              "paragraph_id": "P001",
+              "quote": "Catalyst Cat-X achieved 88.5% Faradaic efficiency for CO2 reduction at 25 °C and pH 7.4 compared with 62.0% for the baseline Cu electrode."
+            }
+          ]
+        },
+        {
+          "claim_id": "Q1-C2",
+          "text": "Tests used 5 mg catalyst loading over 24 h with n = 3 independent electrodes.",
+          "kind": "reported",
+          "evidence": [
+            {
+              "paragraph_id": "P002",
+              "quote": "using a 5 mg catalyst loading over 24 h (n = 3 independent electrodes)."
+            }
+          ]
+        },
+        {
+          "claim_id": "Q1-C3",
+          "text": "Absolute improvement over baseline Cu is 26.5 percentage points (88.5% - 62.0%).",
+          "kind": "inferred",
+          "evidence": [
+            {
+              "paragraph_id": "P001",
+              "quote": "88.5% Faradaic efficiency for CO2 reduction at 25 °C and pH 7.4 compared with 62.0% for the baseline Cu electrode."
+            }
+          ]
+        }
+      ],
+      "unanswered_parts": []
+    },
+    {
+      "question_id": "Q2",
+      "answer": "未报告。论文仅评估了 24 h 耐久性，并明确指出未测试工业级流动池中超过 100 h 的稳定性。",
+      "conditions": ["24 h durability tested"],
+      "status": "insufficient_evidence",
+      "claims": [
+        {
+          "claim_id": "Q2-C1",
+          "text": "Paper explicitly states stability beyond 100 h in an industrial flow cell was not tested.",
+          "kind": "reported",
+          "evidence": [
+            {
+              "paragraph_id": "P003",
+              "quote": "industrial-scale flow-cell stability beyond 100 h was not tested in this study."
+            }
+          ]
+        }
+      ],
+      "unanswered_parts": [
+        {
+          "part": "超过 100 小时的工业流动池稳定性数据",
+          "reason": "原文 P003 明确说明本研究未测试超过 100 h 的流动池稳定性。"
+        }
+      ]
+    }
+  ],
+  "coverage": {
+    "read_sections": ["Abstract", "Methods", "Results", "Tables", "Footnotes"],
+    "unread_sections": ["Discussion"],
+    "unread_pages": [],
+    "unread_reason": "not_provided_in_case_paragraphs",
+    "total_paragraphs_read": 5
+  }
+}

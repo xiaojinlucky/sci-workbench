@@ -1,0 +1,35 @@
+{
+  "_example_notice": "Synthetic minimal example for interface illustration only; not a formal evaluation case.",
+  "case_id": "example-translation-01",
+  "item_id": "ITEM-SYNTH-2025-A",
+  "source_title": "Postmarketing Safety Surveillance of Beta-2 Adrenergic Receptor Agonists",
+  "authors": ["A. Lin", "B. Chen"],
+  "doi": "10.0000/example.synth.2025.001",
+  "year": 2025,
+  "glossary": [
+    {
+      "source": "adverse drug reaction",
+      "target": "药物不良反应",
+      "forbidden_variants": ["药品副作用"]
+    },
+    {
+      "source": "β2-adrenergic receptor",
+      "target": "β2-肾上腺素能受体",
+      "forbidden_variants": ["β2肾上腺受体"]
+    }
+  ],
+  "paragraphs": [
+    {
+      "paragraph_id": "P001",
+      "section": "Abstract",
+      "page": 1,
+      "text": "In a cohort of 15,000 patients exposed to a 5 mg daily dose, adverse drug reaction (ADR) events involving the β2-adrenergic receptor (β2-AR) did not increase significantly (p = 0.24; Fig. 1A) [1]."
+    },
+    {
+      "paragraph_id": "P002",
+      "section": "Discussion",
+      "page": 2,
+      "text": "While these preliminary findings may suggest acceptable tolerability at 25 °C storage, results are limited to short-term follow-up and require further validation."
+    }
+  ]
+}

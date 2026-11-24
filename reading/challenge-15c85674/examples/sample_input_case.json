@@ -1,0 +1,47 @@
+{
+  "_example_notice": "Synthetic minimal input example for interface demonstration only; not a formal test case.",
+  "case_id": "example-qa-01",
+  "paper_id": "PAPER-SYNTH-2025-CAT",
+  "material_version": "v3-example",
+  "all_sections": ["Abstract", "Methods", "Results", "Tables", "Footnotes", "Discussion"],
+  "paragraphs": [
+    {
+      "paragraph_id": "P001",
+      "section": "Abstract",
+      "page": 1,
+      "text": "Catalyst Cat-X achieved 88.5% Faradaic efficiency for CO2 reduction at 25 °C and pH 7.4 compared with 62.0% for the baseline Cu electrode."
+    },
+    {
+      "paragraph_id": "P002",
+      "section": "Methods",
+      "page": 2,
+      "text": "Electrochemical tests were performed in 0.1 M KHCO3 electrolyte using a 5 mg catalyst loading over 24 h (n = 3 independent electrodes)."
+    },
+    {
+      "paragraph_id": "P003",
+      "section": "Results",
+      "page": 3,
+      "text": "Long-term durability was evaluated for 24 h; industrial-scale flow-cell stability beyond 100 h was not tested in this study."
+    }
+  ],
+  "tables": [
+    {
+      "table_id": "T01",
+      "page": 3,
+      "text": "Table 1: Cat-X Faradaic efficiency 88.5% vs baseline Cu 62.0% at 25 °C, 5 mg loading.",
+      "footnotes": [
+        "*All measurements recorded at pH 7.4 in 0.1 M KHCO3; electrodes with leakage > 5% were excluded."
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "question_id": "Q1",
+      "question": "Cat-X 的法拉第效率是多少？在什么温度和载量条件下测得？与基线相比提升了多少？"
+    },
+    {
+      "question_id": "Q2",
+      "question": "论文是否报告了 Cat-X 在工业流动池中超过 100 小时的稳定性？"
+    }
+  ]
+}

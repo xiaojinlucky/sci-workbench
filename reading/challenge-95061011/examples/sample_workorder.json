@@ -1,0 +1,50 @@
+{
+  "_synthetic_notice": "SYNTHETIC MINIMAL EXAMPLE ONLY — NOT A FORMAL BENCHMARK CASE OR PREPARED ANSWER",
+  "workorder_id": "synthetic-compare-example-01",
+  "research_question": "Compare photocatalytic dye degradation performance under matched task, metric, units, material, pollutant, and budget.",
+  "scope_keywords": ["photocatalytic", "degradation", "catalyst", "dye", "methylene blue", "rhodamine"],
+  "fields": [
+    "task",
+    "material",
+    "pollutant",
+    "metric",
+    "units",
+    "budget",
+    "sample_size",
+    "baseline",
+    "main_conclusion",
+    "limitations"
+  ],
+  "documents": [
+    {
+      "source_document_id": "SYN-DOC-A",
+      "title": "Visible-light degradation of methylene blue over TiO2-N (Synthetic Example)",
+      "doi": "10.5555/syn.compare.001",
+      "paragraphs": [
+        {
+          "paragraph_id": "SYN-DOC-A:P01",
+          "text": "Task: photocatalytic degradation. Material: N-doped TiO2. Pollutant: methylene blue. Metric: removal efficiency. Units: %. Budget: 0.5 g/L catalyst for 60 min under 300 W Xe lamp."
+        },
+        {
+          "paragraph_id": "SYN-DOC-A:P02",
+          "text": "Methods: Absorbance at 664 nm was grouped by triplicate reaction batches (n=3), normalized to dark-equilibrated baseline C0, filtered for steady-state drift < 5%, yielding percentage removal efficiency. Main conclusion: N-doped TiO2 achieved 91.2% removal, outperforming bare TiO2 baseline (54.0%). Limitation: long-term reuse beyond 3 cycles was not tested."
+        }
+      ]
+    },
+    {
+      "source_document_id": "SYN-DOC-B",
+      "title": "Photocatalytic removal of rhodamine B over N-doped TiO2 (Synthetic Example)",
+      "doi": "10.5555/syn.compare.002",
+      "paragraphs": [
+        {
+          "paragraph_id": "SYN-DOC-B:P01",
+          "text": "Task: photocatalytic degradation. Material: N-doped TiO2. Pollutant: rhodamine B. Metric: removal efficiency. Units: %. Budget: 0.5 g/L catalyst for 60 min under 300 W Xe lamp."
+        },
+        {
+          "paragraph_id": "SYN-DOC-B:P02",
+          "text": "Main conclusion: N-doped TiO2 achieved 62.5% removal of rhodamine B (n=3), lower than reported methylene blue benchmarks due to differing dye structure."
+        }
+      ]
+    }
+  ]
+}

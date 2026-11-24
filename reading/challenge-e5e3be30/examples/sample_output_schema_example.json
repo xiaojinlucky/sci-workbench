@@ -1,0 +1,62 @@
+{
+  "_synthetic_notice": "SYNTHETIC ILLUSTRATIVE OUTPUT SCHEMA ONLY — NOT A REAL EXECUTION OUTPUT",
+  "case_id": "synthetic-verify-example-01",
+  "status": "partial_with_gaps",
+  "verifications": [
+    {
+      "claim_id": "C01",
+      "verdict": "partially_supported",
+      "diagnostic_flags": {
+        "doi_exists_but_unsupported": false,
+        "wrong_page_or_anchor_mismatch": false,
+        "fulltext_unavailable_or_figure_caption_missing": false,
+        "inline_vs_structured_citation_drift": false
+      },
+      "subclaims": [
+        {
+          "subclaim_id": "C01.1",
+          "text": "Compound X reduced tumor volume by 65% in xenograft mice (p < 0.01)",
+          "claim_types": ["quantitative", "fact"],
+          "verdict": "supported",
+          "evidence": [{"citation_number": 1, "source_document_id": "syn_paper", "paragraph_id": "syn_paper:p2-b1", "page": 2, "quote": "Compound X reduced xenograft tumor volume by 65% (n=8, p=0.004)."}]
+        },
+        {
+          "subclaim_id": "C01.2",
+          "text": "extending median survival to 120 days",
+          "claim_types": ["quantitative"],
+          "verdict": "insufficient_evidence",
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "claim_id": "C02",
+      "verdict": "insufficient_evidence",
+      "diagnostic_flags": {
+        "doi_exists_but_unsupported": true,
+        "wrong_page_or_anchor_mismatch": false,
+        "fulltext_unavailable_or_figure_caption_missing": false,
+        "inline_vs_structured_citation_drift": false,
+        "untested_extrapolation_detected": true
+      },
+      "note": "Extrapolation to human clinical cure is untested in mouse study; marked insufficient_evidence, NOT contradicted."
+    },
+    {
+      "claim_id": "C03",
+      "verdict": "insufficient_evidence",
+      "diagnostic_flags": {
+        "doi_exists_but_unsupported": false,
+        "wrong_page_or_anchor_mismatch": false,
+        "fulltext_unavailable_or_figure_caption_missing": false,
+        "inline_vs_structured_citation_drift": true
+      },
+      "citation_integrity_audit": {
+        "inline_marker_count": 2,
+        "inline_unique_ids": [1, 2],
+        "structured_citation_count": 1,
+        "missing_in_structured": [2],
+        "drift_detected": true
+      }
+    }
+  ]
+}

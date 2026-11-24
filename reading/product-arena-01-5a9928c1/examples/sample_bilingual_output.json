@@ -1,0 +1,38 @@
+{
+  "_example_notice": "Illustrative synthetic output only; not a formal test result.",
+  "case_id": "example-translation-01",
+  "source_metadata": {
+    "item_id": "ITEM-SYNTH-2025-A",
+    "source_title": "Postmarketing Safety Surveillance of Beta-2 Adrenergic Receptor Agonists",
+    "translated_title": "β2-肾上腺素能受体激动剂上市后安全性监测",
+    "authors": ["A. Lin", "B. Chen"],
+    "doi": "10.0000/example.synth.2025.001",
+    "year": 2025
+  },
+  "bilingual_segments": [
+    {
+      "paragraph_id": "P001",
+      "section": "Abstract",
+      "page": 1,
+      "item_id": "ITEM-SYNTH-2025-A",
+      "source_en": "In a cohort of 15,000 patients exposed to a 5 mg daily dose, adverse drug reaction (ADR) events involving the β2-adrenergic receptor (β2-AR) did not increase significantly (p = 0.24; Fig. 1A) [1].",
+      "target_zh": "在每日接受 5 mg 剂量的 1.5万 名患者队列中，涉及 β2-肾上腺素能受体 (β2-adrenergic receptor, β2-AR) 的药物不良反应 (adverse drug reaction, ADR) 事件未显著增加（p = 0.24；图1A）[1]。",
+      "terms_used": ["药物不良反应", "β2-肾上腺素能受体"],
+      "translation_basis": "15,000 -> 1.5万 magnitude preserved; 5 mg unit, negation (未显著), Fig. 1A, and [1] intact; first-mention English anchors kept.",
+      "needs_human_review": false,
+      "review_reason": ""
+    },
+    {
+      "paragraph_id": "P002",
+      "section": "Discussion",
+      "page": 2,
+      "item_id": "ITEM-SYNTH-2025-A",
+      "source_en": "While these preliminary findings may suggest acceptable tolerability at 25 °C storage, results are limited to short-term follow-up and require further validation.",
+      "target_zh": "尽管上述初步发现可能提示该药在 25 °C 储存条件下耐受性可接受，但结果仅限于短期随访，仍需进一步验证。",
+      "terms_used": [],
+      "translation_basis": "Explicitly restored concession connector (尽管…但…); preserved modal hedge (may suggest -> 可能提示) and hard limiter (limited to -> 仅限于).",
+      "needs_human_review": false,
+      "review_reason": ""
+    }
+  ]
+}

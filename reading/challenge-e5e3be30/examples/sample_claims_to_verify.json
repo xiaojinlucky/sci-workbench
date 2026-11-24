@@ -1,0 +1,22 @@
+{
+  "_synthetic_notice": "SYNTHETIC MINIMAL EXAMPLE ONLY — NOT A FORMAL BENCHMARK CASE OR PREPARED ANSWER",
+  "claims": [
+    {
+      "claim_id": "C01",
+      "claim": "Compound X reduced tumor volume by 65% in xenograft mice (p < 0.01), while extending median survival to 120 days.",
+      "cited_ref": "10.5555/syn.verify.001, p. 2"
+    },
+    {
+      "claim_id": "C02",
+      "claim": "Compound X completely cures late-stage human patients with zero liver toxicity.",
+      "cited_ref": "10.5555/syn.verify.001"
+    },
+    {
+      "claim_id": "C03",
+      "claim": "Prior reports [1] and [2] confirmed zero adverse events in pediatric cohorts.",
+      "structured_citations": [
+        {"id": 1, "ref": "10.5555/syn.verify.001"}
+      ]
+    }
+  ]
+}

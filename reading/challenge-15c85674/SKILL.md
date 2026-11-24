@@ -18,8 +18,11 @@ four-stage coverage auditing, and honest abstention whenever evidence is missing
 
 Locate all scripts relative to this `SKILL.md` directory so execution works identically
 whether mounted under `/skills/literature-qa` or `/skills/weekly-skill`. Every bundled
-script uses Python 3.12 standard library only (with optional `pdftotext`/`pdfinfo` for PDF
-inputs) and requires zero network access.
+script uses Python 3.12 standard library only (with reading-order `pdftotext -enc UTF-8`
+without `-layout`, plus optional `pypdf` fallback for PDF inputs) and requires zero network
+access. Designed for the current runtime budget of **64 model requests / 16384 output tokens
+per response / 900 seconds** with dual-path atomic delivery to `/app/output/result.json`
+and `/app/answers.json`.
 
 ## Hard Invariants (Apply on Every Run)
 
@@ -155,7 +158,7 @@ python3 scripts/literature_qa_engine.py \
   --validate-answers /app/work/answers_draft.json
 ```
 
-The validator enforces 7 blocking gates (exit code `1` on any failure):
+The validator enforces **10 blocking gates** (7 structural/evidence + 3 semantic gates; exit code `1` on any failure):
 1. `case_id`, `paper_id`, and `material_version` match input exactly.
 2. 100% of input `question_id`s appear once with zero missing or duplicate questions.
 3. Every `paragraph_id` exists in the corpus and every `quote` is a verbatim substring of
@@ -166,6 +169,18 @@ The validator enforces 7 blocking gates (exit code `1` on any failure):
 6. Every numeric+SI unit pair in `conditions[]` is verified against the cited evidence
    paragraphs for that question (blocks unit drift such as `mg -> μg` or invented numbers).
 7. `coverage` faithfully records unread sections and empty/scanned PDF pages.
+8. **Semantic Reported Numeric-Core Fidelity**: Every quantitative value (including
+   thousands-separated sample sizes such as `n=1,010`/`n=5,539`, percentages, and rates)
+   stated in a `kind == "reported"` claim must actually appear in its verified `quote`(s),
+   blocking number tampering or off-topic quotes.
+9. **Inferred Reasoning Premise & Anti-Disguise Gate**: Every `kind == "inferred"` claim
+   must supply an explicit reasoning premise (`reasoning_premise` field or synthesis cues)
+   and grounded supporting evidence, and inferred calculations must never be disguised as
+   `kind == "reported"`.
+10. **Atomic Sub-Question Coverage Gate**: Every automatically decomposed atomic sub-question
+    must have an explicit landing in `answer`/`claims`/`conditions` (when `answered`) or in
+    `unanswered_parts[]` (when `partial`/`insufficient_evidence`), preventing silent omission
+    of sub-questions under `status: "answered"`.
 
 If exit code is `1`, inspect `schema_errors` printed by the CLI, repair `/app/work/answers_draft.json`,
 and re-run Step 4 until `ok: true` and exit code `0`.

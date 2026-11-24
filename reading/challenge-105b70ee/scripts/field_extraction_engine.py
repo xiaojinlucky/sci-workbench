@@ -66,8 +66,16 @@ UNIT_PATTERN = (
     r"mV\s*dec\s*(?:\^?-?1|⁻¹)|mV/dec|mg\s*L\s*(?:\^?-?1|⁻¹)|mg/L|µg/mL|ug/mL|mg/mL|mmol/L|mol/L|"
     r"mg/g|mg/kg|wt%|at%|vol%|%|µM|uM|mM|nM|pM|mV|V|kV|nm|µm|um|mm|cm|m|g|mg|µg|ug|kg|"
     r"h|hr|hrs|min|s|ms|µs|ns|K|°C|Pa|kPa|MPa|GPa|Hz|kHz|MHz|GHz|ppm|ppb|eV|keV|MeV|"
-    r"W/m2|mW/cm2|J/g|kJ/mol|kcal/mol|fold|x|days|weeks|months|years"
+    r"W/m2|mW/cm2|J/g|kJ/mol|kcal/mol|fold|x|days|weeks|months|years|"
+    r"cases|patients|subjects|participants|samples|events|records|notifications|individuals|children|"
+    r"USD|EUR|BRL|CNY|GBP|dollars"
     r")"
+)
+
+EXTERNAL_BENCHMARK_RE = re.compile(
+    r"\b(?:worldwide|globally|in\s+brazil,\s+in\s+\d{4}|in\s+the\s+united\s+states,\s+in\s+\d{4}|"
+    r"previous\s+stud(?:y|ies)|prior\s+work|literature\s+reports?|et\s+al\.)\b",
+    re.I,
 )
 
 MEASUREMENT_RE = re.compile(
@@ -188,7 +196,18 @@ def _table_rows_to_cell_blocks(
     })
 
     for ridx, row in enumerate(rows, 1):
-        row_label = str(row[0]).strip() if row else f"row_{ridx}"
+        # Skip single-cell caption/footnote rows appended below CSV tables
+        if len(row) >= 2 and len(str(row[0]).strip()) > 60 and all(not str(c).strip() for c in row[1:]):
+            continue
+        # Preserve multi-column row identifiers (e.g., locus_num + rsID + gene in genomics/clinical tables)
+        id_parts: list[str] = []
+        for idx_c in range(min(3, len(row))):
+            val = str(row[idx_c]).strip()
+            if val and idx_c == 0:
+                id_parts.append(val)
+            elif val and idx_c > 0 and not re.fullmatch(r"[-+]?\d+(?:\.\d+)?%?", val) and len(val) <= 32:
+                id_parts.append(val)
+        row_label = " / ".join(id_parts) if id_parts else f"row_{ridx}"
         for cidx, col_h in enumerate(headers):
             if cidx == 0 and len(headers) > 1:
                 continue
@@ -205,6 +224,7 @@ def _table_rows_to_cell_blocks(
                 "source_kind": "table_cell",
                 "table_id": table_id,
                 "row_index": ridx,
+                "col_index": cidx + 1,
                 "row_label": row_label,
                 "col_header": str(col_h),
                 "header_unit": h_unit,
@@ -312,16 +332,63 @@ def collect_source_blocks(input_dir: Path, case_data: dict[str, Any]) -> list[di
             except Exception:
                 pass
         elif ext == ".pdf":
-            for pno, ptxt in _pdf_pages_text(fp):
+            pdf_pages = _pdf_pages_text(fp)
+            if not pdf_pages:
+                blocks.append({
+                    "paragraph_id": f"{fp.stem}:UNREADABLE",
+                    "section": "ExtractionError",
+                    "source_file": rel,
+                    "source_kind": "extraction_error",
+                    "text": "",
+                    "error": f"PDF file {rel} yielded zero extractable text pages (encrypted, scanned without OCR, or unreadable).",
+                })
+                continue
+            # Also extract structured 2D PDF tables via pdfplumber (cell-level coordinates + continued-table linking)
+            try:
+                import pdfplumber  # type: ignore
+                prev_hdr: list[str] | None = None
+                prev_tid: str | None = None
+                t_seq = 0
+                with pdfplumber.open(str(fp)) as pdoc:
+                    for pno_t, pg in enumerate(pdoc.pages, 1):
+                        raw_tbls = pg.extract_tables() or []
+                        if not raw_tbls and re.search(r"\b(?:Table|表)\s*[S]?\d+\b", pg.extract_text() or "", re.I):
+                            raw_tbls = pg.extract_tables(
+                                table_settings={"vertical_strategy": "text", "horizontal_strategy": "lines"}
+                            ) or []
+                        for rt in raw_tbls:
+                            crows = [
+                                [re.sub(r"\s+", " ", str(c or "")).strip() for c in r]
+                                for r in (rt or [])
+                                if r and any(str(c or "").strip() for c in r)
+                            ]
+                            if len(crows) >= 2 and len(crows[0]) >= 2:
+                                t_seq += 1
+                                hdr = crows[0]
+                                data_rows = crows[1:]
+                                # Merge continued table if consecutive page shares column headers
+                                if prev_hdr and hdr == prev_hdr and prev_tid:
+                                    tid = f"{prev_tid}_cont_p{pno_t}"
+                                else:
+                                    tid = f"{fp.stem}:p{pno_t}:T{t_seq:02d}"
+                                    prev_hdr = hdr
+                                    prev_tid = tid
+                                blocks.extend(_table_rows_to_cell_blocks(tid, rel, hdr, data_rows, caption=f"{fp.stem} p.{pno_t} Table {t_seq}"))
+            except Exception:
+                pass
+            is_supp = bool(re.search(r"supp|appendix|si[_\-\s]|extended", rel, re.I))
+            for pno, ptxt in pdf_pages:
                 for bno, chunk in enumerate(re.split(r"\n\s*\n", ptxt), 1):
                     cleaned = " ".join(chunk.split())
                     if cleaned:
+                        is_cap = bool(re.match(r"^(?:Supplementary\s+|Extended\s+Data\s+)?(?:Figure|Fig\.?|Table|Scheme|图|表)\s*[S]?\d+[A-Za-z]?", cleaned, re.I))
+                        skind = "caption" if is_cap else ("supplementary" if is_supp else "pdf_prose")
                         blocks.append({
                             "paragraph_id": f"{fp.stem}:p{pno}:B{bno:03d}",
-                            "section": f"Page {pno}",
+                            "section": "Caption" if is_cap else (f"Supplementary Page {pno}" if is_supp else f"Page {pno}"),
                             "source_file": rel,
                             "page": pno,
-                            "source_kind": "pdf_prose",
+                            "source_kind": skind,
                             "text": cleaned,
                         })
         elif ext in {".md", ".txt", ".tex", ".xml", ".html"}:
@@ -394,9 +461,31 @@ def _is_non_measurement_number(sentence: str, start: int, end: int, raw_num: str
         return True
     if re.search(r"\bn\s*=\s*$", before, re.I):
         return True
+    after_wide = sentence[end : min(len(sentence), end + 24)]
+    if re.match(r"^\s*(?:%?\s*CI\b|confidence\s+interval)", after_wide, re.I):
+        return True
     if not unit and re.fullmatch(r"(?:19\d{2}|20[0-3]\d)", raw_num):
         if re.search(r"(?:in|\(|et\s+al\.?,|©)\s*$", before, re.I):
             return True
+    return False
+
+
+def _norm_unit(u: str | None) -> str:
+    return re.sub(r"\s+", "", (u or "").strip().lower())
+
+
+def _units_compatible(u1: str | None, u2: str | None) -> bool:
+    n1, n2 = _norm_unit(u1), _norm_unit(u2)
+    if not n1 or not n2:
+        return True
+    if n1 == n2:
+        return True
+    count_units = {"cases", "patients", "subjects", "participants", "samples", "events", "records", "notifications", "individuals", "children"}
+    if n1 in count_units and n2 in count_units:
+        return True
+    currency_units = {"usd", "eur", "brl", "cny", "gbp", "dollars", "$"}
+    if n1 in currency_units and n2 in currency_units:
+        return True
     return False
 
 
@@ -404,6 +493,7 @@ def _extract_best_sentence_measurement(
     block: dict[str, Any],
     q_toks: set[str],
     expected_unit: str,
+    cond_toks: set[str] | None = None,
 ) -> dict[str, Any]:
     """Bind scalar, unit, statistic, condition, comparator, and epistemic class within the best sentence."""
     # Direct table cell fast path (exact row/column coordinate binding)
@@ -417,7 +507,15 @@ def _extract_best_sentence_measurement(
                 "statistic": None,
                 "experimental_condition": block.get("row_label"),
                 "comparator": None,
-                "quote": block["text"][:220],
+                "quote": "",
+                "cell_anchor": {
+                    "table_id": block.get("table_id"),
+                    "row": block.get("row_index"),
+                    "col": block.get("col_index"),
+                    "row_label": block.get("row_label"),
+                    "col_header": block.get("col_header"),
+                    "raw_cell": "",
+                },
                 "epistemic_class": "not_reported",
                 "is_missing_cell": True,
                 "unit_status": "missing_value_cell",
@@ -458,7 +556,9 @@ def _extract_best_sentence_measurement(
         )
         sc = ov + (1.5 if has_meas else 0.0)
         if expected_unit and expected_unit.lower() in s.lower():
-            sc += 1.2
+            sc += 2.5
+        if EXTERNAL_BENCHMARK_RE.search(s):
+            sc -= 1.8
         if sc > best_score:
             best_score = sc
             best_sent = s
@@ -469,36 +569,128 @@ def _extract_best_sentence_measurement(
             continue
         u = (m.group("unit") or "").strip()
         score_m = 0.0
-        if expected_unit and u.lower() == expected_unit.lower():
-            score_m += 4.0
+        if expected_unit:
+            if u and _units_compatible(u, expected_unit):
+                score_m += 6.5
+            elif u and not _units_compatible(u, expected_unit):
+                score_m -= 5.0
+            else:
+                score_m -= 0.5
         elif u:
             score_m += 2.0
         if "±" in m.group("num") or "+/-" in m.group("num"):
             score_m += 1.0
-        # Proximity to query terms inside sentence
-        ctx_window = best_sent[max(0, m.start() - 60) : min(len(best_sent), m.end() + 40)]
-        score_m += 0.6 * len(set(_tokens(ctx_window)) & q_toks)
+        # Directional proximity: row labels & experimental conditions precede their value; avoid stealing the next row's label
+        pre_window = best_sent[max(0, m.start() - 50) : m.start()]
+        post_window = best_sent[m.end() : min(len(best_sent), m.end() + 26)]
+        score_m += 0.7 * len(set(_tokens(pre_window)) & q_toks)
+        score_m += 0.4 * len(set(_tokens(post_window)) & q_toks)
+        if cond_toks:
+            pre_cond = set(_tokens(pre_window)) & cond_toks
+            post_cond = set(_tokens(post_window)) & cond_toks
+            if pre_cond:
+                score_m += 4.0 * len(pre_cond)
+            elif post_cond:
+                # Condition appearing AFTER this value usually introduces the NEXT row/clause
+                score_m -= 1.5
         candidates_m.append((score_m, m))
 
     candidates_m.sort(key=lambda x: -x[0])
     scalar = None
     unit = None
+    unit_mismatch = False
+    picked_match: re.Match[str] | None = None
     if candidates_m:
-        picked = candidates_m[0][1]
-        pref = (picked.group("prefix") or "").strip()
-        scalar = f"{pref}{picked.group('num').strip()}" if pref else picked.group("num").strip()
-        unit = (picked.group("unit") or "").strip() or None
+        top_score_m, picked = candidates_m[0]
+        picked_u = (picked.group("unit") or "").strip() or None
+        if expected_unit and picked_u and not _units_compatible(picked_u, expected_unit):
+            unit_mismatch = True
+        else:
+            picked_match = picked
+            pref = (picked.group("prefix") or "").strip()
+            scalar = f"{pref}{picked.group('num').strip()}" if pref else picked.group("num").strip()
+            unit = picked_u
 
-    stats = STAT_RE.findall(best_sent)
-    conds = list(dict.fromkeys(m.group(0).strip() for m in CONDITION_CUES_RE.finditer(best_sent)))[:4]
-    comps = list(dict.fromkeys(m.group(0).strip() for m in COMPARATOR_RE.finditer(best_sent)))[:3]
+    # Center verbatim quote around the matched measurement so long paragraphs NEVER truncate away the scalar!
+    if picked_match is not None and len(best_sent) > 260:
+        w_start = max(0, picked_match.start() - 120)
+        w_end = min(len(best_sent), picked_match.end() + 130)
+        quote_span = best_sent[w_start:w_end].strip()
+    else:
+        quote_span = best_sent[:260]
+
+    # Guarantee numeric core appears verbatim inside quote_span
+    nc_check = _numeric_core(scalar)
+    if scalar is not None and nc_check and nc_check not in quote_span.replace(",", ""):
+        quote_span = best_sent[:320]
+
+    # Row-local statistical, condition, and comparator binding (NEVER leak footnote "*p<0.05" into non-significant rows!)
+    if picked_match is not None:
+        loc_start = max(0, picked_match.start() - 60)
+        loc_end = min(len(best_sent), picked_match.end() + 55)
+        local_slice = best_sent[loc_start:loc_end]
+    else:
+        local_slice = quote_span
+
+    stats_list: list[str] = []
+    row_cond: str | None = None
+    row_comp: str | None = None
+
+    # Parse tabular Joinpoint/regression row pattern: "<Group> <n> <r1> <r2> <Y1-Y2> <APC>%[*] <ci_low>-<ci_high> <p_val> <Trend>"
+    trow_re = re.compile(
+        r"\b(?P<grp>Both|Boys|Girls|Male|Female|Total|\d+\s+to\s+\d+)\s+"
+        r"(?P<n>\d{1,3}(?:,\d{3})+|\d+)\s+"
+        r"(?P<r1>\d+(?:\.\d+)?)\s+(?P<r2>\d+(?:\.\d+)?)\s+"
+        r"(?P<win>\d{4}\s*[–-]\s*\d{4})\s+"
+        r"(?P<apc>[-+]?\d+(?:\.\d+)?%\*?)\s+"
+        r"(?P<ci>[-+]?\d+(?:\.\d+)?\s*[–-]\s*[-+]?\d+(?:\.\d+)?)\s+"
+        r"(?P<pval>[<>≤≥]?\s*0?\.\d+)\s+"
+        r"(?P<trend>Increasing|Decreasing|Stationary)\b",
+        re.I,
+    )
+    trows = list(trow_re.finditer(best_sent))
+    matched_trow = None
+    if picked_match is not None and trows:
+        for tr in trows:
+            if tr.start() <= picked_match.start() <= tr.end():
+                matched_trow = tr
+                break
+    if matched_trow is not None:
+        g_name = matched_trow.group("grp")
+        n_val = matched_trow.group("n")
+        win_val = matched_trow.group("win")
+        ci_val = matched_trow.group("ci")
+        p_raw = matched_trow.group("pval").strip()
+        p_fmt = f"p{p_raw}" if p_raw.startswith(("<", ">", "≤", "≥")) else f"p={p_raw}"
+        trend_val = matched_trow.group("trend")
+        stats_list = [f"n={n_val}", f"95% CI {ci_val}", p_fmt, trend_val]
+        row_cond = f"{g_name} ({win_val})"
+        # Bind sibling comparator row (e.g., Girls vs Boys) from the same table
+        sibling_parts = []
+        for tr in trows:
+            if tr.group("grp").lower() != g_name.lower() and tr.group("grp").lower() in {"boys", "girls", "male", "female", "both", "total"}:
+                sp = tr.group("pval").strip()
+                sp_fmt = f"p{sp}" if sp.startswith(("<", ">", "≤", "≥")) else f"p={sp}"
+                sibling_parts.append(f"{tr.group('grp')} ({tr.group('apc').rstrip('*')}, {sp_fmt}, {tr.group('trend')})")
+        if sibling_parts:
+            row_comp = "; ".join(sibling_parts[:2])
+        # Narrow quote_span tightly to the matched row itself
+        quote_span = matched_trow.group(0)
+    else:
+        stats_list = list(dict.fromkeys(STAT_RE.findall(local_slice)))
+        # Exclude footnote "*Statistical significance (p<0.05)" unless p<0.05 appears immediately inside local_slice without "Statistical significance"
+        if re.search(r"Statistical\s+significance\s*\(p<0\.05\)", local_slice, re.I):
+            stats_list = [s for s in stats_list if s.lower().replace(" ", "") != "p<0.05"]
+
+    conds = [row_cond] if row_cond else list(dict.fromkeys(m.group(0).strip() for m in CONDITION_CUES_RE.finditer(local_slice)))[:4]
+    comps = [row_comp] if row_comp else list(dict.fromkeys(m.group(0).strip() for m in COMPARATOR_RE.finditer(local_slice)))[:3]
     if not conds:
-        fp = extract_emlsi_fingerprint(best_sent)
+        fp = extract_emlsi_fingerprint(local_slice)
         conds = fp.get("S_scope_conditions") or []
 
-    if SPECULATIVE_RE.search(best_sent):
+    if SPECULATIVE_RE.search(local_slice):
         epistemic = "speculative"
-    elif LIMITATION_RE.search(best_sent):
+    elif LIMITATION_RE.search(local_slice):
         epistemic = "conditional_limitation"
     else:
         epistemic = "reported_result"
@@ -506,13 +698,15 @@ def _extract_best_sentence_measurement(
     return {
         "scalar": scalar,
         "units": unit,
-        "statistic": "; ".join(dict.fromkeys(stats)) if stats else None,
+        "statistic": "; ".join(stats_list) if stats_list else None,
         "experimental_condition": "; ".join(conds) if conds else None,
         "comparator": "; ".join(comps) if comps else None,
-        "quote": best_sent[:260],
+        "quote": quote_span,
         "epistemic_class": epistemic,
         "is_missing_cell": False,
-        "unit_status": "reported" if unit else ("unit_missing_in_source" if scalar is not None else "no_scalar"),
+        "unit_mismatch": unit_mismatch,
+        "is_external_benchmark": bool(EXTERNAL_BENCHMARK_RE.search(local_slice)),
+        "unit_status": "unit_mismatch_rejected" if unit_mismatch else ("reported" if unit else ("unit_missing_in_source" if scalar is not None else "no_scalar")),
     }
 
 
@@ -553,7 +747,11 @@ def extract_field_record(field_spec: dict[str, Any], blocks: list[dict[str, Any]
     ]).strip()
     q_toks = set(_tokens(query))
 
-    if not blocks:
+    # Detect unreadable/broken source files so extraction_failed is distinguished from not_reported
+    extraction_errors = [b for b in blocks if b.get("source_kind") == "extraction_error"]
+    readable_blocks = [b for b in blocks if b.get("source_kind") != "extraction_error" and b.get("text")]
+
+    if not readable_blocks:
         return {
             "field_id": fid,
             "scalar": None,
@@ -565,11 +763,13 @@ def extract_field_record(field_spec: dict[str, Any], blocks: list[dict[str, Any]
             "quote": "",
             "status": "extraction_failed",
             "epistemic_class": "unavailable",
-            "reason": "No readable source blocks available.",
+            "reason": "; ".join(e.get("error", "unreadable source") for e in extraction_errors) or "No readable source blocks available.",
         }
 
-    # BM25-like IDF scoring across prose and table_cell blocks (skip table_full when cells exist to avoid double counting)
-    searchable = [b for b in blocks if b.get("source_kind") != "table_full"] or blocks
+    # BM25-like IDF scoring across prose, caption, supplementary, and table_cell blocks
+    searchable = [b for b in readable_blocks if b.get("source_kind") != "table_full"] or readable_blocks
+    cond_toks = set(_tokens(field_spec.get("target_condition") or ""))
+    label_toks = set(_tokens(field_spec.get("label") or ""))
     doc_cnts = [Counter(_tokens(b["text"])) for b in searchable]
     n_docs = len(searchable)
     df: Counter[str] = Counter()
@@ -584,19 +784,42 @@ def extract_field_record(field_spec: dict[str, Any], blocks: list[dict[str, Any]
         if len(ov) < min_ov:
             continue
         sc = sum(math.log(1.0 + (n_docs - df[t] + 0.5) / (df[t] + 0.5)) for t in ov)
-        # Boost exact table cell header match
+        # Boost exact table cell header + row-entity co-occurrence
         if b.get("source_kind") == "table_cell":
             col_ov = set(_tokens(str(b.get("col_header") or ""))) & q_toks
             row_ov = set(_tokens(str(b.get("row_label") or ""))) & q_toks
             if col_ov:
-                sc += 1.5 * len(col_ov)
+                sc += 2.0 * len(col_ov)
             if row_ov:
-                sc += 1.5 * len(row_ov)
+                sc += 2.5 * len(row_ov)
+            if col_ov and row_ov:
+                sc += 4.5
+            elif label_toks and not row_ov:
+                # Penalize mismatched group rows (e.g., control row when target specifies treatment row)
+                sc *= 0.72
+        if cond_toks:
+            cond_ov = cond_toks & set(cnt.keys())
+            sc += 1.2 * len(cond_ov)
         norm_sc = round(sc / max(1.0, math.sqrt(len(q_toks))), 4)
         hits.append((norm_sc, len(ov), b))
 
     hits.sort(key=lambda x: (-x[0], -x[1]))
     if not hits or hits[0][0] < 0.45:
+        if extraction_errors:
+            return {
+                "field_id": fid,
+                "scalar": None,
+                "units": None,
+                "statistic": None,
+                "experimental_condition": None,
+                "comparator": None,
+                "paragraph_id": None,
+                "quote": "",
+                "status": "extraction_failed",
+                "epistemic_class": "unavailable",
+                "reason": "Field not found in readable text AND one or more supplied PDFs were unreadable (cannot conclude not_reported): "
+                + "; ".join(e.get("error", "") for e in extraction_errors),
+            }
         return {
             "field_id": fid,
             "scalar": None,
@@ -612,15 +835,24 @@ def extract_field_record(field_spec: dict[str, Any], blocks: list[dict[str, Any]
         }
 
     candidates: list[dict[str, Any]] = []
-    for sc, _ovc, blk in hits[:5]:
-        ext = _extract_best_sentence_measurement(blk, q_toks, field_spec["expected_unit"])
+    exp_u = field_spec["expected_unit"]
+    for sc, _ovc, blk in hits[:8]:
+        ext = _extract_best_sentence_measurement(blk, q_toks, exp_u, cond_toks=cond_toks)
+        eff_sc = sc
+        if exp_u and ext.get("units") and _units_compatible(ext["units"], exp_u):
+            eff_sc += 1.5
+        elif ext.get("unit_mismatch"):
+            eff_sc -= 2.0
+        if ext.get("is_external_benchmark"):
+            eff_sc -= 1.0
         candidates.append({
             "paragraph_id": blk["paragraph_id"],
             "source_file": blk.get("source_file"),
             "source_kind": blk.get("source_kind"),
-            "score": sc,
+            "score": round(eff_sc, 4),
             **ext,
         })
+    candidates.sort(key=lambda c: (-c["score"], c["scalar"] is None))
 
     # If top hit is an explicit missing placeholder cell (NA / ND / —), return not_reported with anchor
     best = candidates[0]
@@ -633,18 +865,49 @@ def extract_field_record(field_spec: dict[str, Any], blocks: list[dict[str, Any]
             "experimental_condition": best["experimental_condition"],
             "comparator": None,
             "paragraph_id": best["paragraph_id"],
-            "quote": best["quote"],
+            "quote": "",
+            "cell_anchor": best.get("cell_anchor"),
             "status": "not_reported",
             "epistemic_class": "not_reported",
-            "reason": "Matched source table cell explicitly records missing/not-reported placeholder; preserved as null (never 0).",
+            "reason": "Matched source table cell explicitly records missing/not-reported placeholder; preserved as null (never 0) with coordinate anchor only.",
+        }
+
+    # Reject candidate if expected_unit was requested and ALL top candidates failed unit compatibility or had no scalar
+    currency_units = {"usd", "eur", "brl", "cny", "gbp", "dollars", "$"}
+    missing_currency = bool(exp_u and _norm_unit(exp_u) in currency_units and not best.get("units"))
+    if best.get("scalar") is None or best.get("unit_mismatch") or missing_currency:
+        return {
+            "field_id": fid,
+            "scalar": None,
+            "units": None,
+            "statistic": None,
+            "experimental_condition": None,
+            "comparator": None,
+            "paragraph_id": None,
+            "quote": "",
+            "status": "not_reported",
+            "epistemic_class": "not_reported",
+            "reason": (
+                f"No source passage reported a measurement compatible with expected unit {exp_u!r}; "
+                "absent field kept null (never 0)."
+            ),
         }
 
     # Distinguish true same-condition cross-source conflict vs condition-stratified values
     top_core = _numeric_core(best["scalar"])
+    kw_toks = set(_tokens(" ".join(field_spec.get("keywords") or []))) | label_toks
+    # Keep higher-IDF distinguishing tokens (avoid generic paper-wide terms)
+    distinguishing_toks = {t for t in kw_toks if df.get(t, 0) <= max(3, int(n_docs * 0.25))} or kw_toks
     true_conflicts: list[dict[str, Any]] = []
     stratified_others: list[dict[str, Any]] = []
     for cand in candidates[1:]:
-        if cand["score"] < best["score"] * 0.65:
+        if cand["score"] < best["score"] * 0.85 or cand.get("scalar") is None:
+            continue
+        if cand.get("unit_mismatch") or cand.get("is_external_benchmark"):
+            continue
+        if not _units_compatible(best.get("units"), cand.get("units")):
+            continue
+        if distinguishing_toks and not (set(_tokens(cand.get("quote") or "")) & distinguishing_toks):
             continue
         c_core = _numeric_core(cand["scalar"])
         if top_core is not None and c_core is not None and c_core != top_core:
@@ -749,12 +1012,22 @@ def validate_fields_payload(
             if not pid or pid not in block_lookup:
                 errors.append(f"field {fid}: reported status requires valid paragraph_id in corpus (got {pid!r})")
             else:
-                if not verify_exact_quote(quote, block_lookup[pid]):
+                src_blk_text = block_lookup[pid]
+                if not verify_exact_quote(quote, src_blk_text):
                     errors.append(f"field {fid}: quote does not match exact source text at {pid}")
                 # Check numeric core appears verbatim in quote (prevents silent rounding or fabrication)
                 nc = _numeric_core(rec.get("scalar"))
                 if nc and nc not in quote.replace(",", ""):
                     errors.append(f"field {fid}: scalar numeric core {nc!r} not found verbatim inside quote at {pid}")
+                # Semantic condition-anchor binding check: declared experimental_condition tokens must ground to cited block
+                cond_val = str(rec.get("experimental_condition") or "").strip()
+                if cond_val:
+                    c_toks = [t for t in _tokens(cond_val) if len(t) >= 3 and t not in {"the", "and", "for", "with", "under", "from", "using"}]
+                    b_toks = set(_tokens(src_blk_text))
+                    if c_toks and not (set(c_toks) & b_toks):
+                        errors.append(
+                            f"field {fid}: declared experimental_condition {cond_val!r} has zero lexical anchor overlap with cited block {pid} (possible cross-group misbinding)"
+                        )
             if not rec.get("units"):
                 warnings.append(f"field {fid}: units is null; confirm unit is genuinely absent in source")
 

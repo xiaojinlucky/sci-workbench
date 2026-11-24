@@ -18,8 +18,11 @@ An offline, zero-dependency Python 3.12 skill for compound scientific claim deco
    - Untested population/dose/mechanism extrapolations are classified `insufficient_evidence`, never `contradicted`.
    - Flags indirect/secondary citations in Introduction/Background (`secondary_citation_warning`).
    - Detects abstract-vs-body/table conflicts within the same study and preserves both verbatim anchored quotes.
-5. **Strict Validator (`--validate-verifications`)**:
-   - Verifies `paragraph_id` existence, `source_document_id` ownership, verbatim `quote` substring match, inline-vs-structured citation integrity, and verdict consistency rules.
+5. **Automatic Numeric, Polarity & Extrapolation Entailment Engine**:
+   - Uses reading-flow `pdftotext -enc UTF-8` (zero two-column interleaving) and preserves thousands-separated counts (`n=1,010`, `n=5,539`).
+   - Detects quantitative contradictions (e.g., claimed `35%` vs measured `18.2%` on the matching target -> `contradicted`), statistical/polarity negations (`no significant difference`, `failed to improve`, `stationary`), and scope extrapolations (`all/universal/adults/clinical cure` vs pediatric `0-19`/observational/`in vitro` -> `insufficient_evidence`).
+6. **Strict Semantic Validator (`--validate-verifications`)**:
+   - Verifies `paragraph_id` ownership, verbatim `quote` substring match, inline-vs-structured citation reconciliation, blocks `supported` verdicts containing unresolved numeric/polarity contradictions, and blocks `contradicted` verdicts on untested extrapolation or localization gaps.
 
 ## Directory Layout
 - `SKILL.md`: Primary verification protocol for the agent.

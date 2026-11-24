@@ -44,10 +44,12 @@ _PARA_LOCATOR_RE = re.compile(
 
 _SECONDARY_CITATION_RE = re.compile(
     r"(?:\b(?:as\s+(?:shown|reported|demonstrated|noted|described|reviewed)\s+by|according\s+to|previous\s+(?:studies|work|reports|investigations)\s+(?:reported|showed|found|demonstrated|suggested)|prior\s+(?:work|studies)\s+(?:reported|showed|found)|reviewed\s+in|cited\s+in|earlier\s+reports?\s+by)\b|"
-    r"\b[A-Z][a-z]+\s+et\s+al\.?\s*(?:\(\s*(?:19|20)\d{2}\s*\)|\[\s*\d+\s*\])\s*(?:reported|showed|found|demonstrated|observed|argued|claimed)|"
+    r"\b[A-Z][a-z]+\s+et\s+al\.?\s*(?:\(\s*(?:19|20)\d{2}\s*\)|\[\s*\d+\s*\]|,?\s*\d{1,3}\b)\s*(?:reported|showed|found|demonstrated|observed|argued|claimed|define[sd]?|recommend(?:ed|s)?|is\s+most\s+widely)|"
+    r"\b(?:protocol|protocols)\s+(?:reported|described)\s+by\s+[A-Z][a-z]+\s+et\s+al\.|"
     r"既往研究表明|前人研究(?:报道|表明|指出)|已有研究(?:表明|指出)|文献\s*\[\d+\]\s*(?:报道|指出)|据.{1,20}报道)",
     re.I,
 )
+_SUPERSCRIPT_REF_RE = re.compile(r"(?:[a-z\)\"%]\.\s*\d{1,2}(?:[,-]\d{1,2})*(?:\s|$)|\bet\s+al\.?,?\s*\d{1,2}\b)")
 _PRIMARY_STUDY_RE = re.compile(
     r"(?:\b(?:we\s+(?:found|observed|measured|demonstrated|tested|evaluated|show|report)|our\s+(?:results?|data|experiments?|analysis|cohort|study)\s+(?:show|demonstrate|indicate|confirm|reveal)|in\s+this\s+study|present\s+study|table\s+\d+\s+shows|figure\s+\d+\s+shows)\b|"
     r"本研究(?:发现|表明|测定|证实)|本文(?:实验|结果)(?:表明|显示))",
@@ -340,7 +342,7 @@ def detect_secondary_citation(paragraph_text: str, section_hint: str = "body") -
     elif sec_hits:
         attr = "secondary_citation"
         warn = True
-    elif section_hint == "introduction" and extract_inline_citation_markers(paragraph_text):
+    elif section_hint == "introduction" and (extract_inline_citation_markers(paragraph_text) or _SUPERSCRIPT_REF_RE.search(paragraph_text or "")):
         attr = "secondary_citation"
         warn = True
     else:
@@ -455,7 +457,7 @@ def extract_emlsi_fingerprint(text: str) -> dict[str, Any]:
         flags=re.I,
     )
     magnitudes = re.findall(
-        r"(?:±\s*\d+(?:\.\d+)?|\b\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?\s*(?:%|mg/L|ug/L|mmol|µM|uM|mM|nM|mV|V|mA|cm-2|nm|µm|um|mm|cm|kg|g|mg|µg|days?|months?|years?|h|hr|min|s|ms|K|°C|Pa|kPa|MPa|GPa|Hz|ppm|ppb|wt%|fold|times)\b|[pP]\s*[<=>]\s*0?\.\d+|HR\s*=\s*\d+(?:\.\d+)?|OR\s*=\s*\d+(?:\.\d+)?|95%\s*CI)",
+        r"(?:±\s*\d+(?:\.\d+)?|\b[nN]\s*=\s*\d{1,3}(?:,\d{3})*|\b\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:\s*[-–]\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?)?\s*(?:%|/10,000\s+inhabitants|mg/L|ug/L|mmol|µM|uM|mM|nM|mV/s|mV|V|mA/cm2|A/cm2|mA|cm-2|nm|µm|um|mm|cm|kg|g|mg|µg|days?|months?|years?|h|hr|min|s|ms|K|°C|Pa|kPa|MPa|GPa|Hz|ppm|ppb|wt%|fold|times|cases)\b|[pP]\s*[<=>]\s*0?\.\d+|HR\s*=\s*\d+(?:\.\d+)?|OR\s*=\s*\d+(?:\.\d+)?|95%\s*CI)",
         text,
     )
     scope_cues = re.findall(

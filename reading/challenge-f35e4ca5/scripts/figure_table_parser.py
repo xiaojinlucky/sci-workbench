@@ -403,6 +403,56 @@ def _render_markdown_report(bundle: dict[str, Any]) -> str:
     if not (bundle.get("provided_figures") or []):
         lines.append("| (none) | - | - | - | - | - |")
 
+    lines.extend(["", "## 2.5 Automated Vector & Raster Digitization Summary", ""])
+    any_dig = False
+    for fig in bundle.get("provided_figures") or []:
+        ad = fig.get("auto_digitization") or {}
+        if not ad:
+            continue
+        any_dig = True
+        mode = ad.get("mode", "unknown")
+        if mode == "svg_vector_auto_digitization":
+            yc = ad.get("y_axis_calibration") or {}
+            xc = ad.get("x_axis_calibration") or {}
+            curves = ad.get("digitized_curves") or []
+            bars = ad.get("digitized_bars") or []
+            scatters = ad.get("digitized_scatter_points") or []
+            lines.append(
+                f"- **{fig.get('file')}** (`{mode}`): calibrated=`{ad.get('axes_calibrated')}` | "
+                f"X=`{xc.get('scale', 'n/a')}` (R²=`{xc.get('r_squared', 'n/a')}`, anchors={xc.get('anchor_count', 0)}) | "
+                f"Y=`{yc.get('scale', 'n/a')}` (R²=`{yc.get('r_squared', 'n/a')}`, anchors={yc.get('anchor_count', 0)}) | "
+                f"curves={len(curves)}, bars={len(bars)}, scatter_pts={len(scatters)}"
+            )
+            for s in curves[:5]:
+                pts = s.get("points_sample") or []
+                peak = s.get("peak_point")
+                lines.append(
+                    f"  - Curve `{s.get('series_id')}` (stroke=`{s.get('stroke')}`): "
+                    f"{s.get('point_count')} calibrated points; peak={peak}; sample={pts[:4]}"
+                )
+            if bars:
+                lines.append(f"  - Digitized bars ({len(bars)}): {bars[:5]}")
+            if scatters:
+                lines.append(f"  - Digitized scatter points ({len(scatters)}): {scatters[:5]}")
+        else:
+            pbox = ad.get("plot_box_px") or {}
+            cseries = ad.get("detected_chromatic_series") or []
+            xt = ad.get("detected_x_ticks_px") or []
+            yt = ad.get("detected_y_ticks_px") or []
+            lines.append(
+                f"- **Fig. `{fig.get('file')}`** (`{mode}`): plot_box_detected=`{ad.get('plot_box_detected')}` | "
+                f"size=`{ad.get('original_size_px')}` | box=`{pbox}` | x_ticks_px={len(xt)} | y_ticks_px={len(yt)} | "
+                f"chromatic_series={len(cseries)} | {ad.get('note', '')}"
+            )
+            for cs in cseries[:5]:
+                lines.append(
+                    f"  - Series `{cs.get('color_bucket')}`: pts={cs.get('sampled_points_count')}, "
+                    f"trend=`{cs.get('trend_direction')}`, peak_px={cs.get('peak_point_px')} "
+                    f"(norm_y={cs.get('peak_normalized_y')}), norm_span={cs.get('normalized_y_span')}"
+                )
+    if not any_dig:
+        lines.append("- _(no figures eligible for automated digitization)_")
+
     lines.extend(["", "## 3. Literal Source Tables Inventory", ""])
     for t in bundle.get("parsed_tables") or []:
         lines.append(
@@ -502,6 +552,7 @@ def run_pipeline(
     output_dir: Path,
     work_dir: Path,
     validate_readings_path: Path | None = None,
+    calibrate_ticks_path: Path | None = None,
 ) -> tuple[dict[str, Any], int]:
     output_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -561,6 +612,7 @@ def run_pipeline(
                 fig_info = aca.parse_svg_figure(fp)
             else:
                 fig_info = aca.inspect_raster_image(fp)
+                fig_info["auto_digitization"] = aca.auto_detect_plot_box_and_digitize_raster(fp)
             fig_info["rel_path"] = rel
             provided_figures.append(fig_info)
         elif ext == ".csv":
@@ -570,6 +622,41 @@ def run_pipeline(
             for pg in pages:
                 text_fragments.append(pg["text"])
                 parsed_tables.extend(extract_markdown_tables(pg["text"], f"{rel}#p{pg['page']}"))
+            # Generic PDF structured table-cell extraction via pdfplumber when installed
+            try:
+                import pdfplumber  # type: ignore
+                with pdfplumber.open(str(fp)) as pdoc:
+                    t_idx_pdf = 0
+                    for pno_t, pg_t in enumerate(pdoc.pages, 1):
+                        raw_tbls = pg_t.extract_tables() or []
+                        if not raw_tbls and re.search(r"\b(?:Table|表)\s*[S]?\d+\b", pg_t.extract_text() or "", re.I):
+                            raw_tbls = pg_t.extract_tables(
+                                table_settings={"vertical_strategy": "text", "horizontal_strategy": "lines"}
+                            ) or []
+                        for rt in raw_tbls:
+                            crows = [
+                                [re.sub(r"\s+", " ", str(c or "")).strip() for c in r]
+                                for r in (rt or [])
+                                if r and any(str(c or "").strip() for c in r)
+                            ]
+                            if len(crows) >= 2 and len(crows[0]) >= 2:
+                                t_idx_pdf += 1
+                                hdrs = crows[0]
+                                parsed_tables.append({
+                                    "table_id": f"{fp.stem}_p{pno_t}_T{t_idx_pdf:02d}",
+                                    "source": f"{rel}#p{pno_t}",
+                                    "format": "pdfplumber_cell_table",
+                                    "required_by_scope": False,
+                                    "headers": hdrs,
+                                    "header_units": _detect_header_units(hdrs),
+                                    "row_count": len(crows) - 1,
+                                    "rows": [
+                                        {"_row_index": r_i, **{hdrs[c_i] if c_i < len(hdrs) else f"col_{c_i+1}": v for c_i, v in enumerate(r)}}
+                                        for r_i, r in enumerate(crows[1:25], 1)
+                                    ],
+                                })
+            except Exception:
+                pass
         elif ext in TEXT_EXTS and fp.name not in ("case.json", "material.json", "organizer-supplied-scope.json"):
             raw_t = fp.read_text(encoding="utf-8-sig", errors="replace")
             text_fragments.append(raw_t)
@@ -697,12 +784,122 @@ def run_pipeline(
                 input_errors.append(f"Malformed readings draft JSON: {exc}")
                 exit_code = 1
 
+    # Load optional --calibrate-ticks spec (maps file -> {x_anchors, y_anchors, x_scale, y_scale, x_unit, y_unit, legend_color_map})
+    cal_specs: dict[str, Any] = {}
+    if calibrate_ticks_path is not None:
+        if not calibrate_ticks_path.is_file():
+            input_errors.append(f"Requested --calibrate-ticks file not found: {calibrate_ticks_path}")
+            exit_code = 1
+        else:
+            try:
+                loaded_cal = json.loads(calibrate_ticks_path.read_text(encoding="utf-8-sig"))
+                if isinstance(loaded_cal, dict):
+                    cal_specs = loaded_cal.get("figures", loaded_cal)
+            except Exception as exc:
+                input_errors.append(f"Malformed --calibrate-ticks JSON: {exc}")
+                exit_code = 1
+
+    # Auto-populate verifiable figure_readings from zero-click SVG auto-digitization, --calibrate-ticks, & schematic refusal;
+    # NEVER promote contract_status to "answered" when quantitative raster figures lack verified tick calibration or figure_readings is empty!
+    auto_figure_readings: list[dict[str, Any]] = []
+    uncalibrated_quant_rasters: list[str] = []
+    for fig in provided_figures:
+        ad = fig.get("auto_digitization") or {}
+        mode = ad.get("mode", "")
+        cspec = cal_specs.get(fig["rel_path"]) or cal_specs.get(fig["file"])
+        if mode == "svg_vector_auto_digitization" and ad.get("axes_calibrated"):
+            auto_figure_readings.append({
+                "file": fig["rel_path"],
+                "reading_tier": "directly_readable_from_image",
+                "calibration_mode": mode,
+                "x_axis_calibration": ad.get("x_axis_calibration"),
+                "y_axis_calibration": ad.get("y_axis_calibration"),
+                "digitized_curves": ad.get("digitized_curves") or [],
+                "digitized_scatter_points": ad.get("digitized_scatter_points") or [],
+                "digitized_bars": ad.get("digitized_bars") or [],
+            })
+        elif cspec and isinstance(cspec, dict):
+            x_anc = [(float(a[0]), float(a[1])) for a in (cspec.get("x_anchors") or [])]
+            y_anc = [(float(a[0]), float(a[1])) for a in (cspec.get("y_anchors") or [])]
+            x_cal = aca.calibrate_axis_points(x_anc, scale=str(cspec.get("x_scale") or "linear"), unit=str(cspec.get("x_unit") or ""))
+            y_cal = aca.calibrate_axis_points(y_anc, scale=str(cspec.get("y_scale") or "linear"), unit=str(cspec.get("y_unit") or ""))
+            if not x_cal.get("ok") or not y_cal.get("ok"):
+                uncalibrated_quant_rasters.append(fig["rel_path"])
+                auto_figure_readings.append({
+                    "file": fig["rel_path"],
+                    "reading_tier": "undetermined_not_provided",
+                    "calibration_mode": "tick_calibration_refused",
+                    "refusal_code": x_cal.get("refusal_code") or y_cal.get("refusal_code") or "UNSCALED_AXIS_REFUSE_EXACT_READING",
+                    "x_axis_calibration": x_cal,
+                    "y_axis_calibration": y_cal,
+                })
+            else:
+                leg_map = cspec.get("legend_color_map") or {}
+                cal_series = []
+                for cs in ad.get("detected_chromatic_series") or []:
+                    pts = cs.get("pixel_samples") or []
+                    x_res = aca.calibrate_axis_points(x_anc, scale=str(cspec.get("x_scale") or "linear"), unit=str(cspec.get("x_unit") or ""), query_pixels=[float(p[0]) for p in pts])
+                    y_res = aca.calibrate_axis_points(y_anc, scale=str(cspec.get("y_scale") or "linear"), unit=str(cspec.get("y_unit") or ""), query_pixels=[float(p[1]) for p in pts])
+                    phys_pts = [
+                        {
+                            "x": xm.get("value"),
+                            "x_err_interval": xm.get("uncertainty_interval") or xm.get("half_pixel_bounds"),
+                            "y": ym.get("value"),
+                            "y_err_interval": ym.get("uncertainty_interval") or ym.get("half_pixel_bounds"),
+                            "px": [xm.get("pixel"), ym.get("pixel")],
+                        }
+                        for xm, ym in zip(x_res.get("mapped_points") or [], y_res.get("mapped_points") or [])
+                    ]
+                    cal_series.append({
+                        "color_bucket": cs.get("color_bucket"),
+                        "legend_label": leg_map.get(cs.get("color_bucket"), cs.get("color_bucket")),
+                        "trend_direction": cs.get("trend_direction"),
+                        "calibrated_points": phys_pts,
+                    })
+                auto_figure_readings.append({
+                    "file": fig["rel_path"],
+                    "reading_tier": "directly_readable_from_image",
+                    "calibration_mode": "raster_tick_calibrated_with_legend_binding",
+                    "x_axis_calibration": x_cal,
+                    "y_axis_calibration": y_cal,
+                    "calibrated_series": cal_series,
+                })
+        elif ad.get("plot_box_detected"):
+            uncalibrated_quant_rasters.append(fig["rel_path"])
+            auto_figure_readings.append({
+                "file": fig["rel_path"],
+                "reading_tier": "undetermined_not_provided",
+                "calibration_mode": mode,
+                "refusal_code": "UNSCALED_AXIS_REFUSE_EXACT_READING",
+                "plot_box_px": ad.get("plot_box_px"),
+                "detected_x_ticks_px": ad.get("detected_x_ticks_px") or [],
+                "detected_y_ticks_px": ad.get("detected_y_ticks_px") or [],
+                "detected_chromatic_series": ad.get("detected_chromatic_series") or [],
+                "note": "Plot frame, tick notches, and chromatic series detected automatically; exact physical values withheld until tick labels are supplied via --calibrate-ticks or --validate-readings.",
+            })
+        else:
+            auto_figure_readings.append({
+                "file": fig["rel_path"],
+                "reading_tier": "not_applicable",
+                "calibration_mode": mode or "header_only",
+                "note": ad.get("note") or "No quantitative orthogonal axes detected (schematic/photograph/composite); coordinate digitization not applicable.",
+            })
+
+    if uncalibrated_quant_rasters and readings_payload is None:
+        uncertainties.append(
+            f"Quantitative raster figure(s) lack verified tick-label physical calibration ({', '.join(uncalibrated_quant_rasters)}); "
+            "exact physical values withheld under UNSCALED_AXIS_REFUSE_EXACT_READING until --calibrate-ticks or --validate-readings is supplied."
+        )
+
     contract_status = "answered"
     if input_errors:
         contract_status = "input_error"
     elif not provided_figures and not parsed_tables:
         contract_status = "insufficient_evidence"
     elif missing_req_imgs or missing_req_tables:
+        contract_status = "partial"
+    elif readings_payload is None and (uncalibrated_quant_rasters or (provided_figures and not auto_figure_readings)):
+        # Honest boundary: never claim "answered" while quantitative raster readings remain uncalibrated
         contract_status = "partial"
 
     harbor_status = "ok" if (contract_status == "answered" and not table_errors and not missing_req_imgs and not missing_req_tables) else "partial_with_gaps"
@@ -713,6 +910,7 @@ def run_pipeline(
         "harbor_status": harbor_status,
         "organizer_scope_audit": scope_audit,
         "provided_figures": provided_figures,
+        "figure_readings": auto_figure_readings,
         "parsed_tables": parsed_tables,
         "missing_pixel_figure_gaps": missing_pixel_gaps,
         "cross_modal_audit": cross_modal_audit,
@@ -759,7 +957,7 @@ def run_pipeline(
                 {k: v for k, v in t.items() if k != "rows"} | {"rows_preview": (t.get("rows") or [])[:10]}
                 for t in parsed_tables
             ],
-            "figure_readings": bundle.get("validated_figure_readings", []),
+            "figure_readings": bundle.get("validated_figure_readings") or bundle.get("figure_readings", []),
             "missing_pixel_figure_gaps": missing_pixel_gaps,
             "cross_modal_audit": cross_modal_audit,
             "paperstory_branch_index": paperstory_index,
@@ -814,11 +1012,13 @@ def main() -> int:
     parser.add_argument("--output", default="/app/output", help="Output directory")
     parser.add_argument("--work", default="/app/work", help="Working directory")
     parser.add_argument("--validate-readings", default="", help="Optional JSON draft of multimodal figure readings to validate and promote")
+    parser.add_argument("--calibrate-ticks", default="", help="Optional JSON mapping figure filenames to verified pixel-to-value tick anchors and legend color labels")
     args = parser.parse_args()
 
     paths = preflight_probe.resolve_default_paths(input_dir=args.input, output_dir=args.output, work_dir=args.work)
     val_path = Path(args.validate_readings) if args.validate_readings else None
-    _, rc = run_pipeline(paths["input_dir"], paths["output_dir"], paths["work_dir"], validate_readings_path=val_path)
+    cal_path = Path(args.calibrate_ticks) if args.calibrate_ticks else None
+    _, rc = run_pipeline(paths["input_dir"], paths["output_dir"], paths["work_dir"], validate_readings_path=val_path, calibrate_ticks_path=cal_path)
     return rc
 
 

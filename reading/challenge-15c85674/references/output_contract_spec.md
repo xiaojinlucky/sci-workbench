@@ -5,6 +5,7 @@
 - **Skill Mount Paths**: Locate scripts relative to `SKILL.md` so both `/skills/literature-qa` and `/skills/weekly-skill` work identically.
 - **Input Path**: `/input/case.json` (plus any referenced or co-located `.pdf` / `.md` / `.txt` files under `/input`).
 - **Work Path**: `/app/work/` (stores `qa_retrieval_pack.json`, `indexed_corpus.json`, `answers_draft.json`, `env.json`, `gaps.json`).
+- **Runtime Budget**: Aligned strictly with the current **64 model requests / 16384 output tokens per response / 900 seconds** contract (all early checkpoints and validation loops target this budget).
 - **Final Output Paths**:
   1. `/app/output/result.json` (primary Harbor deliverable; retains all original answer fields plus Harbor top-level `status` in `{"ok", "partial_with_gaps"}`, `artifacts`, `metrics`, `metric_provenance`, `findings`, `gaps`, `schema_validation`).
   2. `/app/answers.json` (legacy compatibility mirror written atomically whenever `/app` exists and is writable) and `/app/output/answers.json`.
@@ -28,7 +29,7 @@
 | Answer | `unanswered_parts[]` | Array of `{part, reason}` (or non-empty strings). Must be `[]` iff `status == "answered"`. |
 | Top | `coverage` | `{read_sections[], unread_sections[], unread_reason, total_paragraphs_read, page_coverage_audit{ingested_pages, extracted_pages, empty_or_scanned_pages[], indexed_paragraphs, cited_paragraphs, cited_pages[], tail_page_coverage_check, table_footnote_coverage_check}}`. |
 
-## 3. Seven Blocking Validation Gates (`--validate-answers`)
+## 3. Ten Blocking Validation Gates (`--validate-answers`)
 
 1. Input identifiers (`case_id`, `paper_id`, `material_version`) match `/input/case.json`.
 2. Every input `question_id` is answered exactly once.
@@ -37,5 +38,8 @@
 5. `status == "answered"` requires `unanswered_parts == []`; `partial` and `insufficient_evidence` require non-empty `unanswered_parts[]`.
 6. Every numeric+SI unit pair declared in `conditions[]` matches the verified cited paragraphs for that question (blocks unit drift like `mg -> μg` or invented thresholds).
 7. `coverage` faithfully includes any unread sections and unreadable/scanned pages detected during indexing.
+8. **Semantic Reported Numeric-Core Fidelity**: Every quantitative value (including thousands-separated counts such as `n=1,010`/`n=5,539`, percentages, and rates) in a `kind == "reported"` claim must appear in its verified `evidence[].quote` text(s).
+9. **Inferred Reasoning Premise & Anti-Disguise**: Every `kind == "inferred"` claim must supply an explicit reasoning premise (`reasoning_premise` field or synthesis cues) and grounded support, and inferred calculations must never be tagged `kind == "reported"`.
+10. **Atomic Sub-Question Coverage Grounding**: Every decomposed atomic sub-question must have an explicit landing in `answer`/`claims`/`conditions` (when `answered`) or in `unanswered_parts[]` (when `partial`/`insufficient_evidence`).
 
 On failure, the CLI exits with code `1`, writes `schema_validation.ok = false` and `QA_SCHEMA_ERRORS` to `/app/output/result.json` (`status: "partial_with_gaps"`), and refuses to mark the run clean.

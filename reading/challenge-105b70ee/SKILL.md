@@ -3,17 +3,17 @@ name: structured-paper-extractor
 description: Read /input/target-fields.json and extract one verified structured record per requested field_id across prose paragraphs, cell-anchored tables (JSON/CSV/Markdown), captions, and PDFs. Preserves scalar, compound units, statistics, experimental conditions, comparators, verbatim quotes, epistemic class (reported_result/conditional_limitation/speculative), and 4-state status (reported/not_reported/source_conflict/extraction_failed) with strict zero-default-zero and numeric-in-quote verification.
 ---
 
-# Literature Conclusion & Data Extractor (`challenge-105b70ee`)
+# Literature Conclusion & Data Extractor
 
 ## 1. Purpose, Scope & Organizer Revision v2 Guarantees
 
-This skill implements the Harbor and Wenyon public contract for `challenge-105b70ee` (`文献结论与数据提取`) under offline Linux constraints (`64` requests, `900s`, zero network, zero `fitz`/`pymupdf`/`cairosvg`/Windows COM dependencies).
+This skill implements the Harbor and Wenyon public contract for structured scientific conclusion & data extraction (`文献结论与数据提取`) under offline Linux constraints (`64` requests, `900s`, zero network, zero `fitz`/`pymupdf`/`cairosvg`/Windows COM dependencies).
 
 It directly solves the highest-frequency extraction failures observed on real scientific papers:
 
 1. **One Record per Requested `field_id`**: Reads `/input/target-fields.json` (or `case.json.target_fields`) and emits strictly one record per requested `field_id`—zero omissions, zero duplicates, zero unexpected extra IDs.
-2. **Cell-Level Table & Multi-Source Indexing**: Expands JSON (`columns`+`rows`), CSV, and Markdown tables into exact 2D cell-anchored blocks (`TableID:R{row}:C{col}`) preserving `row_label`, `col_header`, and `header_unit` rather than flattening tables into unanchored strings.
-3. **Sentence-Level Condition-Value Binding**: Filters out years `(2024)`, citation brackets `[12]`, figure/table/section numbers, sample counts `n=6`, and `p`-values so they never hijack primary numeric scalars. Binds `scalar` (exact value, `mean ± SD`, range `a–b`, or censored `<0.05`) together with compound `units`, `statistic`, `experimental_condition`, and `comparator` from the same sentence or table row.
+2. **Cell-Level Table & Multi-Source Indexing**: Expands JSON (`columns`+`rows`), CSV, and Markdown tables into exact 2D cell-anchored blocks (`TableID:R{row}:C{col}`) preserving `row_label`, `col_header`, and `header_unit`, while tagging `caption`, `supplementary`, `prose`, and `pdf_page` sources separately. Unreadable or corrupted PDFs emit dedicated `extraction_error` diagnostics so genuine parser failures resolve to `status: "extraction_failed"` instead of being silently conflated with `not_reported`.
+3. **Sentence-Level Condition-Value Binding & Cross-Group Penalty**: Filters out years `(2024)`, citation brackets `[12]`, figure/table/section numbers, sample counts `n=6`, and `p`-values so they never hijack primary numeric scalars. Boosts candidate blocks that co-occur with the requested target entity and experimental condition while penalizing mismatched comparator/control table rows. Binds `scalar` (exact value, `mean ± SD`, range `a–b`, or censored `<0.05`) together with compound `units`, `statistic`, `experimental_condition`, and `comparator` from the same sentence or table row.
 4. **Zero-Default-Zero & Unit Honesty**: An absent field or table placeholder (`NA`, `N/A`, `ND`, `—`, `-`, blank) is strictly `status: "not_reported"` with `scalar: null`—NEVER `0`. A missing unit in the source remains `units: null` (`unit_status: "unit_missing_in_source"`)—never borrowed from neighboring sentences or silently converted.
 5. **True Cross-Source Conflict vs. Condition Stratification**: Distinguishes genuine same-condition conflicts between prose and tables (`status: "source_conflict"` preserving all `conflicting_sources[]`) from valid multi-condition measurements (e.g., 25 °C vs. 80 °C, preserved in `condition_stratified_candidates`).
 6. **Epistemic Strength Separation**: Classifies every extracted statement as `reported_result` (explicit empirical finding), `conditional_limitation` (boundary/scope restriction), or `speculative` (`may`/`might`/`could`/`suggests`/`可能`/`提示`)—never rewriting tentative author phrasing as proven fact.
@@ -41,7 +41,7 @@ Inspect `/app/output/extracted_fields.json` and `/app/output/extracted_fields_re
 3. **Table-vs-Prose Reconciliation**: If prose and a table report conflicting values for the exact same group and condition, set `status: "source_conflict"` and list both anchors in `conflicting_sources[]`. If they describe different experimental conditions, select the condition matching `target-fields.json` and preserve the condition string explicitly.
 4. **Epistemic Tagging**: Keep `speculative` and `conditional_limitation` statements strictly labeled; never promote a hypothesis or discussion caveat into an unqualified `reported_result`.
 
-### Step 3: Strict Dual Validation (Quote + Numeric Core + Zero-Default-Zero) & Promotion
+### Step 3: Strict Triple Validation (Quote + Numeric Core + Condition Anchor) & Promotion
 
 Save your verified fields array to `/app/work/fields_draft.json` and run the strict validator:
 
@@ -55,7 +55,7 @@ python3 -B scripts/field_extraction_engine.py \
 
 When `--validate-fields` is supplied:
 - A missing or malformed draft exits non-zero (`contract_status: "input_error"`) and NEVER silently substitutes automatic extraction.
-- Every `reported` record must pass BOTH exact verbatim quote matching at `paragraph_id` AND verbatim presence of the scalar's numeric core inside that quote.
+- Every `reported` record must pass ALL THREE hard checks: exact verbatim quote matching at `paragraph_id`, verbatim presence of the scalar's numeric core inside that quote, AND semantic condition-anchor lexical overlap between the declared `experimental_condition` and the cited block (catching cross-group/cross-condition misbinding).
 - Every `not_reported` or `extraction_failed` record must keep `scalar: null`.
 - Every `source_conflict` record must include `>= 2` verified entries in `conflicting_sources[]`.
 

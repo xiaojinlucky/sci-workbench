@@ -3,17 +3,17 @@ name: scientific-doc-pdf-parser
 description: Parse scientific PDFs and text documents into grounded reading-order blocks, multi-level section trees, tables (with continued-table linking), numbered formulas, captions, and symbol-fidelity audits. Enforces gutter-based two-column de-interleaving, cross-page header/footer stripping, strict per-page native-vs-Tesseract OCR separation with OSD rotation probing, long-PDF tail-page coverage verification, and dual Harbor + topic-markdown deliverables.
 ---
 
-# Scientific Document & PDF Parsing (`product-arena-08-3027d350`)
+# Scientific Document & PDF Parsing
 
 ## 1. Purpose, Scope & Core Guarantees
 
-This skill implements the Harbor and `llm_judge_topic_markdown` dual contract for scientific document parsing (`阅读01｜文献文档解析`) under strict offline Linux constraints (`64` requests, `900s`, zero network, zero `fitz`/`pymupdf`/`cairosvg`/`win32com`).
+This skill implements the Harbor and `llm_judge_topic_markdown` dual contract for scientific document & PDF parsing (`文献文档解析`) under strict offline Linux constraints (`64` requests, `900s`, zero network, zero `fitz`/`pymupdf`/`cairosvg`/`win32com`).
 
 It targets the four official evaluation pillars directly through deterministic offline scripts rather than prose-only prompts:
 
 1. **Extract Completely (提得全)**: Separates native PDF text from per-page scanned OCR text, strips cross-page repeating headers and footers into a traceable log (`stripped_headers_footers`), preserves figure/table captions, footnotes, and references, and runs an explicit long-PDF coverage audit (`first_page_covered`, `mid_page_covered`, `last_page_covered`, `tail_10pct_coverage_ratio`) to eliminate silent tail-page truncation.
 2. **Order Accurately (排得对)**: Applies vertical whitespace-gutter projection (`deinterleave_page_columns`) to layout-preserved PDF text (`pdftotext -layout` / `pdfplumber`), separating full-width elements (title, abstract, spanning tables) from two-column body zones and reordering columns strictly left-to-right, top-to-bottom while repairing line-wrap hyphens safely.
-3. **Structure Cleanly (拆得清)**: Builds a multi-level `section_hierarchy`, extracts CSV/Markdown/layout-aligned PDF tables, links consecutive continued tables (`continued_table_candidates`), extracts LaTeX and numbered equations, and audits fragile scientific symbols (`•` U+2022 vs. `·` U+00B7, Greek letters, math operators, and `U+FFFD` / `(cid:N)` garbled fonts).
+3. **Structure Cleanly (拆得清)**: Builds a multi-level `section_hierarchy`, extracts CSV/Markdown/layout-aligned PDF tables, merges consecutive continued tables into unified multi-page `merged_tables[]` with per-row page anchors and two-tier header flattening (`Group > Subheader`), extracts display LaTeX, inline `$...$` equations, numbered equations, and superscript/subscript expressions, and audits fragile scientific symbols (`•` U+2022 vs. `·` U+00B7, Greek letters, math operators, and `U+FFFD` / `(cid:N)` garbled fonts).
 4. **Ground Verifiably (核得回)**: Every emitted block carries a 1-based original PDF `page`, `column` role, page-local `line_span`, and `extraction_method` (`native` or `tesseract`). Unreadable, encrypted, rotated, or empty pages are logged explicitly in `gaps` and never fabricated.
 
 ## 2. Environment & Hard Boundaries

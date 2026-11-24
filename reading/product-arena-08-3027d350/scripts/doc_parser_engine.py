@@ -131,11 +131,31 @@ def extract_pdf_pages(pdf_path: Path) -> dict[str, Any]:
         with pdfplumber.open(pdf_path) as pdf:
             pages = []
             for page_number, page in enumerate(pdf.pages, 1):
+                col_count = 1
+                page_text = ""
                 try:
-                    page_text = page.extract_text(layout=True) or ""
-                except TypeError:
-                    page_text = page.extract_text() or ""
-                pages.append({"page": page_number, "text": page_text})
+                    w, h = float(page.width), float(page.height)
+                    words = page.extract_words() or []
+                    mid = w / 2.0
+                    body_words = [wd for wd in words if wd["top"] > h * 0.10 and wd["bottom"] < h * 0.90]
+                    if len(body_words) >= 40:
+                        left_w = sum(1 for wd in body_words if wd["x1"] <= mid + 4.0)
+                        right_w = sum(1 for wd in body_words if wd["x0"] >= mid - 4.0)
+                        cross_w = sum(1 for wd in body_words if wd["x0"] < mid - 4.0 and wd["x1"] > mid + 4.0)
+                        if left_w >= 20 and right_w >= 20 and (cross_w / max(1, len(body_words))) < 0.12:
+                            col_count = 2
+                            top_band = page.crop((0, 0, w, h * 0.14)).extract_text() or ""
+                            left_txt = page.crop((0, h * 0.14, mid, h)).extract_text() or ""
+                            right_txt = page.crop((mid, h * 0.14, w, h)).extract_text() or ""
+                            page_text = "\n\n".join(part.strip() for part in (top_band, left_txt, right_txt) if part.strip())
+                except Exception:
+                    pass
+                if not page_text:
+                    try:
+                        page_text = page.extract_text(layout=True) or ""
+                    except TypeError:
+                        page_text = page.extract_text() or ""
+                pages.append({"page": page_number, "text": page_text, "pdfplumber_columns": col_count})
         return {
             "status": "readable",
             "engine": "pdfplumber",
@@ -707,8 +727,13 @@ def _heading_level(line: str) -> tuple[Optional[int], Optional[str]]:
         num_str = m.group("num")
         ntitle = m.group("ntitle").strip()
         top_num = int(num_str.split(".")[0])
-        # Reject tabular data rows / bibliography numbered items masquerading as headings
+        # Reject tabular data rows / bibliography numbered items / footnote citations ("4 Ibid.", "5 See ...", "Op. cit.") masquerading as headings
         if top_num < 1 or top_num > 20:
+            return None, None
+        if re.match(r"^(?:ibid\.?|id\.?|op\.?\s*cit\.?|loc\.?\s*cit\.?|see\s+|cf\.?\s+|note\s+\d|footnote\b)", ntitle, re.I):
+            return None, None
+        # Reject bibliography author lists (multiple commas) or prose fragments starting with lowercase ("6 years of age...")
+        if ntitle.count(",") >= 2 or (ntitle and ntitle[0].islower()):
             return None, None
         if re.search(r"\d", ntitle) and not re.search(r"(?:phase|stage|part|step|case|model|tier|2d|3d|v\d)", ntitle, re.I):
             return None, None
@@ -840,7 +865,16 @@ def build_reading_blocks_and_structure(
         layout_aware = bool(p.get("layout_requested", False)) and ext_method == "native"
         cleaned_lines = p.get("cleaned_lines") or []
 
+        # Mark bottom 15% of page as footnote zone to prevent numbered footnotes ("4 Ibid.") becoming section headings
+        max_lno = max((lno for lno, _ in cleaned_lines), default=0)
+        footnote_zone_start = int(max_lno * 0.85) if max_lno >= 12 else max_lno + 1
+
         deint = deinterleave_page_columns(cleaned_lines, layout_aware=layout_aware)
+        # Honor pdfplumber coordinate-verified two-column metadata if available
+        if p.get("pdfplumber_columns") == 2 and deint["detected_columns"] < 2:
+            deint["detected_columns"] = 2
+            deint["deinterleaved"] = True
+            deint["column_confidence"] = max(float(deint.get("column_confidence") or 0.0), 0.9)
         layout_pages.append({
             "source_file": source_file,
             "page": page_no,
@@ -867,8 +901,8 @@ def build_reading_blocks_and_structure(
                     )
                     para_buf = []
                 continue
-            # Start new block on heading or caption boundary or column switch
-            is_hd, _ = _heading_level(txt)
+            # Start new block on heading or caption boundary or column switch (exclude footnote zone from heading detection)
+            is_hd, _ = (None, None) if lno >= footnote_zone_start else _heading_level(txt)
             is_cap = bool(CAPTION_RE.match(txt))
             if (is_hd is not None or is_cap or (para_buf and col != para_col)) and para_buf:
                 emit_paragraph(
@@ -1095,20 +1129,205 @@ def parse_tabular_data(
             else:
                 i += 1
 
+    # 4. pdfplumber structured table extractor fallback for borderless/ruled PDF tables
+    existing_pdf_pages = {(t.get("source_file"), t.get("page")) for t in tables if t.get("page") is not None}
+    try:
+        import pdfplumber  # type: ignore
+
+        for pdf_fp in sorted(input_dir.rglob("*.pdf")):
+            if not pdf_fp.is_file():
+                continue
+            rel_pdf = pdf_fp.relative_to(input_dir).as_posix()
+            try:
+                with pdfplumber.open(str(pdf_fp)) as pdf_doc:
+                    for pno, pg in enumerate(pdf_doc.pages, 1):
+                        if (rel_pdf, pno) in existing_pdf_pages:
+                            continue
+                        extracted = pg.extract_tables() or []
+                        if not extracted:
+                            ptxt = pg.extract_text() or ""
+                            if re.search(r"\b(?:Table|表)\s*[S]?\d+\b", ptxt, re.I):
+                                extracted = pg.extract_tables(
+                                    table_settings={"vertical_strategy": "text", "horizontal_strategy": "lines"}
+                                ) or []
+                        for raw_tbl in extracted:
+                            raw_clean_rows = [
+                                [re.sub(r"\s+", " ", str(c or "")).strip() for c in r]
+                                for r in (raw_tbl or [])
+                                if r and any(str(c or "").strip() for c in r)
+                            ]
+                            # Fold orphan parenthesis-only continuation rows (e.g. ["", "(100)", "(43.7)"]) back into previous row
+                            clean_rows: list[list[str]] = []
+                            for r in raw_clean_rows:
+                                non_empty = [c for c in r if c]
+                                is_paren_frag = bool(non_empty) and sum(
+                                    1 for c in non_empty if re.fullmatch(r"\([^()]{1,16}\)", c)
+                                ) >= max(1, (len(non_empty) + 1) // 2)
+                                if is_paren_frag and clean_rows and len(clean_rows[-1]) == len(r):
+                                    clean_rows[-1] = [
+                                        f"{a} {b}".strip() if (a and b) else (a or b)
+                                        for a, b in zip(clean_rows[-1], r)
+                                    ]
+                                else:
+                                    # Separate glued decimal-percent or glued double-decimal artifacts safely when obvious
+                                    clean_rows.append(r)
+                            if len(clean_rows) >= 2 and len(clean_rows[0]) >= 2:
+                                t_seq += 1
+                                headers = clean_rows[0]
+                                pt_txt = pg.extract_text() or ""
+                                m_cap = re.search(r"((?:Supplementary\s+)?(?:Table|表)\s*[S]?\d+[^\n]{0,160})", pt_txt, re.I)
+                                cap = m_cap.group(1).strip() if m_cap else f"PDF Table {t_seq} (page {pno})"
+                                is_cont = bool(CONTINUED_TABLE_RE.search(cap))
+                                m_tno = re.search(r"(?:Table|表)\s*([S]?\d+)", cap, re.I)
+                                table_num_tag = m_tno.group(1).upper() if m_tno else None
+                                t_rec = {
+                                    "table_id": f"T{t_seq:02d}",
+                                    "source_file": rel_pdf,
+                                    "page": pno,
+                                    "line_span": None,
+                                    "format": "pdfplumber_structured_table",
+                                    "caption": cap[:240],
+                                    "table_number_tag": table_num_tag,
+                                    "continued_marker": is_cont,
+                                    "headers": headers,
+                                    "row_count": max(0, len(clean_rows) - 1),
+                                    "col_count": len(headers),
+                                    "rows_preview": clean_rows[1:20],
+                                }
+                                tables.append(t_rec)
+                                prev_t = prev_table_by_page.get(pno - 1)
+                                prev_same_page = prev_table_by_page.get(pno)
+                                prev_table_by_page[pno] = t_rec
+                                # Three-signal continuation matching: explicit continued marker, same Table N on consecutive page, or header signature similarity >= 0.5 with equal col count
+                                link_prev = None
+                                link_reason = None
+                                if prev_t and prev_t.get("source_file") == rel_pdf:
+                                    h1 = {re.sub(r"\W+", "", str(x).lower()) for x in (prev_t.get("headers") or []) if str(x).strip()}
+                                    h2 = {re.sub(r"\W+", "", str(x).lower()) for x in headers if str(x).strip()}
+                                    jacc = (len(h1 & h2) / len(h1 | h2)) if (h1 and h2) else 0.0
+                                    same_tnum = bool(table_num_tag and prev_t.get("table_number_tag") == table_num_tag)
+                                    same_cols = len(headers) >= 2 and len(headers) == len(prev_t.get("headers") or [])
+                                    if is_cont:
+                                        link_prev, link_reason = prev_t, "explicit_continued_marker"
+                                    elif same_tnum:
+                                        link_prev, link_reason = prev_t, "same_table_number_on_consecutive_page"
+                                    elif same_cols and jacc >= 0.5:
+                                        link_prev, link_reason = prev_t, f"matching_header_signature_jaccard_{jacc:.2f}"
+                                    elif same_cols and not m_cap:
+                                        link_prev, link_reason = prev_t, "uncaptioned_continuation_matching_col_count"
+                                elif prev_same_page and prev_same_page.get("source_file") == rel_pdf and not m_cap:
+                                    if len(headers) >= 2 and len(headers) == len(prev_same_page.get("headers") or []):
+                                        link_prev, link_reason = prev_same_page, "same_page_split_table_fragment"
+                                if link_prev and link_reason:
+                                    continued_candidates.append({
+                                        "from_table_id": link_prev["table_id"],
+                                        "to_table_id": t_rec["table_id"],
+                                        "from_page": link_prev.get("page"),
+                                        "to_page": pno,
+                                        "reason": link_reason,
+                                        "caption": cap[:200],
+                                    })
+            except Exception:
+                continue
+    except ImportError:
+        pass
+
     return tables, continued_candidates
+
+
+def merge_continued_tables(
+    tables: list[dict[str, Any]],
+    continued_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge consecutive continued tables into unified multi-page tables while preserving per-row page anchors."""
+    if not tables:
+        return []
+    by_id = {t["table_id"]: t for t in tables}
+    # Build continuation chain parent -> child ONLY when 1-to-1 unique (reject ambiguous 1-to-many fan-out!)
+    from_counts: Counter[str] = Counter(str(c.get("from_table_id")) for c in continued_candidates if c.get("from_table_id"))
+    child_to_parent: dict[str, str] = {}
+    for c in continued_candidates:
+        fr = c.get("from_table_id")
+        to = c.get("to_table_id")
+        if fr and to and fr in by_id and to in by_id and fr != to and from_counts[str(fr)] == 1:
+            child_to_parent[to] = fr
+
+    # Resolve root table for each table_id
+    def find_root(tid: str) -> str:
+        cur = tid
+        seen = {cur}
+        while cur in child_to_parent:
+            nxt = child_to_parent[cur]
+            if nxt in seen:
+                break
+            seen.add(nxt)
+            cur = nxt
+        return cur
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for t in tables:
+        rt = find_root(t["table_id"])
+        groups.setdefault(rt, []).append(t)
+
+    merged: list[dict[str, Any]] = []
+    for root_id, parts in groups.items():
+        first = parts[0]
+        raw_headers = list(first.get("headers") or [])
+        # Flatten two-tier headers when first data row looks like sub-headers (mostly non-numeric strings with matching col count)
+        flattened_headers = list(raw_headers)
+        all_rows: list[dict[str, Any]] = []
+        multi_level_header = False
+
+        for p_idx, part in enumerate(parts):
+            pg = part.get("page")
+            rows_p = list(part.get("rows_preview") or [])
+            if p_idx == 0 and len(rows_p) >= 2:
+                r0 = rows_p[0]
+                if len(r0) == len(raw_headers) and all(not re.search(r"\d", str(c)) for c in r0 if str(c).strip()) and any(str(c).strip() for c in r0):
+                    # Heuristic: sub-header row if next row has numeric values
+                    r1 = rows_p[1]
+                    if any(re.search(r"\d", str(c)) for c in r1):
+                        multi_level_header = True
+                        flattened_headers = [
+                            f"{raw_headers[i]} > {r0[i]}".strip(" >") if str(r0[i]).strip() else str(raw_headers[i])
+                            for i in range(len(raw_headers))
+                        ]
+                        rows_p = rows_p[1:]
+            for r in rows_p:
+                # Skip repeated header row on continuation pages
+                if p_idx > 0 and [str(c).strip() for c in r] == [str(h).strip() for h in raw_headers]:
+                    continue
+                all_rows.append({"page": pg, "table_part_id": part["table_id"], "cells": r})
+
+        merged.append({
+            "merged_table_id": f"M_{root_id}",
+            "source_table_ids": [p["table_id"] for p in parts],
+            "pages": sorted({p["page"] for p in parts if p.get("page") is not None}),
+            "is_multi_page_merged": len(parts) > 1,
+            "multi_level_header_flattened": multi_level_header,
+            "caption": first.get("caption", ""),
+            "headers": flattened_headers,
+            "row_count": len(all_rows),
+            "col_count": len(flattened_headers),
+            "rows_with_page_anchors": all_rows[:40],
+        })
+    return merged
 
 
 def extract_formulas_and_symbol_audit(
     blocks: list[dict[str, Any]],
     raw_all_text: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Extract numbered/LaTeX/mathematical formulas and audit fragile scientific symbols."""
+    """Extract display/inline LaTeX, numbered equations, subscript/superscript expressions, and audit fragile symbols."""
     formulas: list[dict[str, Any]] = []
     f_seq = 0
     seen_expr: set[str] = set()
 
-    # 1. Explicit LaTeX display/inline equations and numbered equations per block
     latex_block_re = re.compile(r"\$\$(.+?)\$\$|\\\[(.+?)\\\]|\\begin\{equation\*?\}(.+?)\\end\{equation\*?\}", re.S)
+    inline_latex_re = re.compile(r"(?<!\$)\$(?!\$)([^$\n]{2,120})(?<!\$)\$(?!\$)")
+    sup_sub_expr_re = re.compile(
+        r"(?:[A-Za-zα-ωΑ-ΩΔ]+(?:[_^]\{?[A-Za-z0-9+\-]+\}?|[⁰¹²³⁴⁵⁶⁷⁸⁹⁰⁻¹⁻²]+)\s*(?:[=<>≤≥≈±]\s*[-+]?\d+(?:\.\d+)?(?:\s*[×x*]\s*10[_^]?\{?[-+]?\d+\}?)?|[=]\s*[A-Za-z0-9α-ωΑ-Ω\(\)\+\-\*/\s]{2,40}))"
+    )
     eq_num_re = re.compile(r"(?:^|\s)([A-Za-z0-9α-ωΑ-ΩΔ∑∏∫√_^\(\)\[\]\s\.\+\-\*/=<>≤≥≈±]{5,90})\s*\((\d+(?:\.\d+)?)\)\s*$")
     eq_ref_re = re.compile(r"\b(?:Eq(?:uation)?\.?|Formula)\s*\(?(\d+(?:\.\d+)?)\)?", re.I)
 
@@ -1124,6 +1343,21 @@ def extract_formulas_and_symbol_audit(
                     "kind": "latex_display",
                     "equation_number": None,
                     "expression": expr[:240],
+                    "block_id": b["block_id"],
+                    "source_file": b["source_file"],
+                    "page": b["page"],
+                    "line_span": b["line_span"],
+                })
+        for m in inline_latex_re.finditer(txt):
+            expr = m.group(1).strip()
+            if expr and len(expr) >= 2 and expr not in seen_expr and any(ch in expr for ch in "=^_\\<>+-*/αβγδμλσΔ"):
+                seen_expr.add(expr)
+                f_seq += 1
+                formulas.append({
+                    "formula_id": f"F{f_seq:02d}",
+                    "kind": "inline_latex",
+                    "equation_number": None,
+                    "expression": expr[:200],
                     "block_id": b["block_id"],
                     "source_file": b["source_file"],
                     "page": b["page"],
@@ -1162,6 +1396,62 @@ def extract_formulas_and_symbol_audit(
                     "page": b["page"],
                     "line_span": b["line_span"],
                 })
+        else:
+            # Strict math-density equation extraction (never capture plain narrative prose like "Equation 1 was used...")
+            math_eq_re = re.compile(
+                r"\b(?![np]\s*=)(?:[A-Za-zα-ωΑ-ΩΔ][A-Za-z0-9_α-ωΑ-Ω]{0,12})\s*=\s*"
+                r"(?:[A-Za-z0-9α-ωΑ-ΩΔ\(\)\[\]\.\s]{1,40}[+\-*/×÷^∑∏∫√±≤≥≈][A-Za-z0-9α-ωΑ-ΩΔ\(\)\[\]\.\s+\-*/×÷^]{1,50})"
+            )
+            chem_rxn_re = re.compile(
+                r"(?:[0-9]*[A-Z][a-z]?(?:[0-9₀-₉₊₋⁺⁻]*[A-Z]?[a-z]?[0-9₀-₉₊₋⁺⁻]*)*(?:\s*\+\s*[0-9]*[A-Za-z0-9₀-₉⁺⁻+-]+)*\s*(?:→|⇌|↔|->)\s*[0-9]*[A-Z][A-Za-z0-9₀-₉⁺⁻\s+\-]{1,45})"
+            )
+            for m in chem_rxn_re.finditer(txt):
+                expr = m.group(0).strip()
+                if expr and expr not in seen_expr and len(re.findall(r"\b[A-Za-z]{6,}\b", expr)) <= 1 and len(formulas) < 80:
+                    seen_expr.add(expr)
+                    f_seq += 1
+                    formulas.append({
+                        "formula_id": f"F{f_seq:02d}",
+                        "kind": "chemical_reaction_equation",
+                        "equation_number": None,
+                        "expression": expr[:180],
+                        "block_id": b["block_id"],
+                        "source_file": b["source_file"],
+                        "page": b["page"],
+                        "line_span": b["line_span"],
+                    })
+            for m in math_eq_re.finditer(txt):
+                expr = m.group(0).strip()
+                # Reject narrative prose containing too many long English words (>4 alpha words of len>=5)
+                long_words = re.findall(r"\b[A-Za-z]{5,}\b", expr)
+                if expr and len(long_words) <= 3 and expr not in seen_expr and len(formulas) < 80:
+                    seen_expr.add(expr)
+                    f_seq += 1
+                    formulas.append({
+                        "formula_id": f"F{f_seq:02d}",
+                        "kind": "inline_scientific_equation",
+                        "equation_number": None,
+                        "expression": expr[:180],
+                        "block_id": b["block_id"],
+                        "source_file": b["source_file"],
+                        "page": b["page"],
+                        "line_span": b["line_span"],
+                    })
+            for m in sup_sub_expr_re.finditer(txt):
+                expr = m.group(0).strip()
+                if expr and expr not in seen_expr and len(formulas) < 80:
+                    seen_expr.add(expr)
+                    f_seq += 1
+                    formulas.append({
+                        "formula_id": f"F{f_seq:02d}",
+                        "kind": "superscript_subscript_expr",
+                        "equation_number": None,
+                        "expression": expr[:180],
+                        "block_id": b["block_id"],
+                        "source_file": b["source_file"],
+                        "page": b["page"],
+                        "line_span": b["line_span"],
+                    })
 
     # 2. Symbol fidelity audit (Docling Issue #5469: • vs ·, Greek, math ops, garbled font tokens)
     bullet_u2022 = raw_all_text.count("\u2022")
@@ -1269,8 +1559,12 @@ def build_structural_completeness(
     stripped_headers_footers: list[dict[str, Any]],
 ) -> dict[str, Any]:
     titles_low = [s["title"].lower() for s in section_hierarchy]
-    all_text_head = " ".join(b["text"] for b in blocks[:8]).lower()
-    has_abstract = any("abstract" in t or "摘要" in t for t in titles_low) or ("abstract" in all_text_head)
+    all_text_head = " ".join(
+        b["text"] for b in blocks if b.get("page") in (1, None)
+    )[:16000].lower() or " ".join(b["text"] for b in blocks[:12]).lower()
+    has_abstract = any("abstract" in t or "resumo" in t or "摘要" in t for t in titles_low) or bool(
+        re.search(r"\b(?:abstract|resumo|objective\s*:)\b|摘要", all_text_head)
+    )
     has_refs = any("reference" in t or "bibliography" in t or "参考文献" in t for t in titles_low)
     has_email_or_affil = bool(re.search(r"university|institute|department|laboratory|college|@", all_text_head, re.I))
     return {
@@ -1694,6 +1988,7 @@ def run_pipeline(
                         "reading_text": reading_text,
                         "extraction_method": extraction_method,
                         "layout_requested": extraction.get("layout_requested", False),
+                        "pdfplumber_columns": int(page.get("pdfplumber_columns") or 1),
                     })
                     if reading_text_source == "tesseract":
                         gaps.append({
@@ -1731,12 +2026,51 @@ def run_pipeline(
     deinterleaved_pages_count = sum(1 for lp in layout_pages if lp.get("deinterleaved"))
 
     tables, continued_tables = parse_tabular_data(input_dir, cleaned_pages, text_docs)
+    merged_tables = merge_continued_tables(tables, continued_tables)
     raw_all_text = "\n".join(raw_all_text_parts)
     formulas, symbol_audit = extract_formulas_and_symbol_audit(blocks, raw_all_text)
     page_coverage = build_page_coverage_audit(pdf_sources)
     structural_completeness = build_structural_completeness(
         blocks, section_hierarchy, captions, footnotes, tables, formulas, stripped_hf
     )
+
+    # Honest gap diagnostics: ambiguous 1-to-many continued-table fan-out, glued numeric cells, and empty formulas despite cues
+    from_counts_gap: Counter[str] = Counter(str(c.get("from_table_id")) for c in continued_tables if c.get("from_table_id"))
+    ambig_parents = sorted(k for k, v in from_counts_gap.items() if v > 1)
+    if ambig_parents:
+        gaps.append({
+            "code": "CONTINUED_TABLE_AMBIGUOUS_FANOUT",
+            "source_file": "corpus",
+            "message": f"Skipped ambiguous 1-to-many continued-table fan-out from parent table(s) {ambig_parents}; only unique 1-to-1 continuations are merged.",
+            "impact": "Inspect affected consecutive-page tables manually to confirm true continuation boundaries.",
+        })
+
+    glued_cells: list[str] = []
+    for tbl in tables:
+        for row in (tbl.get("rows_preview") or [])[:15]:
+            for cell in row:
+                cs = str(cell or "")
+                if re.search(r"\b\d+\.\d{4,}\b|\d+(?:\.\d+)?%\d+", cs):
+                    glued_cells.append(f"{tbl['table_id']}:{cs[:32]}")
+                    if len(glued_cells) >= 6:
+                        break
+            if len(glued_cells) >= 6:
+                break
+    if glued_cells:
+        gaps.append({
+            "code": "TABLE_CELL_GLUED_NUMERIC_RISK",
+            "source_file": "corpus",
+            "message": f"Detected potentially glued numeric tokens inside extracted PDF table cells: {glued_cells[:5]}.",
+            "impact": "Verify affected table columns against source PDF before citing exact numbers.",
+        })
+
+    if len(formulas) == 0 and re.search(r"\b(?:Equation|Formula)\s+\d+\b|→|⇌", raw_all_text, re.I):
+        gaps.append({
+            "code": "FORMULA_EXTRACTION_EMPTY_DESPITE_CUES",
+            "source_file": "corpus",
+            "message": "Document text references numbered equations or reaction arrows, but zero clean machine-readable equations were extracted from the native text layer.",
+            "impact": "Verify equation typesetting visually against source PDF pages.",
+        })
 
     if symbol_audit.get("garbled_font_detected"):
         gaps.append({
@@ -1854,6 +2188,7 @@ def run_pipeline(
         "section_hierarchy": section_hierarchy,
         "reading_order_blocks": blocks[:60],
         "tables": tables,
+        "merged_tables": merged_tables,
         "continued_table_candidates": continued_tables,
         "formulas": formulas,
         "captions": captions,
@@ -1876,6 +2211,7 @@ def run_pipeline(
             "section_hierarchy": section_hierarchy,
             "reading_blocks": blocks,
             "tables": tables,
+            "merged_tables": merged_tables,
             "continued_table_candidates": continued_tables,
             "formulas": formulas,
             "captions": captions,

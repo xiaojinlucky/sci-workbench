@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Grounded Scientific Literature Q&A Engine & 7-Gate Zero-Fabrication Validator (challenge-15c85674).
+"""Grounded Scientific Literature Q&A Engine & 10-Gate Semantic Zero-Fabrication Validator (challenge-15c85674).
 
-Capabilities (pure Python 3.12 stdlib; optional pdftotext/pdfinfo for PDF inputs):
+Capabilities (pure Python 3.12 stdlib; reading-order pdftotext -enc UTF-8 with optional pypdf fallback):
 1. Supports /input/case.json (paragraphs, sections, tables, captions, footnotes, paper_text, questions)
-   AND real multi-page PDF documents via page-by-page extraction.
+   AND real single/multi-file multi-page PDF documents via reading-order page extraction (no -layout bleed).
 2. Enforces Four-Stage Observable Coverage Auditing (ingested_pages vs extracted_pages vs
    indexed_paragraphs vs cited_paragraphs + tail_page_coverage_check + table_footnote_coverage_check)
    to prevent silent "first-page-only" failures on long PDFs.
-3. Upgrades retrieval to Okapi BM25 + numeric/SI-unit/entity boosting + table/footnote/tail-page recall
-   + bilingual compound sub-question decomposition + cross-section conflict pre-detection.
-4. Enforces 7 blocking gates in --validate-answers before atomically writing BOTH
-   /app/output/result.json AND /app/answers.json (plus /app/output/answers.json).
+3. Upgrades retrieval to Okapi BM25 + thousands-aware numeric/SI-unit/entity boosting + table/footnote/
+   tail-page recall + bilingual compound sub-question decomposition + cross-section conflict pre-detection.
+4. Enforces 10 blocking gates (7 structural/evidence + 3 semantic gates: reported numeric-core fidelity,
+   inferred reasoning-premise & anti-disguise check, and atomic sub-question coverage grounding) in
+   --validate-answers before atomically writing BOTH /app/output/result.json AND /app/answers.json.
 """
 
 from __future__ import annotations
@@ -33,9 +34,13 @@ import result_guard
 from citation_anchors import (
     detect_cross_section_conflicts,
     extract_emlsi_fingerprint,
+    extract_joint_semantic_bindings,
     extract_numeric_unit_pairs,
+    extract_shortest_verbatim_quote,
     verify_conditions_against_paragraphs,
     verify_exact_quote,
+    verify_inferred_claim_premise,
+    verify_reported_claim_numeric_fidelity,
 )
 
 VALID_ANSWER_STATUSES = {"answered", "partial", "insufficient_evidence", "input_error"}
@@ -101,11 +106,32 @@ ZH_TO_EN_SCI_EXPANSION: dict[str, tuple[str, ...]] = {
     "补充材料": ("supplementary", "appendix"),
     "末页": ("glossary", "appendix", "final"),
     "缩写": ("glossary", "abbreviation", "acronyms"),
+    "术语": ("glossary", "abbreviations", "acronyms", "terminology"),
+    "中毒": ("intoxication", "intoxications", "poisoning", "poisonings", "toxic"),
+    "病例": ("cases", "patients", "individuals"),
+    "男童": ("boys", "male"),
+    "女童": ("girls", "female"),
+    "药物": ("medicine", "medicines", "drug", "drugs", "pharmacovigilance"),
+    "意外": ("accidental", "unintentional"),
+    "趋势": ("trend", "increasing", "stationary", "temporal"),
+    "发病率": ("incidence", "rate", "rates"),
+    "血药浓度": ("serum", "blood", "plasma", "concentration"),
+    "费用": ("cost", "costs", "expense", "expenditure", "fee"),
+    "差值": ("difference", "higher", "lower", "gap"),
+    "相差": ("difference", "higher", "lower", "gap"),
 }
 
 
 def tokenize(text: str) -> list[str]:
-    en = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9._/%-]{1,}", (text or "").lower())
+    en = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9.,_/%-]{1,}", (text or "").lower())
+    # Keep thousands-separated numbers both raw and comma-normalized
+    en_norm: list[str] = []
+    for tok in en:
+        t_clean = tok.strip(".,;")
+        if t_clean:
+            en_norm.append(t_clean)
+            if "," in t_clean and re.fullmatch(r"\d+(?:,\d{3})+(?:\.\d+)?%?", t_clean):
+                en_norm.append(t_clean.replace(",", ""))
     zh = re.findall(r"[\u4e00-\u9fff]{2,4}", text or "")
     zh_chars = re.findall(r"[\u4e00-\u9fff]", text or "")
     zh_bi = [zh_chars[i] + zh_chars[i + 1] for i in range(len(zh_chars) - 1)]
@@ -114,7 +140,7 @@ def tokenize(text: str) -> list[str]:
         for zh_key, en_terms in ZH_TO_EN_SCI_EXPANSION.items():
             if zh_key in text:
                 expanded.extend(en_terms)
-    return [t for t in en + zh + zh_bi + expanded if t not in STOPWORDS]
+    return [t for t in en_norm + zh + zh_bi + expanded if t not in STOPWORDS]
 
 
 def split_subquestions(question_text: str) -> list[str]:
@@ -141,31 +167,98 @@ def split_subquestions(question_text: str) -> list[str]:
     return dedup if dedup else [raw]
 
 
-def _extract_pdf_corpus(pdf_path: Path, start_idx: int = 1) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
-    """Extract page-numbered paragraphs and footnotes from a real PDF with observable page audit."""
+def _dehyphenate_pdf_text(text: str) -> str:
+    """Repair soft line-wrap hyphenations common in two-column academic PDFs."""
+    return re.sub(r"([A-Za-z])-\s*\n\s*([a-z])", r"\1\2", text or "")
+
+
+def _extract_pdf_corpus(
+    pdf_path: Path,
+    start_idx: int = 1,
+    *,
+    doc_prefix: str = "",
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    """Extract reading-order page-numbered paragraphs/tables/footnotes via pdftotext -enc UTF-8 (no -layout) or pypdf fallback."""
     has_pdfinfo = shutil.which("pdfinfo") is not None
     has_pdftotext = shutil.which("pdftotext") is not None
-    if not has_pdftotext:
-        return [], [], {
-            "pdf_file": pdf_path.name,
-            "extractor": "unavailable",
-            "ingested_pages": 0,
-            "extracted_pages": 0,
-            "empty_or_scanned_pages": [],
-            "error": "pdftotext not available",
-        }
 
     total_pages = 0
-    if has_pdfinfo:
+    page_texts: list[tuple[int, str]] = []
+    extractor_used = "unavailable"
+
+    if has_pdftotext:
+        extractor_used = "pdftotext_utf8_reading_order"
+        if has_pdfinfo:
+            try:
+                info = subprocess.check_output(
+                    ["pdfinfo", str(pdf_path)],
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stderr=subprocess.DEVNULL,
+                    timeout=20,
+                )
+                for line in info.splitlines():
+                    if line.lower().startswith("pages:"):
+                        val = line.split(":", 1)[1].strip()
+                        if val.isdigit():
+                            total_pages = int(val)
+            except Exception:
+                total_pages = 0
+
+        if total_pages > 0:
+            for pno in range(1, total_pages + 1):
+                try:
+                    txt = subprocess.check_output(
+                        ["pdftotext", "-enc", "UTF-8", "-f", str(pno), "-l", str(pno), str(pdf_path), "-"],
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        stderr=subprocess.DEVNULL,
+                        timeout=20,
+                    )
+                except Exception:
+                    txt = ""
+                page_texts.append((pno, txt))
+        else:
+            try:
+                full = subprocess.check_output(
+                    ["pdftotext", "-enc", "UTF-8", str(pdf_path), "-"],
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                )
+            except Exception:
+                full = ""
+            raw_pages = full.split("\x0c")
+            if len(raw_pages) > 1 and not raw_pages[-1].strip():
+                raw_pages = raw_pages[:-1]
+            total_pages = max(len(raw_pages), 1)
+            page_texts = [(i, t) for i, t in enumerate(raw_pages, start=1)]
+    else:
         try:
-            info = subprocess.check_output(["pdfinfo", str(pdf_path)], text=True, encoding="utf-8", errors="replace", timeout=20)
-            for line in info.splitlines():
-                if line.lower().startswith("pages:"):
-                    val = line.split(":", 1)[1].strip()
-                    if val.isdigit():
-                        total_pages = int(val)
+            import pypdf  # type: ignore
+
+            reader = pypdf.PdfReader(str(pdf_path))
+            extractor_used = "pypdf_fallback"
+            total_pages = len(reader.pages)
+            for pno, pg in enumerate(reader.pages, start=1):
+                try:
+                    txt = pg.extract_text() or ""
+                except Exception:
+                    txt = ""
+                page_texts.append((pno, txt))
         except Exception:
-            total_pages = 0
+            return [], [], {
+                "pdf_file": pdf_path.name,
+                "extractor": "unavailable",
+                "ingested_pages": 0,
+                "extracted_pages": 0,
+                "empty_or_scanned_pages": [],
+                "error": "Neither pdftotext nor pypdf available",
+            }
 
     paragraphs: list[dict[str, Any]] = []
     sections_seen: list[str] = []
@@ -173,44 +266,36 @@ def _extract_pdf_corpus(pdf_path: Path, start_idx: int = 1) -> tuple[list[dict[s
     extracted_pages = 0
     current_sec = "Page_1"
     p_idx = start_idx - 1
+    pid_pref = f"{doc_prefix}_" if doc_prefix else ""
 
-    page_texts: list[tuple[int, str]] = []
-    if total_pages > 0:
-        for pno in range(1, total_pages + 1):
-            try:
-                txt = subprocess.check_output(
-                    ["pdftotext", "-f", str(pno), "-l", str(pno), str(pdf_path), "-"],
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=20,
-                )
-            except Exception:
-                txt = ""
-            page_texts.append((pno, txt))
-    else:
-        try:
-            full = subprocess.check_output(["pdftotext", str(pdf_path), "-"], text=True, encoding="utf-8", errors="replace", timeout=30)
-        except Exception:
-            full = ""
-        raw_pages = full.split("\x0c")
-        total_pages = max(len(raw_pages), 1)
-        page_texts = [(i, t) for i, t in enumerate(raw_pages, start=1)]
-
-    for pno, ptxt in page_texts:
+    for pno, raw_ptxt in page_texts:
+        ptxt = _dehyphenate_pdf_text(raw_ptxt)
         clean_all = " ".join(ptxt.split())
         if len(clean_all) < 20:
             empty_pages.append(pno)
             continue
         extracted_pages += 1
         raw_chunks = [" ".join(c.split()) for c in re.split(r"\n\s*\n+", ptxt) if " ".join(c.split())]
-        # Merge standalone short labels/acronyms (e.g., two-column glossary keys like "VAERS" + definition)
+
+        # Preserve table cells on table pages without losing thousands-separated numbers (e.g., Table 1)
         merged_chunks: list[str] = []
         idx_c = 0
         while idx_c < len(raw_chunks):
             cur = raw_chunks[idx_c]
-            if re.fullmatch(r"\d{1,4}", cur):
+            if re.fullmatch(r"\d{1,4}", cur) and not (merged_chunks and merged_chunks[-1].lower().startswith("table ")):
                 idx_c += 1
+                continue
+            # Collapse consecutive short table cell tokens following a Table caption into one addressable table block
+            if cur.lower().startswith("table ") and len(cur) >= 12:
+                table_buf = [cur]
+                j = idx_c + 1
+                while j < len(raw_chunks) and len(raw_chunks[j]) <= 45 and len(" ".join(table_buf)) < 2600:
+                    if SECTION_HEADING_RE.match(raw_chunks[j]) and not raw_chunks[j].lower().startswith("table "):
+                        break
+                    table_buf.append(raw_chunks[j])
+                    j += 1
+                merged_chunks.append(" | ".join(table_buf) if len(table_buf) > 1 else cur)
+                idx_c = j
                 continue
             if (
                 len(cur) <= 24
@@ -232,22 +317,23 @@ def _extract_pdf_corpus(pdf_path: Path, start_idx: int = 1) -> tuple[list[dict[s
             is_fn = bool(FOOTNOTE_LINE_RE.match(ch_norm))
             if m_sec and len(ch_norm) <= 100:
                 current_sec = m_sec.group(1).title()
-            block_type = "footnote" if is_fn else ("table" if ch_norm.lower().startswith("table ") else "paragraph")
-            sec_label = "Footnotes" if is_fn else (current_sec or f"Page_{pno}")
+            block_type = "table" if ch_norm.lower().startswith("table ") else ("footnote" if is_fn else "paragraph")
+            sec_label = "Tables" if block_type == "table" else ("Footnotes" if is_fn else (current_sec or f"Page_{pno}"))
             if sec_label not in sections_seen:
                 sections_seen.append(sec_label)
             p_idx += 1
             paragraphs.append({
-                "paragraph_id": f"P{p_idx:03d}_p{pno}",
+                "paragraph_id": f"{pid_pref}P{p_idx:03d}_p{pno}",
                 "section": sec_label,
                 "page": pno,
+                "source_file": pdf_path.name,
                 "block_type": block_type,
                 "text": ch_norm,
             })
 
     pdf_audit = {
         "pdf_file": pdf_path.name,
-        "extractor": "pdftotext",
+        "extractor": extractor_used,
         "ingested_pages": total_pages,
         "extracted_pages": extracted_pages,
         "empty_or_scanned_pages": empty_pages,
@@ -338,28 +424,50 @@ def normalize_corpus(case_data: dict[str, Any], input_dir: Path) -> tuple[list[d
         for idx, chunk in enumerate(re.split(r"\n\s*\n+", case_data["paper_text"]), start=1):
             _add_block(f"P{idx:03d}", "Body", chunk, page=None, block_type="paragraph")
 
-    # PDF ingestion (either explicit pdf_file/source_file or co-located PDF in /input when paragraphs empty)
-    pdf_audit: dict[str, Any] = {}
-    pdf_path: Path | None = None
-    if isinstance(case_data.get("pdf_file"), str):
+    # PDF ingestion (supports explicit pdf_files[], pdf_file/source_file, or co-located PDFs in /input when paragraphs empty)
+    pdf_paths: list[Path] = []
+    if isinstance(case_data.get("pdf_files"), list):
+        for fn in case_data["pdf_files"]:
+            cand = input_dir / str(fn)
+            if cand.is_file() and cand not in pdf_paths:
+                pdf_paths.append(cand)
+    elif isinstance(case_data.get("pdf_file"), str):
         cand = input_dir / case_data["pdf_file"]
         if cand.is_file():
-            pdf_path = cand
+            pdf_paths.append(cand)
     elif isinstance(case_data.get("source_file"), str) and case_data["source_file"].lower().endswith(".pdf"):
         cand = input_dir / case_data["source_file"]
         if cand.is_file():
-            pdf_path = cand
+            pdf_paths.append(cand)
     elif not paragraphs and input_dir.is_dir():
-        pdfs = sorted(input_dir.glob("*.pdf"))
-        if pdfs:
-            pdf_path = pdfs[0]
+        pdf_paths = sorted(input_dir.glob("*.pdf"))
 
-    if pdf_path is not None:
-        pdf_paras, pdf_secs, pdf_audit = _extract_pdf_corpus(pdf_path, start_idx=len(paragraphs) + 1)
-        paragraphs.extend(pdf_paras)
-        for s in pdf_secs:
-            if s not in sections_seen:
-                sections_seen.append(s)
+    pdf_audit: dict[str, Any] = {}
+    pdf_audits_all: list[dict[str, Any]] = []
+    if pdf_paths:
+        total_ingested_pdf = 0
+        total_extracted_pdf = 0
+        all_empty_pdf: list[int] = []
+        multi_pdf = len(pdf_paths) > 1
+        for d_idx, ppath in enumerate(pdf_paths, start=1):
+            pref = f"D{d_idx}" if multi_pdf else ""
+            pdf_paras, pdf_secs, pa = _extract_pdf_corpus(ppath, start_idx=len(paragraphs) + 1, doc_prefix=pref)
+            paragraphs.extend(pdf_paras)
+            for s in pdf_secs:
+                if s not in sections_seen:
+                    sections_seen.append(s)
+            pdf_audits_all.append(pa)
+            total_ingested_pdf += int(pa.get("ingested_pages") or 0)
+            total_extracted_pdf += int(pa.get("extracted_pages") or 0)
+            all_empty_pdf.extend(pa.get("empty_or_scanned_pages") or [])
+        pdf_audit = {
+            "pdf_files": [p.name for p in pdf_paths],
+            "extractor": pdf_audits_all[0].get("extractor", "pdftotext_utf8_reading_order"),
+            "ingested_pages": total_ingested_pdf,
+            "extracted_pages": total_extracted_pdf,
+            "empty_or_scanned_pages": sorted(set(all_empty_pdf)),
+            "per_pdf_audit": pdf_audits_all,
+        }
 
     # Record explicit scanned/empty pages declared in case.json too
     declared_empty_pages = [
@@ -380,13 +488,14 @@ def normalize_corpus(case_data: dict[str, Any], input_dir: Path) -> tuple[list[d
     )
 
     # Tail-page coverage check (last 20% of pages or final 3 paragraphs)
-    if ingested_pages >= 3 and pages_present:
-        tail_start = max(1, ingested_pages - max(1, ingested_pages // 5) + 1)
+    max_single_page = max(pages_present) if pages_present else 0
+    if max_single_page >= 3 and pages_present:
+        tail_start = max(1, max_single_page - max(1, max_single_page // 5) + 1)
         tail_paras = [p for p in paragraphs if isinstance(p.get("page"), int) and p["page"] >= tail_start]
         tail_check = {
-            "tail_pages_range": f"{tail_start}-{ingested_pages}",
+            "tail_pages_range": f"{tail_start}-{max_single_page}",
             "tail_paragraphs_count": len(tail_paras),
-            "final_page_extracted": ingested_pages in pages_present,
+            "final_page_extracted": max_single_page in pages_present,
             "tail_text_present": len(tail_paras) > 0,
         }
     else:
@@ -405,7 +514,7 @@ def normalize_corpus(case_data: dict[str, Any], input_dir: Path) -> tuple[list[d
     }
 
     page_coverage_audit = {
-        "source_mode": "pdf_and_json" if (pdf_path and raw_paras) else ("pdf" if pdf_path else "structured_json"),
+        "source_mode": "pdf_and_json" if (pdf_paths and raw_paras) else ("pdf" if pdf_paths else "structured_json"),
         "ingested_pages": ingested_pages,
         "extracted_pages": extracted_pages,
         "empty_or_scanned_pages": empty_pages,
@@ -415,6 +524,9 @@ def normalize_corpus(case_data: dict[str, Any], input_dir: Path) -> tuple[list[d
         "tail_page_coverage_check": tail_check,
         "table_footnote_coverage_check": table_footnote_check,
     }
+    if pdf_audits_all:
+        page_coverage_audit["pdf_files"] = [p.name for p in pdf_paths]
+        page_coverage_audit["extractor"] = pdf_audit.get("extractor", "pdftotext_utf8_reading_order")
     return paragraphs, sections_seen, page_coverage_audit
 
 
@@ -458,7 +570,8 @@ class BM25Index:
             self.doc_len.append(max(len(toks), 1))
             for tok in tf:
                 self.df[tok] += 1
-            self.doc_nums.append(set(re.findall(r"\b\d+(?:\.\d+)?\b", p["text"])))
+            raw_nums = re.findall(r"\b\d+(?:,\d{3})*(?:\.\d+)?\b", p["text"])
+            self.doc_nums.append(set(raw_nums) | {n.replace(",", "") for n in raw_nums})
             self.doc_units.append({u for _, u, _ in extract_numeric_unit_pairs(p["text"])})
             self.doc_ents.append(set(re.findall(r"\b[A-Z][A-Za-z0-9-]{1,}\b", p["text"])))
 
@@ -468,7 +581,8 @@ class BM25Index:
         if not self.paragraphs:
             return []
         q_tokens = tokenize(query_text)
-        q_nums = set(re.findall(r"\b\d+(?:\.\d+)?\b", query_text))
+        raw_q_nums = re.findall(r"\b\d+(?:,\d{3})*(?:\.\d+)?\b", query_text)
+        q_nums = set(raw_q_nums) | {n.replace(",", "") for n in raw_q_nums}
         q_units = {u for _, u, _ in extract_numeric_unit_pairs(query_text)}
         q_ents = set(re.findall(r"\b[A-Z][A-Za-z0-9-]{1,}\b", query_text))
         want_tail = bool(TAIL_CUE_RE.search(query_text))
@@ -519,6 +633,102 @@ class BM25Index:
         ]
 
 
+def _verify_subquestion_coverage(
+    sub_questions: list[str],
+    ans: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    """Gate 10: Verify every decomposed atomic sub-question has an explicit landing in answer/claims/conditions or unanswered_parts."""
+    status = str(ans.get("status") or "")
+    if status == "input_error" or len(sub_questions) < 2:
+        return True, []
+
+    claims = ans.get("claims") if isinstance(ans.get("claims"), list) else []
+    conds = ans.get("conditions") if isinstance(ans.get("conditions"), list) else []
+    unans = ans.get("unanswered_parts") if isinstance(ans.get("unanswered_parts"), list) else []
+
+    resolved_blob = " ".join([
+        str(ans.get("answer") or ""),
+        " ".join(str(c.get("text") or "") for c in claims if isinstance(c, dict)),
+        " ".join(str(c) for c in conds),
+    ])
+    gap_blob = " ".join(
+        f"{u.get('part', '')} {u.get('reason', '')}" if isinstance(u, dict) else str(u)
+        for u in unans
+    )
+
+    resolved_toks = set(tokenize(resolved_blob))
+    resolved_ents = {e.lower() for e in re.findall(r"\b[A-Za-z][A-Za-z0-9-]{1,}\b", resolved_blob)}
+    all_toks = resolved_toks | set(tokenize(gap_blob))
+    all_ents = resolved_ents | {e.lower() for e in re.findall(r"\b[A-Za-z][A-Za-z0-9-]{1,}\b", gap_blob)}
+
+    # Generic interrogative tokens and bare calendar years do not by themselves prove a sub-question was answered
+    generic_q_toks = {
+        "相比", "分别", "具体", "主要", "哪些", "如何", "多少", "什么", "是否", "区分",
+        "说明", "代表", "全称", "有何", "各是", "人群", "儿童", "reported", "report",
+    }
+
+    def _concept_units(text: str) -> list[tuple[str, set[str]]]:
+        """Extract uninflated semantic concepts (each Chinese/English concept counts once even with bilingual aliases)."""
+        units: list[tuple[str, set[str]]] = []
+        seen_keys: set[str] = set()
+        # 1) Known bilingual scientific concepts first (so '发病率' is 1 concept, not 3 bigrams + 3 English synonyms)
+        matched_zh_keys: list[str] = []
+        for zh_k, en_als in sorted(ZH_TO_EN_SCI_EXPANSION.items(), key=lambda kv: -len(kv[0])):
+            if zh_k in text and zh_k not in generic_q_toks and not any(zh_k in prev for prev in matched_zh_keys):
+                matched_zh_keys.append(zh_k)
+                seen_keys.add(zh_k)
+                units.append((zh_k, {zh_k} | set(en_als)))
+        # 2) English words/acronyms (excluding bare years and stopwords)
+        for w in re.findall(r"[A-Za-z][A-Za-z0-9-]{1,}", text):
+            wl = w.lower()
+            if wl not in STOPWORDS and wl not in generic_q_toks and wl not in seen_keys:
+                seen_keys.add(wl)
+                units.append((wl, {wl}))
+        # 3) Remaining Chinese 2-char content concepts not covered by matched_zh_keys
+        for m in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+            for i in range(0, len(m) - 1, 2):
+                seg = m[i : i + 2]
+                if seg in STOPWORDS or seg in generic_q_toks or any(seg in k for k in matched_zh_keys):
+                    continue
+                if seg not in seen_keys:
+                    seen_keys.add(seg)
+                    units.append((seg, {seg}))
+        return units
+
+    per_sq_concepts = [_concept_units(sq) for sq in sub_questions]
+
+    errors: list[str] = []
+    for idx, (sq, concepts) in enumerate(zip(sub_questions, per_sq_concepts)):
+        if not concepts:
+            continue
+        other_keys: set[str] = set()
+        for j, oth in enumerate(per_sq_concepts):
+            if j != idx:
+                other_keys |= {k for k, _ in oth}
+        unique_concepts = [(k, aliases) for k, aliases in concepts if k not in other_keys]
+        target_concepts = unique_concepts if unique_concepts else concepts
+
+        pool = (resolved_toks | resolved_ents) if status == "answered" else (all_toks | all_ents)
+        pool_raw = resolved_blob.lower() if status == "answered" else (resolved_blob + " " + gap_blob).lower()
+        matched_cnt = 0
+        for _k, aliases in target_concepts:
+            if (aliases & pool) or any(a in pool_raw for a in aliases):
+                matched_cnt += 1
+
+        min_required = 2 if len(target_concepts) >= 3 else 1
+        if matched_cnt < min_required:
+            if status == "answered":
+                errors.append(
+                    f"UNADDRESSED_SUBQUESTION: sub-question {sq!r} has insufficient landing in answer/claims/conditions "
+                    f"(matched {matched_cnt}/{len(target_concepts)} focus concepts, required>={min_required}) despite status='answered'"
+                )
+            else:
+                errors.append(
+                    f"UNADDRESSED_SUBQUESTION: sub-question {sq!r} is missing from both answer/claims and unanswered_parts[]"
+                )
+    return len(errors) == 0, errors
+
+
 def validate_answers_payload(
     payload: dict[str, Any],
     *,
@@ -528,11 +738,12 @@ def validate_answers_payload(
     sections_seen: list[str],
     page_coverage_audit: dict[str, Any],
 ) -> dict[str, Any]:
-    """7-gate zero-fabrication validator over drafted answers payload."""
+    """10-gate semantic zero-fabrication validator over drafted answers payload."""
     errors: list[str] = []
     warnings: list[str] = []
     para_lookup = {p["paragraph_id"]: p["text"] for p in paragraphs}
     para_page = {p["paragraph_id"]: p.get("page") for p in paragraphs}
+    q_lookup = {q["question_id"]: q for q in questions}
 
     # Gate 1: Top-level keys & identity match
     for req_key in ("case_id", "paper_id", "material_version", "answers", "coverage"):
@@ -609,6 +820,7 @@ def validate_answers_payload(
                 errors.append(f"GATE4_MISSING_EVIDENCE: answers[{qid}].claims[{cidx}] kind='reported' requires >=1 verbatim quote")
 
             verified_for_claim = 0
+            claim_verified_quotes: list[str] = []
             for eidx, ev in enumerate(evs):
                 if not isinstance(ev, dict):
                     errors.append(f"GATE3_INVALID_EVIDENCE: answers[{qid}].claims[{cidx}].evidence[{eidx}] must be object")
@@ -632,6 +844,7 @@ def validate_answers_payload(
                         )
                 else:
                     verified_for_claim += 1
+                    claim_verified_quotes.append(quote)
                     cited_pids.add(pid)
                     q_verified_texts.append(para_lookup[pid])
                     if isinstance(para_page.get(pid), int):
@@ -640,12 +853,33 @@ def validate_answers_payload(
             if kind == "reported" and evs and verified_for_claim == 0:
                 errors.append(f"GATE4_NO_VERIFIED_QUOTE: answers[{qid}].claims[{cidx}] has zero verified quotes")
 
+            # Gate 8: Semantic numeric-core fidelity for reported claims (prevents tampered numbers / off-topic quotes)
+            if kind == "reported" and claim_verified_quotes:
+                num_ok, num_errs = verify_reported_claim_numeric_fidelity(str(cl.get("text") or ""), claim_verified_quotes)
+                if not num_ok:
+                    for ne in num_errs:
+                        errors.append(f"GATE8_{ne} (question={qid}, claim={cidx})")
+
+            # Gate 9: Inferred reasoning premise & anti-disguise gate
+            inf_ok, inf_errs = verify_inferred_claim_premise(cl, verified_for_claim)
+            if not inf_ok:
+                for ie in inf_errs:
+                    errors.append(f"GATE9_{ie} (question={qid}, claim={cidx})")
+
         # Gate 6: Conditions numeric/SI unit fidelity against verified cited paragraphs
         if conds and q_verified_texts:
             cond_ok, cond_errs = verify_conditions_against_paragraphs([str(c) for c in conds], q_verified_texts)
             if not cond_ok:
                 for ce in cond_errs:
                     errors.append(f"GATE6_{ce} (question={qid})")
+
+        # Gate 10: Atomic sub-question coverage grounding check
+        q_meta = q_lookup.get(qid)
+        if q_meta:
+            sq_ok, sq_errs = _verify_subquestion_coverage(q_meta.get("sub_questions") or [], ans)
+            if not sq_ok:
+                for se in sq_errs:
+                    errors.append(f"GATE10_{se} (question={qid})")
 
     # Gate 7: Coverage honesty check
     cov = payload.get("coverage")
@@ -734,12 +968,32 @@ def build_retrieval_pack_and_skeleton(
 
         top_hits = index.query(qtext, top_k=8)
         subq_hits: list[dict[str, Any]] = []
+        subq_draft_anchors: list[dict[str, Any]] = []
         merged_pool: dict[str, dict[str, Any]] = {h["paragraph_id"]: h for h in top_hits if h["score"] > 0}
 
-        for sq in subqs:
+        for sq_idx, sq in enumerate(subqs, start=1):
             sh = index.query(sq, top_k=3)
             pos_sh = [h for h in sh if h["score"] > 0]
-            subq_hits.append({"sub_question": sq, "candidates": pos_sh})
+            drafted_anchor: dict[str, Any] | None = None
+            if pos_sh:
+                best_h = pos_sh[0]
+                s_quote = extract_shortest_verbatim_quote(best_h["text"], sq, max_len=220)
+                drafted_anchor = {
+                    "sub_question_index": sq_idx,
+                    "sub_question": sq,
+                    "paragraph_id": best_h["paragraph_id"],
+                    "page": best_h.get("page"),
+                    "section": best_h.get("section", ""),
+                    "shortest_quote": s_quote,
+                    "quote_verified": verify_exact_quote(s_quote, best_h["text"]),
+                    "joint_bindings": extract_joint_semantic_bindings(s_quote),
+                }
+                subq_draft_anchors.append(drafted_anchor)
+            subq_hits.append({
+                "sub_question": sq,
+                "drafted_anchor": drafted_anchor,
+                "candidates": pos_sh,
+            })
             for h in pos_sh:
                 merged_pool.setdefault(h["paragraph_id"], h)
 
@@ -777,6 +1031,7 @@ def build_retrieval_pack_and_skeleton(
             "question_id": qid,
             "question": qtext,
             "sub_questions": subqs,
+            "subquestion_draft_anchors": subq_draft_anchors,
             "candidates": top_hits,
             "subquestion_candidates": subq_hits,
             "tail_page_hits": tail_hits,
@@ -784,18 +1039,34 @@ def build_retrieval_pack_and_skeleton(
             "conflict_candidates": conflicts,
         })
 
-        # Safe grounded skeleton answer
+        # Safe grounded skeleton answer using shortest verbatim quotes per atomic sub-question
         positive_hits = sorted(merged_pool.values(), key=lambda x: -x["score"])
         claims: list[dict[str, Any]] = []
         conds: list[str] = []
-        for h_idx, h in enumerate(positive_hits[:3], start=1):
-            quote = _extract_short_quote(h["text"])
+        seen_skeleton_pairs: set[tuple[str, str]] = set()
+        for anc in subq_draft_anchors:
+            sq_q = anc["shortest_quote"]
+            sq_pid = anc["paragraph_id"]
+            if not sq_q or (sq_pid, sq_q) in seen_skeleton_pairs:
+                continue
+            seen_skeleton_pairs.add((sq_pid, sq_q))
             claims.append({
-                "claim_id": f"{qid}-C{h_idx}",
-                "text": f"Candidate grounded excerpt from {h['paragraph_id']} ({h['section']}): {quote}",
+                "claim_id": f"{qid}-C{len(claims) + 1}",
+                "sub_question": anc["sub_question"],
+                "text": f"Candidate grounded excerpt from {sq_pid} ({anc['section']}): {sq_q}",
                 "kind": "reported",
-                "evidence": [{"paragraph_id": h["paragraph_id"], "quote": quote}],
+                "evidence": [{"paragraph_id": sq_pid, "quote": sq_q}],
             })
+        if not claims:
+            for h_idx, h in enumerate(positive_hits[:3], start=1):
+                quote = extract_shortest_verbatim_quote(h["text"], qtext, max_len=220) or _extract_short_quote(h["text"])
+                claims.append({
+                    "claim_id": f"{qid}-C{h_idx}",
+                    "text": f"Candidate grounded excerpt from {h['paragraph_id']} ({h['section']}): {quote}",
+                    "kind": "reported",
+                    "evidence": [{"paragraph_id": h["paragraph_id"], "quote": quote}],
+                })
+        for h in positive_hits[:3]:
             conds.extend(h["emlsi"].get("S_scope_conditions", []))
         conds = sorted(set(conds))[:8]
 
@@ -1019,7 +1290,7 @@ def run_pipeline(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Harbor challenge-15c85674 Literature QA & 7-gate validator.")
+    parser = argparse.ArgumentParser(description="Harbor challenge-15c85674 Literature QA & 10-gate semantic validator.")
     parser.add_argument("--input", default="", help="Input directory (auto-detects /input or /app/input).")
     parser.add_argument("--output", default="", help="Output directory (auto-detects /app/output or /output).")
     parser.add_argument("--work", default="", help="Work directory (auto-detects /app/work or cwd).")

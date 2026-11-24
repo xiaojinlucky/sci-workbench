@@ -21,19 +21,20 @@ Locate sibling files relative to this `SKILL.md` directory:
 
 ## 3. Execution Workflow
 
-### Step 1: Preflight, Budget Init & Deterministic Corpus Extraction
-Run the offline stdlib scripts (supports JSON, MD, TXT, CSV, and PDF via `pdftotext` with page-aware paragraph IDs `doc:p{page}-b{block}`):
+### Step 1: Preflight, Budget Init & Deep Deterministic Corpus Extraction
+Run the offline stdlib scripts (supports JSON, MD, TXT, CSV, and PDF via reading-flow `pdftotext -enc UTF-8` with `pypdf`/`pdfplumber` fallback, preserving two-column reading order, thousands-separated sample sizes like `n=5,539`/`n=1,010`, and page-aware paragraph IDs `doc:p{page}-b{block}`):
 ```bash
 python3 scripts/preflight_probe.py --out /app/work/env.json
 python3 scripts/budget_guard.py --init
 python3 scripts/comparison_matrix_builder.py --input /input --output /app/output --work /app/work
 ```
-**What Step 1 produces**:
-- Inventories every corpus document with SHA-256 hash, DOI (extracted strictly from metadata/header, never reference lists), page count, extraction status, and full paragraph map (`/app/work/corpus_paragraphs.json`).
+**What Step 1 produces (zero manual hand-off)**:
+- Inventories every corpus document with SHA-256 hash, DOI (extracted strictly from metadata/Page-1 header, never reference lists), page count, extraction status, and full paragraph map (`/app/work/corpus_paragraphs.json`).
 - Runs `dedup_context_guard.py` to detect exact-hash duplicates and preprint/published pairs (`version_mapping`), upgrade preprints to Version-of-Record, preserve same-DOI distinct experimental arms (`context_conflicts`), and exclude off-topic distractors (`out_of_scope_excluded`).
 - Builds an immutable **Citation Legend** (`[1]..[N]` -> `source_document_id`, `title`, `doi`, `source_file`, `file_sha256`, `version_status`) so multi-document indices stay stable across 5 to 50+ sources.
-- Extracts initial common-field cells, functional method rows, 6-axis pairwise comparability sets (`comparable_subgroups`, `noncomparable_pairs`, `indeterminate_pairs`), unit normalization advisories, and preliminary conflict attributions.
-- Writes initial `/app/output/result.json`, `/app/output/comparison_matrix.md`, and `/app/output/comparability_audit.json`.
+- Automatically extracts **7 deep structured common fields** directly from unstructured academic prose AND key-value documents—① `study_object` (cohort/population/material/reaction), ② `dataset_and_sample_size` (named database + exact `n=` with thousands commas + time window), ③ `method_operations` (functional primitives + three-state `fact_tag`), ④ `experimental_conditions` (dosage/potential/media/geography/budget), ⑤ `metrics_and_values` (condition-scoped `(metric, value, unit, condition_context)` records preventing cross-condition conflation), ⑥ `main_conclusion` (direction + grounded finding), ⑦ `limitations` (author caveats/missingness)—alongside all 6 comparability axes `{task, metric, units, material, pollutant, budget}`, with every non-`not_reported` cell anchored to `(source_document_id, paragraph_id, quote)` and verified for numeric-stem containment inside `quote`.
+- Runs 6-axis pairwise comparability (`comparable_subgroups`, `noncomparable_pairs`, `indeterminate_pairs`), non-mutating unit normalization advisories, and structured conflict attribution (`sample_diff`, `method_diff`, `condition_diff`, `metric_or_unit_diff`, `unattributable`).
+- Writes `/app/output/result.json`, `/app/output/comparison_matrix.md`, and `/app/output/comparability_audit.json`.
 
 **Step 1 completion criterion**: `env.json`, `corpus_paragraphs.json`, `result.json`, `comparison_matrix.md`, and `comparability_audit.json` all exist, and `document_inventory` accounts for every file under `/input`.
 
@@ -75,7 +76,7 @@ For every effective (canonical, in-scope) document:
 | --- | --- | --- |
 | `consensus` | >=2 independent studies agree in direction under aligned comparability axes. | `topic`, `rationale`, verbatim anchored `positions[]` from all agreeing papers. |
 | `partial_agreement` | Studies share core direction but differ in magnitude, boundary condition, or subgroup scope. | `topic`, `rationale` naming divergence boundary, anchored `positions[]`. |
-| `conflicts` | Studies report opposite directions or incompatible effects on the same question. | `topic`, `attribution_dimensions[]` from `{sample, method, condition, metric, unattributable}`, `attribution_rationale`, and verbatim `(citation_tag, source_document_id, paragraph_id, quote)` from EVERY opposing side. |
+| `conflicts` | Studies report opposite directions or >25% divergent magnitudes on the same metric. | `topic`, `attribution_dimensions[]` from `{sample_diff, method_diff, condition_diff, metric_or_unit_diff, unattributable}`, `attribution_rationale`, and verbatim `(citation_tag, source_document_id, paragraph_id, quote)` from EVERY opposing side. |
 
    - Retain conflicting conclusions side by side; never resolve scientific conflicts by majority vote or naive cross-study averaging.
 
@@ -101,13 +102,14 @@ python3 scripts/comparison_matrix_builder.py \
   --work /app/work \
   --validate-matrix /app/work/matrix_draft.json
 ```
-The validator enforces four blocking checks and exits with code `1` on any violation:
+The validator enforces five blocking checks and exits with code `1` on any violation:
 
 | Blocking Error Code | Trigger Condition | Required Fix |
 | --- | --- | --- |
 | `CROSS_PAPER_BLEED` / `ROW_CELL_DOC_MISMATCH` | Cell's `paragraph_id` belongs to a different `source_document_id`. | Re-anchor cell strictly to its own document's paragraph or mark `not_reported`. |
 | `UNKNOWN_PARAGRAPH_ID` / `REPORTED_CELL_MISSING_PARAGRAPH_ID` | Reported cell lacks a valid `paragraph_id` from `corpus_paragraphs.json`. | Supply exact `paragraph_id` from Step 1 index. |
 | `QUOTE_NOT_FOUND_IN_PARAGRAPH` | Cell or conflict `quote` is not a whitespace-normalized substring of the target paragraph. | Copy verbatim excerpt without paraphrasing or stitching across paragraphs. |
+| `NUMERIC_VALUE_NOT_IN_QUOTE` | Any numeric stem (including thousands-separated counts like `5,539`) in a non-`not_reported` cell's `value`/`raw_value` does not appear verbatim in its own `quote`. | Align `value` strictly with the quoted paragraph numbers; zero cross-cell number smuggling or fabrication. |
 | `ILLEGAL_POOLING_DETECTED` | `quantitative_synthesis` pools `noncomparable_pairs`, `indeterminate_pairs`, `duplicate_superseded`, `out_of_scope_excluded`, or `< 2` docs. | Remove illegal pooled estimate; restrict pooling strictly to verified `comparable_subgroups`. |
 | `CITATION_LEGEND_DRIFT` / `DANGLING_CITATION_NUMBER` | `[n]` citation number is missing, duplicated, or points to another document in `citation_legend`. | Restore exact `[1]..[N]` mapping from Step 1 `citation_legend`. |
 

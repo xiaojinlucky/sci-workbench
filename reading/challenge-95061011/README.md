@@ -3,8 +3,9 @@
 An offline, zero-dependency Python 3.12 skill for multi-paper comparison, functional method alignment, six-axis comparability gating, and conflict attribution under Harbor Organizer Revision v2.
 
 ## Capabilities
-1. **Multi-Format Offline Corpus Ingestion**: Reads `/input/comparison-workorder.json`, `/input/case.json`, and corpus files in `.pdf` (via `pdftotext` with page-aware paragraph IDs), `.json`, `.md`, `.txt`, and `.csv`.
-2. **Document Identity, Preprint Deduplication & Scope Filtering (`scripts/dedup_context_guard.py`)**:
+1. **Multi-Format Reading-Flow Offline Ingestion**: Reads `/input/comparison-workorder.json`, `/input/case.json`, and corpus files in `.pdf` (via reading-flow `pdftotext -enc UTF-8` with `pypdf`/`pdfplumber` fallback, zero two-column interleaving, preserving thousands-separated sample sizes like `n=5,539`/`n=1,010`), `.json`, `.md`, `.txt`, and `.csv`.
+2. **Deep Automatic 7-Field Prose Extraction Engine (Zero Manual Handoff)**: Directly extracts `study_object`, `dataset_and_sample_size`, `method_operations`, `experimental_conditions`, condition-scoped `metrics_and_values`, `main_conclusion`, and `limitations` alongside all 6 comparability axes from unstructured real papers, grounding every cell to `(source_document_id, paragraph_id, quote)`.
+3. **Document Identity, Preprint Deduplication & Scope Filtering (`scripts/dedup_context_guard.py`)**:
    - Detects exact content duplicates, DOI matches, and preprint-vs-version-of-record pairs (`version_mapping`), preventing double counting of revised manuscripts.
    - Preserves distinct experimental contexts under the same DOI via strict context-signature locking.
    - Identifies off-topic distractor documents (`out_of_scope_excluded`) with transparent audit rationale.
@@ -15,8 +16,8 @@ An offline, zero-dependency Python 3.12 skill for multi-paper comparison, functi
    - Evaluates `{task, metric, units, material, pollutant, budget}` pairwise before allowing quantitative synthesis.
    - Provides explicit unit normalization advisories without mutating raw values or units.
    - Separates `comparable_subgroups` (strict cliques), `noncomparable_pairs` (confirmed axis mismatch), and `indeterminate_pairs` (unreported axis blocking pooling).
-6. **Three-Column Consensus / Partial Agreement / Conflict Attribution Matrix**: Preserves opposing conclusions side by side with attribution dimensions (`sample`, `method`, `condition`, `metric`, `unattributable`) and verbatim `(source_document_id, paragraph_id, quote)` anchors.
-7. **Cross-Paper Bleed & Pooling Validator (`--validate-matrix`)**: Rejects cross-paper paragraph bleed, ungrounded quotes, illegal pooling of noncomparable/indeterminate pairs, and Citation Legend drift.
+7. **Three-Column Consensus / Partial Agreement / Conflict Attribution Matrix**: Preserves opposing conclusions and same-metric numeric divergences side by side with structured attribution (`sample_diff`, `method_diff`, `condition_diff`, `metric_or_unit_diff`, `unattributable`) and verbatim `(source_document_id, paragraph_id, quote)` anchors.
+8. **Cross-Paper Bleed, Numeric-Stem & Pooling Validator (`--validate-matrix`)**: Rejects cross-paper paragraph bleed, ungrounded quotes, `NUMERIC_VALUE_NOT_IN_QUOTE` (any numeric stem in a non-`not_reported` cell missing from its own quote), illegal pooling of noncomparable/indeterminate pairs, and Citation Legend drift.
 
 ## Directory Layout
 - `SKILL.md`: Primary execution protocol for the agent.

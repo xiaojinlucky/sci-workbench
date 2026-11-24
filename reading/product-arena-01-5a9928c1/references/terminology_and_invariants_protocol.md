@@ -38,7 +38,9 @@ Real literature workflows frequently corrupt bibliographic records when translat
   - Electrical: `kV`, `V`, `mV`, `μV`, `A`, `mA`, `μA`
   - Concentration: `M`, `mM`, `μM`, `nM`, `pM`, `mg/L`, `μg/L`, `mg/kg`, `mg/mL`, `ppm`, `ppb`, `wt%`, `vol%`
   - Pressure/Energy/Frequency/Temp: `Pa`, `kPa`, `MPa`, `GPa`, `eV`, `keV`, `MeV`, `J`, `kJ`, `Hz`, `kHz`, `MHz`, `GHz`, `°C`/`℃`, `K`
-  - Each `(normalized_value, canonical_unit)` pair in `source_en` must match `target_zh` in count, canonical unit, and value. A change such as `5 mg` -> `5 μg`, `50 mV` -> `50 V`, `10 μm` -> `10 nm`, or `25 °C` -> `25 K` is a **blocking error**.
+  - Compound & rate units: `mA cm^-2` / `mA/cm2`, `A cm^-2`, `mV dec^-1`, `mg cm^-2`, `g cm^-3`, `mol L^-1`, `inhabitants/km2`, and rate-per-10k denominators (`/10,000` == `/万` == `每万`).
+  - Thousands-separated sample sizes (`n=1,010`, `n=5,539`) are audited as exact integer multisets so commas never trigger truncation (`n=1,010` -> `n=1`).
+  - Each `(normalized_value, canonical_unit)` pair in `source_en` must match `target_zh` in count, canonical unit, and value. A change such as `5 mg` -> `5 μg`, `10 mA cm^-2` -> `10 A cm^-2`, `50 mV` -> `50 V`, `10 μm` -> `10 nm`, or `25 °C` -> `25 K` is a **blocking error**.
 - **Ranges & Statistical Expressions**:
   - Preserve `±` uncertainties, `95% CI`, `p < 0.05` / `P = 0.001`, `n = ...`, and numeric intervals (`10–20`, `10-20`).
 
@@ -59,3 +61,12 @@ Real literature workflows frequently corrupt bibliographic records when translat
   - Chinese hedge cues: `可能`, `或许`, `提示`, `表明可能`, `约`, `大约`, `仅`, `主要`, `局限于`, `潜在`, `倾向于`.
   - Chinese certainty upgrade blacklist: `确切证明`, `充分证明`, `完全证明`, `证实了`, `确定无疑`, `必然导致`, `肯定会`, `彻底解决`, `绝对`.
   - When a source sentence uses tentative modal language (`may/might/could/suggests`) and has no certainty verb (`prove/confirm/establish`), translating it with a Chinese certainty-upgrade term is flagged as a **blocking `modal_upgrade_drift` error**.
+
+## 6. Sentence-Density & Logical Discourse Connector Invariants
+
+- **Sentence Count & EN-Word/ZH-Char Information Density**:
+  - For substantial paragraphs (`en_words >= 30`), `bilingual_alignment_guard.py` checks sentence count alignment and `zh_chars / en_words` density ratio. A ratio `< 0.78` or severe sentence collapse (`en_sentences >= 3` reduced to `<= en_sentences // 3` with ratio `< 1.25`) triggers a blocking `IMPLICIT_OMISSION_OR_SUMMARY_COLLAPSE` error.
+- **Logical Discourse Connector Conservation**:
+  - Contrast/concession markers (`However`, `Whereas`, `Although`, `While`, `Despite`, `Conversely`, `Nevertheless`) must retain explicit Chinese contrast/concession markers (`然而`, `相比之下`, `尽管`, `虽然`, `相反`, `却`, `但`).
+  - Causality/consequence markers (`Because`, `Therefore`, `Thus`, `Hence`, `Consequently`, `Due to`) must retain explicit Chinese causality/consequence markers (`因为`, `由于`, `因此`, `从而`, `导致`, `由此`).
+  - Dropping either logical relation class triggers a blocking `DISCOURSE_LOGIC_DRIFT` error.

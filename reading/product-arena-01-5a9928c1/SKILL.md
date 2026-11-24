@@ -28,15 +28,19 @@ require no network access.
 2. **Two-Stage Terminology Lock**: Extract candidate domain terms first, freeze canonical
    Chinese/English mappings in `/app/work/glossary.json`, and enforce those exact mappings
    across Title, Abstract, Headings, Body, Table Headers, and Figure Captions.
-3. **1:1 Paragraph & Section Anchoring**: Preserve every immutable `paragraph_id` in original
-   order with zero dropped, duplicated, merged, or reordered paragraphs. For multi-page or
-   multi-column PDFs, record page extraction coverage and carry the prior 2 sentences plus
-   active glossary into each chunk so cross-page sentences join cleanly.
-4. **Quantitative, Formula, Citation & Logic Conservation**: Preserve all numbers, Chinese/English
-   magnitude multipliers (`1.5万` = `15,000`, `2.3亿` = `230 million`), SI units paired with
-   their exact values (`5 mg` stays `5 mg`, never `5 μg`), ranges (`±`, `95% CI`), LaTeX/Greek
-   symbols, figure/table tags (`Fig. 2B`, `Table 1`), citation markers (`[1, 2]`, `\cite{}`),
-   negation polarity (`not/never/rarely/without/failed`), and modal hedges (`may/suggests/could`
+3. **1:1 Paragraph, Sentence-Density & Section Anchoring**: Preserve every immutable `paragraph_id` in original
+   order with zero dropped, duplicated, merged, or reordered paragraphs, and maintain faithful sentence count
+   and EN-word-to-ZH-char information density (blocking implicit half-sentence omission or summary collapse).
+   For multi-page or multi-column PDFs, extract in reading order via `pdftotext -enc UTF-8` (without `-layout`,
+   with optional `pypdf` fallback) to avoid cross-column bleed, record page extraction coverage, and carry
+   the prior 2 sentences plus active glossary into each chunk so cross-page sentences join cleanly.
+4. **Quantitative, Compound-Unit, Formula, Citation & Discourse-Logic Conservation**: Preserve all numbers
+   including thousands-separated sample sizes (`n=1,010`, `n=5,539`), rate denominators (`55.69/10,000`),
+   Chinese/English magnitude multipliers (`1.5万` = `15,000`, `2.3亿` = `230 million`), simple and compound
+   SI units paired with their exact values (`5 mg`, `10 mA cm^-2`, `60 mV dec^-1`, `600.83 inhabitants/km2`),
+   ranges (`±`, `95% CI`), LaTeX/Greek symbols, figure/table tags (`Fig. 2B`, `Table 1`), citation markers
+   (`[1, 2]`, `\cite{}`), negation polarity (`not/never/rarely/without/failed`), discourse connectors
+   (`However/Whereas/Although/While/Despite/Because/Therefore`), and modal hedges (`may/suggests/could`
    must never be upgraded to certainty words such as “证明/确定/必然”).
 5. **Explanatory Fluency with Term Anchoring**: Unpack dense English clauses into natural
    academic Chinese, explicitly restoring omitted logical connectors (`While`, `However`,
@@ -145,15 +149,18 @@ python3 scripts/bilingual_alignment_guard.py --audit \
   --glossary /app/work/glossary.json \
   --out-json /app/work/alignment_audit.json \
   --emit-result /app/output/result.json \
-  --emit-markdown /app/output/translation_bilingual.md
+  --emit-markdown /app/output/translation_bilingual.md \
+  --export-glossary-csv /app/output/glossary.csv
 ```
 
 The audit fails (exit code `1`) on any blocking violation:
 - Bibliography identity overwrite (`source_title`, `authors`, `doi`, `item_id`) or cross-item leak
 - Missing, duplicated, or reordered `paragraph_id`
+- Implicit half-sentence omission or summary collapse (`sentence_density_drift`: abnormal sentence count or EN-word/ZH-char density drop)
+- Dropped contrast/concession or causality/consequence discourse connectors (`discourse_logic_drift`)
 - Terminology canonical mismatch or `forbidden_variants` hit in any paragraph
-- Numeric mismatch or broken Chinese/English magnitude conversion
-- SI unit drift or value-to-unit swap (for example `5 mg` vs `5 μg`, `50 mV` vs `50 V`, `25 °C` vs `25 K`)
+- Numeric mismatch, thousands-separated sample-size truncation (`n=1,010`), or broken Chinese/English magnitude conversion
+- Simple or compound SI unit drift or value-to-unit swap (for example `5 mg` vs `5 μg`, `10 mA cm^-2` vs `10 A cm^-2`, `55.69/10,000`, `25 °C` vs `25 K`)
 - Formula/LaTeX/Greek symbol, figure/table tag, or citation marker drift
 - Negation polarity flip or epistemic hedge upgrade into certainty claims
 

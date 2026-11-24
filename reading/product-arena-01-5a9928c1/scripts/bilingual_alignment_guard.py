@@ -5,21 +5,27 @@ Modes:
   1. --prepare: Reads /input/case.json (and PDF/Markdown/TXT under /input), creates immutable
      paragraph anchors (/app/work/source_segments.json), locks source bibliography identity
      (/app/work/source_metadata_lock.json), extracts terminology candidates
-     (/app/work/glossary_candidates.json), and initializes /app/output/result.json.
+     (/app/work/glossary_candidates.json), optionally exports starter CSV (--export-glossary-csv),
+     and initializes /app/output/result.json.
   2. --audit: Audits a drafted translation JSON (--draft) or legacy source/target files
      (--source / --target) against bibliography identity locks, cross-item contamination,
-     1:1 paragraph completeness, glossary consistency, numbers + CN/EN magnitudes,
-     SI unit-value pairing, formulas/Greek symbols, citations, figure/table tags,
-     negation polarity, and modal hedge preservation; optionally emits final
-     /app/output/result.json and /app/output/translation_bilingual.md.
+     1:1 paragraph completeness, sentence-count & information-density alignment, discourse
+     connector (concession/contrast/causality) fidelity, glossary consistency, thousands-separated
+     numbers & sample sizes (n=1,010) + CN/EN magnitudes, simple & compound SI unit-value pairing
+     (e.g., mA cm^-2, mV dec^-1, inhabitants/km2, /10,000), formulas/Greek symbols, citations,
+     figure/table tags, negation polarity, and modal hedge preservation; optionally emits final
+     /app/output/result.json, /app/output/translation_bilingual.md, and reusable glossary CSV.
 
-Pure Python 3.12 standard library (uses optional pdftotext/pdfinfo when available).
+Pure Python 3.12 standard library (uses reading-order pdftotext -enc UTF-8 with optional pypdf
+fallback when available).
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import math
 import re
@@ -59,7 +65,7 @@ SCI_NUM_RE = re.compile(
     r"(?<![A-Za-z0-9_])(-?\d+(?:\.\d+)?)\s*(?:[×xX*]\s*10\s*\^?\s*\{?\s*([+-]?\d+)\s*\}?|[eE]([+-]?\d+))(?![A-Za-z0-9_])"
 )
 MAG_NUM_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|万|亿|千|thousand|million|billion)?(?![A-Za-z0-9_])",
+    r"(?<![A-Za-z0-9_])(-?\d+(?:,\d{3})*(?:\.\d+)?)(?:\s*(%)|\s*(万|亿|千|thousand|million|billion)(?![A-Za-z0-9_])|(?![A-Za-z0-9_]))",
     re.I,
 )
 
@@ -145,13 +151,74 @@ NUMBER_WITH_UNIT_RE = re.compile(
     rf"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{{3}})*(?:\.\d+)?)\s*(?P<magnitude>万|亿|千|(?i:thousand|million|billion))?\s*(?P<unit>{UNIT_PATTERN})(?![A-Za-zµμ/])"
 )
 
+# Compound scientific SI units (electrochemistry, catalysis, epidemiology, materials)
+# Strictly separates negative exponents (e.g., cm^-2 / cm⁻² / /cm2) from positive exponents
+# (e.g., cm^2 / cm2 / cm²) into distinct canonical unit buckets so exponent sign flips are caught.
+COMPOUND_UNIT_SPECS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # Negative-exponent / per-area electrochemistry & flux units (must require explicit '-' or '/')
+    ("mA/cm2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>mA\s*(?:·|\*)?\s*cm\s*(?:\^\s*-\s*2|-\s*2|⁻²)|mA\s*/\s*cm(?:\^\s*\+?2|²|2))(?![A-Za-z0-9])")),
+    ("mA*cm2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>mA\s*(?:·|\*)?\s*cm\s*(?:\^\s*\+?2|²|2))(?![A-Za-z0-9])")),
+    ("A/cm2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>A\s*(?:·|\*)?\s*cm\s*(?:\^\s*-\s*2|-\s*2|⁻²)|A\s*/\s*cm(?:\^\s*\+?2|²|2))(?![A-Za-z0-9])")),
+    ("A*cm2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>A\s*(?:·|\*)?\s*cm\s*(?:\^\s*\+?2|²|2))(?![A-Za-z0-9])")),
+    ("mV/dec", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>mV\s*(?:·|\*)?\s*dec\s*(?:\^\s*-\s*1|-\s*1|⁻¹)|mV\s*/\s*dec)(?![A-Za-z0-9])", re.I)),
+    ("mV*dec", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>mV\s*(?:·|\*)?\s*dec\s*(?:\^\s*\+?1|¹))(?![A-Za-z0-9])", re.I)),
+    ("mg/cm2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>mg\s*(?:·|\*)?\s*cm\s*(?:\^\s*-\s*2|-\s*2|⁻²)|mg\s*/\s*cm(?:\^\s*\+?2|²|2))(?![A-Za-z0-9])")),
+    ("mg*cm2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>mg\s*(?:·|\*)?\s*cm\s*(?:\^\s*\+?2|²|2))(?![A-Za-z0-9])")),
+    ("g/cm3", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>g\s*(?:·|\*)?\s*cm\s*(?:\^\s*-\s*3|-\s*3|⁻³)|g\s*/\s*cm(?:\^\s*\+?3|³|3))(?![A-Za-z0-9])")),
+    ("g*cm3", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>g\s*(?:·|\*)?\s*cm\s*(?:\^\s*\+?3|³|3))(?![A-Za-z0-9])")),
+    ("M", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>mol\s*(?:·|\*)?\s*L\s*(?:\^\s*-\s*1|-\s*1|⁻¹)|mol\s*/\s*L)(?![A-Za-z0-9])")),
+    ("mol*L", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>mol\s*(?:·|\*)?\s*L\s*(?:\^\s*\+?1|¹))(?![A-Za-z0-9])")),
+    ("inhabitants/km2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>(?:inhabitants|persons?|people)\s*/\s*km(?:\^\s*\+?2|²|2)|人\s*/\s*(?:km(?:\^\s*\+?2|²|2)|平方公里|平方千米))(?![A-Za-z0-9])", re.I)),
+    ("per_10k", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>/\s*10,?000(?:\s*(?:inhabitants|人|名居民|居民))?|/\s*(?:1\s*)?万(?:人|名居民|居民)?)(?![A-Za-z0-9])", re.I)),
+    # Standalone inverse-area / inverse-volume vs positive area / volume (negative MUST run before positive)
+    ("cm^-2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>/\s*cm(?:\^\s*\+?2|²|2)|cm\s*(?:\^\s*-\s*2|-\s*2|⁻²))(?![A-Za-z0-9])")),
+    ("cm^2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>cm\s*(?:\^\s*\+?2|²|2)|平方厘米)(?![A-Za-z0-9])")),
+    ("cm^-3", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>/\s*cm(?:\^\s*\+?3|³|3)|cm\s*(?:\^\s*-\s*3|-\s*3|⁻³))(?![A-Za-z0-9])")),
+    ("cm^3", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>cm\s*(?:\^\s*\+?3|³|3)|立方厘米)(?![A-Za-z0-9])")),
+    ("m^-2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>/\s*m(?:\^\s*\+?2|²|2)|m\s*(?:\^\s*-\s*2|-\s*2|⁻²))(?![A-Za-z0-9])")),
+    ("m^2", re.compile(r"(?<![A-Za-z0-9_])(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>m\s*(?:\^\s*\+?2|²|2)|平方米)(?![A-Za-z0-9])")),
+)
+
+# Standalone compound-unit exponent tokens to mask out before scalar number extraction
+COMPOUND_EXP_NOISE_RE = re.compile(
+    r"\b(?:cm|km|mm|m|L|dec)\s*(?:\^\s*[+-]?\s*\d+|-\s*\d+|[⁻⁺²³¹]+)\b",
+    re.I,
+)
+
+# Explicit sample size tokens (preserves thousands separators: n=1,010, n = 5,539)
+SAMPLE_N_RE = re.compile(r"(?<![A-Za-z0-9_])n\s*[=:]\s*(\d+(?:,\d{3})*)(?![A-Za-z0-9_,])", re.I)
+
+# Logical discourse connectors (concession/contrast & causality/consequence)
+CONTRAST_EN_RE = re.compile(
+    r"\b(?:however|whereas|although|though|despite|in\s+spite\s+of|conversely|nevertheless|nonetheless|on\s+the\s+other\s+hand)\b|"
+    r"(?:^|[.;!?]\s+)while\b|,\s+while\b",
+    re.I,
+)
+CONTRAST_ZH_RE = re.compile(
+    r"然而|但是|但|不过|而|相比之下|相反|反之|尽管|虽然|虽|即便|即使|却|仍|与之相对|另一方面|反观|但仍"
+)
+CAUSAL_EN_RE = re.compile(
+    r"\b(?:because|therefore|thus|hence|consequently|as\s+a\s+result|due\s+to|owing\s+to)\b|"
+    r"\bsince\b(?!\s+(?:19|20)\d{2}\b|\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))",
+    re.I,
+)
+CAUSAL_ZH_RE = re.compile(
+    r"因为|由于|因|因此|故|所以|从而|致使|导致|由此|据此|结果|鉴于|使得|进而|因而"
+)
+
+# Abbreviations ignored during English sentence segmentation
+EN_ABBREV_RE = re.compile(
+    r"\b(?:Fig|Figs|Eq|Eqs|Tab|Ref|Refs|Dr|Mr|Mrs|Ms|Prof|No|Vol|vs|et\s+al|e\.g|i\.e|ca|approx|St|Inc|Ltd|p|pp)\.",
+    re.I,
+)
+
 # Negation & epistemic modal regexes
 NEG_EN_RE = re.compile(
     r"\b(?:not|no|never|neither|nor|without|none|cannot|can't|fail(?:s|ed)?\s+to|unlike|absent|rarely|seldom|lack(?:s|ed)?|no\s+longer)\b",
     re.I,
 )
 NEG_ZH_RE = re.compile(
-    r"不[是为会对能应可存在显同再足具构产导支影改包适允受必宜]|未[能见曾达发现观察出现报告]|无[法显明显需关]|并非|绝非|没有|缺乏|罕见|极少|不同于|否(?:定|认)"
+    r"不[是为会对能应可存在显同再足具构产导支影改包适允受必宜含]|未(?!来)|无[法显明显需关]|并非|绝非|没有|缺乏|罕见|极少|不同于|否(?:定|认)"
 )
 HEDGE_EN_RE = re.compile(
     r"\b(?:may|might|could|suggests?|suggested|indicates?|indicated|appears?\s+to|potentially|possibly|likely|approximately|roughly|only|primarily|limited\s+to)\b",
@@ -214,39 +281,99 @@ def _has_cjk(text: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
 
 
+def _dehyphenate_pdf_text(text: str) -> str:
+    """Repair soft line-wrap hyphenations common in two-column academic PDFs."""
+    return re.sub(r"([A-Za-z])-\s*\n\s*([a-z])", r"\1\2", text or "")
+
+
 def _extract_pdf_pages(pdf_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Extract page-by-page paragraphs from a PDF using poppler pdfinfo + pdftotext."""
+    """Extract page-by-page paragraphs in reading order via pdftotext -enc UTF-8 (no -layout) or pypdf fallback."""
     has_pdfinfo = shutil.which("pdfinfo") is not None
     has_pdftotext = shutil.which("pdftotext") is not None
-    if not has_pdftotext:
-        return [], {
-            "pdf_file": pdf_path.name,
-            "extractor": "unavailable",
-            "total_pages": 0,
-            "extracted_pages": 0,
-            "empty_or_scanned_pages": [],
-            "error": "pdftotext binary not available in sandbox",
-        }
 
-    total_pages = 0
     pdf_meta: dict[str, str] = {}
-    if has_pdfinfo:
+    page_texts: list[tuple[int, str]] = []
+    extractor_used = "unavailable"
+    total_pages = 0
+
+    if has_pdftotext:
+        extractor_used = "pdftotext_utf8_reading_order"
+        if has_pdfinfo:
+            try:
+                info_out = subprocess.check_output(
+                    ["pdfinfo", str(pdf_path)],
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stderr=subprocess.DEVNULL,
+                    timeout=20,
+                )
+                for line in info_out.splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        pdf_meta[k.strip().lower()] = v.strip()
+                if pdf_meta.get("pages", "").isdigit():
+                    total_pages = int(pdf_meta["pages"])
+            except Exception:
+                total_pages = 0
+
+        if total_pages > 0:
+            for page_no in range(1, total_pages + 1):
+                try:
+                    page_txt = subprocess.check_output(
+                        ["pdftotext", "-enc", "UTF-8", "-f", str(page_no), "-l", str(page_no), str(pdf_path), "-"],
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        stderr=subprocess.DEVNULL,
+                        timeout=20,
+                    )
+                except Exception:
+                    page_txt = ""
+                page_texts.append((page_no, page_txt))
+        else:
+            try:
+                full_txt = subprocess.check_output(
+                    ["pdftotext", "-enc", "UTF-8", str(pdf_path), "-"],
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                )
+            except Exception:
+                full_txt = ""
+            raw_pages = full_txt.split("\x0c")
+            if len(raw_pages) > 1 and not raw_pages[-1].strip():
+                raw_pages = raw_pages[:-1]
+            total_pages = max(len(raw_pages), 1)
+            page_texts = [(i, ptxt) for i, ptxt in enumerate(raw_pages, start=1)]
+    else:
+        # Optional pure-Python fallback if pypdf is installed in the runtime
         try:
-            info_out = subprocess.check_output(
-                ["pdfinfo", str(pdf_path)],
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=20,
-            )
-            for line in info_out.splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    pdf_meta[k.strip().lower()] = v.strip()
-            if pdf_meta.get("pages", "").isdigit():
-                total_pages = int(pdf_meta["pages"])
+            import pypdf  # type: ignore
+
+            reader = pypdf.PdfReader(str(pdf_path))
+            extractor_used = "pypdf_fallback"
+            total_pages = len(reader.pages)
+            meta_obj = getattr(reader, "metadata", None) or {}
+            pdf_meta["title"] = str(meta_obj.get("/Title") or "").strip()
+            pdf_meta["author"] = str(meta_obj.get("/Author") or "").strip()
+            for page_no, pg in enumerate(reader.pages, start=1):
+                try:
+                    page_txt = pg.extract_text() or ""
+                except Exception:
+                    page_txt = ""
+                page_texts.append((page_no, page_txt))
         except Exception:
-            total_pages = 0
+            return [], {
+                "pdf_file": pdf_path.name,
+                "extractor": "unavailable",
+                "total_pages": 0,
+                "extracted_pages": 0,
+                "empty_or_scanned_pages": [],
+                "error": "Neither pdftotext nor pypdf is available in sandbox",
+            }
 
     segments: list[dict[str, Any]] = []
     empty_pages: list[int] = []
@@ -255,74 +382,33 @@ def _extract_pdf_pages(pdf_path: Path) -> tuple[list[dict[str, Any]], dict[str, 
     current_section = "Title/FrontMatter"
     p_counter = 0
 
-    if total_pages > 0:
-        for page_no in range(1, total_pages + 1):
-            try:
-                page_txt = subprocess.check_output(
-                    ["pdftotext", "-f", str(page_no), "-l", str(page_no), str(pdf_path), "-"],
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=20,
-                )
-            except Exception:
-                page_txt = ""
-            clean_chars = len(_norm_ws(page_txt))
-            per_page_chars[str(page_no)] = clean_chars
-            if clean_chars < 15:
-                empty_pages.append(page_no)
+    for page_no, raw_ptxt in page_texts:
+        page_txt = _dehyphenate_pdf_text(raw_ptxt)
+        clean_chars = len(_norm_ws(page_txt))
+        per_page_chars[str(page_no)] = clean_chars
+        if clean_chars < 15:
+            empty_pages.append(page_no)
+            continue
+        extracted_pages += 1
+        raw_chunks = [c.strip() for c in re.split(r"\n\s*\n+", page_txt) if c.strip()]
+        for ch in raw_chunks:
+            ch_one = _norm_ws(ch)
+            if len(ch_one) < 4 or re.fullmatch(r"\d{1,4}", ch_one):
                 continue
-            extracted_pages += 1
-            raw_chunks = [c.strip() for c in re.split(r"\n\s*\n+", page_txt) if c.strip()]
-            for ch in raw_chunks:
-                ch_one = _norm_ws(ch)
-                if len(ch_one) < 4 or re.fullmatch(r"\d{1,4}", ch_one):
-                    continue
-                m_sec = SECTION_HEADING_RE.match(ch_one)
-                if m_sec and len(ch_one) <= 90:
-                    current_section = m_sec.group(1).title()
-                p_counter += 1
-                segments.append({
-                    "paragraph_id": f"P{p_counter:03d}",
-                    "section": current_section,
-                    "page": page_no,
-                    "text": ch_one,
-                })
-    else:
-        try:
-            full_txt = subprocess.check_output(
-                ["pdftotext", str(pdf_path), "-"],
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-            )
-        except Exception:
-            full_txt = ""
-        pages = full_txt.split("\x0c")
-        total_pages = max(len([p for p in pages if p is not None]), 1)
-        for page_no, ptxt in enumerate(pages, start=1):
-            clean_chars = len(_norm_ws(ptxt))
-            per_page_chars[str(page_no)] = clean_chars
-            if clean_chars < 15:
-                empty_pages.append(page_no)
-                continue
-            extracted_pages += 1
-            for ch in re.split(r"\n\s*\n+", ptxt):
-                ch_one = _norm_ws(ch)
-                if len(ch_one) < 4 or re.fullmatch(r"\d{1,4}", ch_one):
-                    continue
-                p_counter += 1
-                segments.append({
-                    "paragraph_id": f"P{p_counter:03d}",
-                    "section": "Body",
-                    "page": page_no,
-                    "text": ch_one,
-                })
+            m_sec = SECTION_HEADING_RE.match(ch_one)
+            if m_sec and len(ch_one) <= 90:
+                current_section = m_sec.group(1).title()
+            p_counter += 1
+            segments.append({
+                "paragraph_id": f"P{p_counter:03d}",
+                "section": current_section,
+                "page": page_no,
+                "text": ch_one,
+            })
 
     coverage = {
         "pdf_file": pdf_path.name,
-        "extractor": "pdftotext",
+        "extractor": extractor_used,
         "total_pages": total_pages,
         "extracted_pages": extracted_pages,
         "empty_or_scanned_pages": empty_pages,
@@ -569,13 +655,16 @@ def prepare_workspace(input_dir: Path, work_dir: Path, output_dir: Path) -> dict
     }
 
 
-# --- Quantitative, Unit, Formula, Citation, Negation & Modal Extraction ---
+# --- Quantitative, Unit, Formula, Citation, Sentence-Density, Discourse & Modal Extraction ---
 
 def _strip_non_scalar_noise(text: str) -> str:
     cleaned = CITE_RE.sub(" ", text)
     cleaned = FIG_TAG_RE.sub(" ", cleaned)
     cleaned = TABLE_TAG_RE.sub(" ", cleaned)
     cleaned = EQ_TAG_RE.sub(" ", cleaned)
+    cleaned = COMPOUND_EXP_NOISE_RE.sub(" ", cleaned)
+    # Normalize Chinese rate-per-10k shorthand ("/万" or "每万") into explicit "/10,000" for scalar alignment
+    cleaned = re.sub(r"(?<!\d)(?:/|每)\s*万", "/10000", cleaned)
     cleaned = EMBEDDED_ID_DIGIT_RE.sub(" ", cleaned)
     return cleaned
 
@@ -601,7 +690,7 @@ def _extract_normalized_numbers(text: str) -> list[tuple[float, str, str]]:
 
     for m in MAG_NUM_RE.finditer(cleaned):
         raw_num = m.group(1).replace(",", "")
-        unit = (m.group(2) or "").lower()
+        unit = (m.group(2) or m.group(3) or "").lower()
         try:
             val = float(raw_num) * MULT.get(unit, 1.0)
         except ValueError:
@@ -609,6 +698,31 @@ def _extract_normalized_numbers(text: str) -> list[tuple[float, str, str]]:
         kind = "%" if unit == "%" else "scalar"
         out.append((val, kind, m.group(0).strip()))
     return out
+
+
+def _extract_sample_sizes(text: str) -> list[tuple[int, str]]:
+    """Extract thousands-aware sample sizes (e.g., n=1,010, n = 5,539)."""
+    out: list[tuple[int, str]] = []
+    for m in SAMPLE_N_RE.finditer(text or ""):
+        raw = m.group(1)
+        try:
+            out.append((int(raw.replace(",", "")), f"n={raw}"))
+        except ValueError:
+            continue
+    return sorted(out, key=lambda x: x[0])
+
+
+def _sample_sizes_match(src_n: list[tuple[int, str]], tgt_n: list[tuple[int, str]]) -> tuple[bool, list[str]]:
+    if not src_n and not tgt_n:
+        return True, []
+    s_vals = [x[0] for x in src_n]
+    t_vals = [x[0] for x in tgt_n]
+    if s_vals != t_vals:
+        return False, [
+            f"Sample-size (n=) drift or thousands-separator truncation: "
+            f"source={[x[1] for x in src_n]} vs target={[x[1] for x in tgt_n]}"
+        ]
+    return True, []
 
 
 def _numbers_match(src_nums: list[tuple[float, str, str]], tgt_nums: list[tuple[float, str, str]]) -> tuple[bool, list[str]]:
@@ -624,8 +738,31 @@ def _numbers_match(src_nums: list[tuple[float, str, str]], tgt_nums: list[tuple[
 
 
 def _extract_physical_units(text: str) -> list[tuple[float, str, str]]:
+    """Extract both compound SI units (strictly separating positive/negative exponents) and simple SI units."""
     units: list[tuple[float, str, str]] = []
     cleaned = CITE_RE.sub(" ", text)
+
+    # 1) Match compound units sequentially and blank out matched spans after each spec
+    # so negative-exponent specs (e.g., mA/cm2, cm^-2) are never double-counted by positive specs (cm^2).
+    for canon, pat in COMPOUND_UNIT_SPECS:
+        spec_spans: list[tuple[int, int]] = []
+        for m in pat.finditer(cleaned):
+            raw_number = m.group("number")
+            raw_unit = " ".join(m.group("unit").split())
+            try:
+                value = float(raw_number.replace(",", ""))
+            except ValueError:
+                continue
+            units.append((value, canon, f"{raw_number} {raw_unit}".strip()))
+            spec_spans.append((m.start(), m.end()))
+        if spec_spans:
+            chars = list(cleaned)
+            for s, e in spec_spans:
+                for i in range(s, e):
+                    chars[i] = " "
+            cleaned = "".join(chars)
+
+    # 2) Match standard SI units
     for match in NUMBER_WITH_UNIT_RE.finditer(cleaned):
         raw_number = match.group("number")
         raw_mag = (match.group("magnitude") or "").lower()
@@ -638,9 +775,126 @@ def _extract_physical_units(text: str) -> list[tuple[float, str, str]]:
     return units
 
 
+def _count_en_sentences(text: str) -> int:
+    cleaned = EN_ABBREV_RE.sub("ABBR", text or "")
+    # Protect decimal numbers (18.2 -> 18_2) and URLs/DOIs
+    cleaned = re.sub(r"https?://\S+|10\.\d{4,9}/\S+", "URL", cleaned)
+    cleaned = re.sub(r"(\d)\.(\d)", r"\1_\2", cleaned)
+    parts = [p.strip() for p in re.split(r"[.!?]+(?:\s+|$)|;\s+", cleaned) if len(re.findall(r"[A-Za-z0-9]", p)) >= 3]
+    return max(len(parts), 1 if (text or "").strip() else 0)
+
+
+def _count_zh_sentences(text: str) -> int:
+    cleaned = re.sub(r"https?://\S+|10\.\d{4,9}/\S+", "URL", text or "")
+    parts = [p.strip() for p in re.split(r"[。！？；]+", cleaned) if len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", p)) >= 2]
+    return max(len(parts), 1 if (text or "").strip() else 0)
+
+
+def _audit_sentence_and_density(
+    source_en: str,
+    target_zh: str,
+    *,
+    needs_review: bool = False,
+) -> tuple[bool, list[str], list[str], dict[str, Any]]:
+    """Detect implicit half-sentence omissions or summary collapse via sentence count and EN-word/ZH-char density."""
+    en_words = len(re.findall(r"[A-Za-z][A-Za-z0-9'-]*", source_en or ""))
+    zh_chars = len(re.findall(r"[\u4e00-\u9fff]", target_zh or ""))
+    en_sents = _count_en_sentences(source_en)
+    zh_sents = _count_zh_sentences(target_zh)
+    zh_per_en = round(zh_chars / max(en_words, 1), 3) if en_words > 0 else 0.0
+    sent_ratio = round(zh_sents / max(en_sents, 1), 3) if en_sents > 0 else 1.0
+
+    info = {
+        "en_words": en_words,
+        "zh_chars": zh_chars,
+        "en_sentences": en_sents,
+        "zh_sentences": zh_sents,
+        "zh_per_en_word": zh_per_en,
+        "sentence_ratio": sent_ratio,
+    }
+    errs: list[str] = []
+    warns: list[str] = []
+    if needs_review or en_words < 20:
+        return True, errs, warns, info
+
+    if en_words >= 30 and zh_per_en < 0.78:
+        errs.append(
+            f"IMPLICIT_OMISSION_OR_SUMMARY_COLLAPSE (en_words={en_words}, zh_chars={zh_chars}, "
+            f"ratio={zh_per_en:.2f} < 0.78; source_sents={en_sents}, target_sents={zh_sents})"
+        )
+    elif en_words >= 30 and en_sents >= 3 and zh_sents <= max(1, en_sents // 3) and zh_per_en < 1.25:
+        errs.append(
+            f"SENTENCE_OMISSION_DETECTED (source_sents={en_sents} collapsed to target_sents={zh_sents}, "
+            f"zh_per_en_word={zh_per_en:.2f})"
+        )
+    elif en_words >= 25 and (zh_per_en < 1.05 or zh_per_en > 4.2 or (en_sents >= 3 and sent_ratio < 0.5)):
+        warns.append(
+            f"SENTENCE_DENSITY_WARNING (en_words={en_words}, zh_chars={zh_chars}, "
+            f"ratio={zh_per_en:.2f}, sents={en_sents}->{zh_sents})"
+        )
+    return len(errs) == 0, errs, warns, info
+
+
+def _audit_discourse_connectors(source_en: str, target_zh: str) -> tuple[bool, list[str]]:
+    """Verify explicit contrast/concession and causality/consequence discourse markers are preserved."""
+    errs: list[str] = []
+    src_contrast = CONTRAST_EN_RE.findall(source_en or "")
+    tgt_contrast = CONTRAST_ZH_RE.findall(target_zh or "")
+    if src_contrast and not tgt_contrast:
+        errs.append(
+            f"DISCOURSE_LOGIC_DRIFT (contrast/concession markers {sorted(set(s.strip().lower() for s in src_contrast))} dropped in target)"
+        )
+    src_causal = CAUSAL_EN_RE.findall(source_en or "")
+    tgt_causal = CAUSAL_ZH_RE.findall(target_zh or "")
+    if src_causal and not tgt_causal:
+        errs.append(
+            f"DISCOURSE_LOGIC_DRIFT (causality/consequence markers {sorted(set(s.strip().lower() for s in src_causal))} dropped in target)"
+        )
+    return len(errs) == 0, errs
+
+
+def export_glossary_csv(rows: list[dict[str, Any]], csv_path: Path, *, mode: str = "audit") -> Path:
+    """Export structured bilingual terminology table or candidates to reusable UTF-8 CSV (never TSV)."""
+    if csv_path.suffix.lower() == ".tsv":
+        csv_path = csv_path.with_suffix(".csv")
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    buf = io.StringIO()
+    if mode == "prepare":
+        fields = ["source", "abbreviation", "category", "occurrences", "paragraph_ids", "sections", "target", "forbidden_variants"]
+        writer = csv.DictWriter(buf, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({
+                "source": r.get("source", ""),
+                "abbreviation": r.get("abbreviation", ""),
+                "category": r.get("category", ""),
+                "occurrences": r.get("occurrences", 0),
+                "paragraph_ids": ";".join(str(x) for x in (r.get("paragraph_ids") or [])),
+                "sections": ";".join(str(x) for x in (r.get("sections") or [])),
+                "target": r.get("target", ""),
+                "forbidden_variants": "",
+            })
+    else:
+        fields = ["source", "target", "first_mention_anchor", "occurrences_source", "occurrences_target", "status", "violations_paragraphs"]
+        writer = csv.DictWriter(buf, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({
+                "source": r.get("source", ""),
+                "target": r.get("target", ""),
+                "first_mention_anchor": r.get("first_mention_anchor", ""),
+                "occurrences_source": r.get("occurrences_source", 0),
+                "occurrences_target": r.get("occurrences_target", 0),
+                "status": r.get("status", ""),
+                "violations_paragraphs": ";".join(str(x) for x in (r.get("violations_paragraphs") or [])),
+            })
+    result_guard.atomic_write_text(csv_path, buf.getvalue())
+    return csv_path
+
+
 def _units_match(src_units: list[tuple[float, str, str]], tgt_units: list[tuple[float, str, str]]) -> tuple[bool, list[str]]:
-    src_raw = [u[2] for u in src_units]
-    tgt_raw = [u[2] for u in tgt_units]
+    src_raw = [f"{u[2]} [{u[1]}]" for u in src_units]
+    tgt_raw = [f"{u[2]} [{u[1]}]" for u in tgt_units]
     if len(src_units) != len(tgt_units):
         return False, [f"SI unit count mismatch: source={src_raw} vs target={tgt_raw}"]
     # Sort by (value, canonical_unit) so pairing swaps and unit drifts (5 mg->5 ug, 25 C->25 K, 50 mV->50 V)
@@ -837,6 +1091,8 @@ def audit_structured_draft(
     fig_table_drift = 0
     negation_drift = 0
     modal_upgrade_drift = 0
+    sentence_density_drift = 0
+    discourse_logic_drift = 0
     para_checks: list[dict[str, Any]] = []
 
     total_term_checks = 0
@@ -862,19 +1118,35 @@ def audit_structured_draft(
             errors.append(f"{pid} ({sec}): EMPTY_TRANSLATION")
             continue
 
-        # Anti-summary collapse warning
-        if len(sp) >= 180 and len(re.findall(r"[\u4e00-\u9fff]", tp)) < 20 and not needs_review:
-            warnings.append(f"{pid} ({sec}): POSSIBLE_SUMMARY_COLLAPSE (long source {len(sp)} chars -> short target)")
+        # Sentence-count & information-density alignment (catches implicit half-sentence omission & summary collapse)
+        dens_ok, dens_errs, dens_warns, dens_info = _audit_sentence_and_density(sp, tp, needs_review=needs_review)
+        if not dens_ok:
+            sentence_density_drift += len(dens_errs)
+            errors.extend([f"{pid} ({sec}): {d}" for d in dens_errs])
+        warnings.extend([f"{pid} ({sec}): {w}" for w in dens_warns])
 
-        # Numbers + CN/EN magnitudes
+        # Logical discourse connector fidelity (concession/contrast & causality/consequence)
+        disc_ok, disc_errs = _audit_discourse_connectors(sp, tp)
+        if not disc_ok:
+            discourse_logic_drift += len(disc_errs)
+            errors.extend([f"{pid} ({sec}): {d}" for d in disc_errs])
+
+        # Numbers + CN/EN magnitudes + thousands-separated sample sizes (n=1,010)
         s_nums = _extract_normalized_numbers(sp)
         t_nums = _extract_normalized_numbers(tp)
         num_ok, num_diffs = _numbers_match(s_nums, t_nums)
+        s_ns = _extract_sample_sizes(sp)
+        t_ns = _extract_sample_sizes(tp)
+        n_ok, n_diffs = _sample_sizes_match(s_ns, t_ns)
         if not num_ok:
             numeric_drift += len(num_diffs)
             errors.extend([f"{pid} ({sec}): {d}" for d in num_diffs])
+        if not n_ok:
+            num_ok = False
+            numeric_drift += len(n_diffs)
+            errors.extend([f"{pid} ({sec}): {d}" for d in n_diffs])
 
-        # SI unit-value pairing
+        # Simple & compound SI unit-value pairing (e.g., 10 mA cm^-2, 55.69/10,000, 5 mg)
         s_units = _extract_physical_units(sp)
         t_units = _extract_physical_units(tp)
         units_ok, unit_diffs = _units_match(s_units, t_units)
@@ -977,6 +1249,9 @@ def audit_structured_draft(
             "formulas_ok": form_ok,
             "negation_ok": neg_ok,
             "modal_ok": modal_ok,
+            "sentence_density_ok": dens_ok,
+            "discourse_logic_ok": disc_ok,
+            "density_stats": dens_info,
             "glossary_violations": para_term_violations,
         })
 
@@ -1018,6 +1293,8 @@ def audit_structured_draft(
         "figure_table_drift": fig_table_drift,
         "negation_drift": negation_drift,
         "modal_upgrade_drift": modal_upgrade_drift,
+        "sentence_density_drift": sentence_density_drift,
+        "discourse_logic_drift": discourse_logic_drift,
         "page_coverage": page_cov,
         "blocking_errors": errors,
         "warnings": warnings,
@@ -1110,6 +1387,90 @@ def render_bilingual_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
+_MD_HEADER_PID_RE = re.compile(r"^###\s+\[([A-Za-z0-9_.-]+)\]\s*", re.M)
+_MD_TRANS_LINE_RE = re.compile(r"^\*\*Translation\s*\(`([A-Za-z0-9_.-]+)`\)\*\*:\s*(.*)$", re.M)
+_VALID_TERMINAL_END_RE = re.compile(r"[。！？.!?）”’\"'】》\]]\s*$")
+_DANGLING_TAIL_WORD_RE = re.compile(
+    r"(?:(?:的|和|与|及|或|为|在|由|从|至|到|对|将|把|被|以|中|于|且|但|而|并|其|该|等|即|如|若|当)\s*$|"
+    r"\b(?:the|a|an|of|and|or|in|to|for|with|from|by|at|on|as|that|which|is|are|was|were)\s*$)",
+    re.I,
+)
+_TRUNCATED_TAIL_PUNCT_RE = re.compile(r"(?:\.{2,}|…|[,，、:：;；—–\-/=<≤≥(（\[【{]\s*$)")
+_TRUNCATED_NUMERIC_END_RE = re.compile(r"(?:(?:n|p|CI|IC)\s*[=<>≤≥:]?\s*\d*\.?\d*|\d+(?:\.\d*)?)\s*$", re.I)
+
+
+def verify_rendered_bilingual_markdown(
+    markdown_path: Path,
+    expected_paragraph_ids: list[str],
+) -> tuple[bool, list[str]]:
+    """Read back rendered translation_bilingual.md and verify exact 1-to-1 paragraph coverage & zero truncation."""
+    errors: list[str] = []
+    if not markdown_path.is_file():
+        return False, [f"MARKDOWN_READBACK_MISSING: file not found at {markdown_path}"]
+
+    text = markdown_path.read_text(encoding="utf-8", errors="replace")
+    if not text.strip():
+        return False, ["MARKDOWN_READBACK_EMPTY: translation_bilingual.md is empty"]
+
+    header_pids = _MD_HEADER_PID_RE.findall(text)
+    trans_matches = _MD_TRANS_LINE_RE.findall(text)
+    trans_pids = [pid for pid, _ in trans_matches]
+
+    hdr_counts = Counter(header_pids)
+    tr_counts = Counter(trans_pids)
+
+    for pid in expected_paragraph_ids:
+        hc = hdr_counts.get(pid, 0)
+        tc = tr_counts.get(pid, 0)
+        if hc == 0:
+            errors.append(f"MARKDOWN_MISSING_PARAGRAPH_HEADER: expected paragraph_id '{pid}' absent from headings")
+        elif hc > 1:
+            errors.append(f"MARKDOWN_DUPLICATE_PARAGRAPH_HEADER: paragraph_id '{pid}' appeared {hc} times in headings")
+        if tc == 0:
+            errors.append(f"MARKDOWN_MISSING_TRANSLATION_LINE: expected paragraph_id '{pid}' absent from Translation blocks")
+        elif tc > 1:
+            errors.append(f"MARKDOWN_DUPLICATE_TRANSLATION_LINE: paragraph_id '{pid}' appeared {tc} times in Translation blocks")
+
+    expected_set = set(expected_paragraph_ids)
+    for pid, cnt in tr_counts.items():
+        if pid not in expected_set:
+            errors.append(f"MARKDOWN_UNEXPECTED_PARAGRAPH_ID: unexpected paragraph_id '{pid}' in Translation blocks")
+        elif cnt > 1 and pid not in expected_set:
+            errors.append(f"MARKDOWN_DUPLICATE_TRANSLATION_LINE: paragraph_id '{pid}' appeared {cnt} times")
+
+    # Sentence completeness & anti-truncation check on every rendered translation paragraph
+    bracket_pairs = (("(", ")"), ("（", "）"), ("[", "]"), ("【", "】"), ("《", "》"), ("{", "}"))
+    for pid, body in trans_matches:
+        st = body.strip()
+        if not st:
+            errors.append(f"MARKDOWN_EMPTY_TRANSLATION: paragraph '{pid}' has empty translation text")
+            continue
+        for op, cl in bracket_pairs:
+            if st.count(op) != st.count(cl):
+                errors.append(
+                    f"MARKDOWN_UNCLOSED_BRACKET: paragraph '{pid}' has unbalanced '{op}'/'{cl}' "
+                    f"({st.count(op)} vs {st.count(cl)}), indicating possible truncation"
+                )
+        if _TRUNCATED_TAIL_PUNCT_RE.search(st):
+            errors.append(
+                f"MARKDOWN_TRUNCATED_ENDING_PUNCT: paragraph '{pid}' ends abruptly with dangling punctuation/ellipsis ({st[-24:]!r})"
+            )
+        elif _TRUNCATED_NUMERIC_END_RE.search(st):
+            errors.append(
+                f"MARKDOWN_TRUNCATED_NUMERIC_TAIL: paragraph '{pid}' ends with an incomplete/unpunctuated numeric token ({st[-24:]!r})"
+            )
+        elif _DANGLING_TAIL_WORD_RE.search(st):
+            errors.append(
+                f"MARKDOWN_DANGLING_TAIL_WORD: paragraph '{pid}' ends with a dangling connector/function word ({st[-24:]!r})"
+            )
+        elif not _VALID_TERMINAL_END_RE.search(st):
+            errors.append(
+                f"MARKDOWN_INCOMPLETE_FINAL_SENTENCE: paragraph '{pid}' lacks terminal sentence punctuation ({st[-24:]!r})"
+            )
+
+    return len(errors) == 0, errors
+
+
 def emit_final_deliverables(
     draft_data: dict[str, Any],
     audit_report: dict[str, Any],
@@ -1117,16 +1478,46 @@ def emit_final_deliverables(
     metadata_lock: dict[str, Any] | None,
     result_path: Path,
     markdown_path: Path,
+    glossary_csv_path: Path | None = None,
+    expected_paragraph_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Atomically emit translation_bilingual.md and result.json aligned with Harbor contract."""
+    """Atomically emit translation_bilingual.md, read it back to block duplicates/omissions/truncation, and emit result.json."""
     md_text = render_bilingual_markdown(draft_data, audit_report, metadata_lock)
     result_guard.atomic_write_text(markdown_path, md_text)
+
+    segs = draft_data.get("bilingual_segments") or []
+    exp_pids = list(expected_paragraph_ids) if expected_paragraph_ids else [
+        str(s.get("paragraph_id") or "") for s in segs if str(s.get("paragraph_id") or "")
+    ]
+    readback_ok, readback_errors = verify_rendered_bilingual_markdown(markdown_path, exp_pids)
+    inv = audit_report.setdefault("invariants_check", {})
+    inv["markdown_readback_ok"] = readback_ok
+    inv["markdown_readback_errors"] = readback_errors
+    if not readback_ok:
+        audit_report.setdefault("errors", []).extend(readback_errors)
+        audit_report["passed"] = False
+        # Re-render markdown so Section 5 records blocking readback errors transparently
+        md_text = render_bilingual_markdown(draft_data, audit_report, metadata_lock)
+        result_guard.atomic_write_text(markdown_path, md_text)
+
+    artifacts_list = ["result.json", markdown_path.name]
+    if glossary_csv_path is not None:
+        actual_csv = export_glossary_csv(audit_report.get("terminology_table") or [], glossary_csv_path, mode="audit")
+        if actual_csv.parent.resolve() == result_path.parent.resolve():
+            artifacts_list.append(actual_csv.name)
 
     case_id = str(draft_data.get("case_id") or (metadata_lock or {}).get("case_id") or "translation-case-01")
     if not result_path.is_file():
         result_guard.init_result(result_path, case_id=case_id, task_id="product-arena-01-5a9928c1")
 
     gaps: list[dict[str, Any]] = []
+    if not readback_ok:
+        gaps.append({
+            "code": "MARKDOWN_READBACK_INTEGRITY_FAILED",
+            "severity": "error",
+            "source": markdown_path.name,
+            "message": "; ".join(readback_errors[:12]),
+        })
     if audit_report.get("errors"):
         gaps.append({
             "code": "BILINGUAL_INVARIANT_VIOLATIONS",
@@ -1142,10 +1533,8 @@ def emit_final_deliverables(
             "message": str(u.get("reason", "")),
         })
 
-    segs = draft_data.get("bilingual_segments") or []
     src_cnt = max(audit_report.get("source_paragraphs", len(segs)), 1)
     needs_rev_cnt = sum(1 for s in segs if s.get("needs_human_review"))
-    inv = audit_report.get("invariants_check") or {}
 
     if not audit_report.get("passed"):
         trans_status = "needs_human_review"
@@ -1173,13 +1562,15 @@ def emit_final_deliverables(
         "terminology_table": audit_report.get("terminology_table") or [],
         "invariants_check": inv,
         "uncertainty_or_gaps": audit_report.get("uncertainty_or_gaps") or [],
-        "artifacts": ["result.json", markdown_path.name],
+        "errors": list(audit_report.get("errors") or []),
+        "artifacts": artifacts_list,
         "metrics": {
             "source_paragraphs": audit_report.get("source_paragraphs", len(segs)),
             "translated_paragraphs": len(segs),
             "terminology_consistency_rate": inv.get("terminology_consistency_rate", 1.0),
             "blocking_error_count": len(audit_report.get("errors") or []),
             "needs_human_review_count": needs_rev_cnt,
+            "markdown_readback_ok": readback_ok,
         },
         "metric_provenance": {
             "source_paragraphs": "source_segments.json",
@@ -1187,9 +1578,11 @@ def emit_final_deliverables(
             "terminology_consistency_rate": "bilingual_alignment_guard:glossary",
             "blocking_error_count": "bilingual_alignment_guard:audit",
             "needs_human_review_count": "bilingual_segments[].needs_human_review",
+            "markdown_readback_ok": "bilingual_alignment_guard:verify_rendered_bilingual_markdown",
         },
         "findings": [
             f"Audited {len(segs)} bilingual paragraph(s); passed={audit_report.get('passed')}, "
+            f"markdown_readback_ok={readback_ok}, "
             f"terminology_consistency={inv.get('terminology_consistency_rate', 1.0):.1%}, "
             f"blocking_errors={len(audit_report.get('errors') or [])}."
         ],
@@ -1243,7 +1636,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-json", default="", help="Output alignment audit JSON path.")
     parser.add_argument("--emit-result", default="", help="Optional /app/output/result.json path to write after audit.")
     parser.add_argument("--emit-markdown", default="", help="Optional /app/output/translation_bilingual.md path to write after audit.")
+    parser.add_argument("--verify-markdown", default="", help="Standalone read-back verification of an existing translation_bilingual.md.")
+    parser.add_argument("--export-glossary-csv", default="", help="Optional reusable UTF-8 CSV path to export structured bilingual glossary (never .tsv).")
     args = parser.parse_args(argv)
+
+    if args.verify_markdown:
+        src_doc = json.loads(Path(args.source_segments).read_text(encoding="utf-8")) if (args.source_segments and Path(args.source_segments).is_file()) else None
+        exp_pids = [str(s.get("paragraph_id") or "") for s in ((src_doc or {}).get("segments") or []) if str(s.get("paragraph_id") or "")]
+        if not exp_pids:
+            # Derive expected unique paragraph IDs from markdown headers when source_segments is not supplied
+            exp_pids = list(dict.fromkeys(_MD_HEADER_PID_RE.findall(Path(args.verify_markdown).read_text(encoding="utf-8", errors="replace"))))
+        ok_rb, errs_rb = verify_rendered_bilingual_markdown(Path(args.verify_markdown), exp_pids)
+        out_rb = {
+            "passed": ok_rb,
+            "status": "ok" if ok_rb else "partial_with_gaps",
+            "expected_paragraph_ids": exp_pids,
+            "errors": errs_rb,
+        }
+        if args.out_json:
+            result_guard.atomic_write_json(args.out_json, out_rb)
+        print(json.dumps(out_rb, ensure_ascii=False, indent=2))
+        return 0 if ok_rb else 1
 
     if args.prepare:
         paths = preflight_probe.resolve_default_paths(
@@ -1252,6 +1665,10 @@ def main(argv: list[str] | None = None) -> int:
             work_dir=args.work or None,
         )
         rep = prepare_workspace(paths["input_dir"], paths["work_dir"], paths["output_dir"])
+        if args.export_glossary_csv:
+            gcand = json.loads((paths["work_dir"] / "glossary_candidates.json").read_text(encoding="utf-8"))
+            csv_out = export_glossary_csv(gcand.get("candidates") or [], Path(args.export_glossary_csv), mode="prepare")
+            rep["exported_glossary_csv"] = str(csv_out)
         print(json.dumps(rep, ensure_ascii=False, indent=2))
         return 0 if rep["ok"] else 1
 
@@ -1267,8 +1684,8 @@ def main(argv: list[str] | None = None) -> int:
             metadata_lock=lock_doc,
             glossary_data=gloss_doc,
         )
-        if args.out_json:
-            result_guard.atomic_write_json(args.out_json, rep)
+        csv_path = Path(args.export_glossary_csv) if args.export_glossary_csv else None
+        exp_pids = [str(s.get("paragraph_id") or "") for s in ((src_doc or {}).get("segments") or []) if str(s.get("paragraph_id") or "")]
         if args.emit_result and args.emit_markdown:
             emit_final_deliverables(
                 draft_data,
@@ -1276,12 +1693,21 @@ def main(argv: list[str] | None = None) -> int:
                 metadata_lock=lock_doc,
                 result_path=Path(args.emit_result),
                 markdown_path=Path(args.emit_markdown),
+                glossary_csv_path=csv_path,
+                expected_paragraph_ids=exp_pids or None,
             )
+        elif csv_path is not None:
+            export_glossary_csv(rep.get("terminology_table") or [], csv_path, mode="audit")
+        if args.out_json:
+            result_guard.atomic_write_json(args.out_json, rep)
         print(json.dumps({
             "passed": rep["passed"],
             "errors": rep["errors"],
             "warnings": rep["warnings"],
+            "markdown_readback_ok": rep["invariants_check"].get("markdown_readback_ok", True),
             "terminology_consistency_rate": rep["invariants_check"]["terminology_consistency_rate"],
+            "sentence_density_drift": rep["invariants_check"]["sentence_density_drift"],
+            "discourse_logic_drift": rep["invariants_check"]["discourse_logic_drift"],
         }, ensure_ascii=False, indent=2))
         return 0 if rep["passed"] else 1
 

@@ -26,8 +26,8 @@ Locate sibling files relative to this `SKILL.md` directory:
 
 ## 3. Execution Workflow
 
-### Step 1: Preflight, Budget Init & Deterministic Evidence Indexing
-Run the offline stdlib scripts (supports JSON, MD, TXT, CSV, and PDF via `pdftotext` with exact page-anchored IDs `doc:p{page}-b{block}`):
+### Step 1: Preflight, Budget Init & Deterministic Evidence Entailment Indexing
+Run the offline stdlib scripts (supports JSON, MD, TXT, CSV, and PDF via reading-flow `pdftotext -enc UTF-8` with `pypdf`/`pdfplumber` fallback, zero two-column interleaving, preserving thousands-separated counts like `n=1,010`/`n=5,539` and exact page-anchored IDs `doc:p{page}-b{block}`):
 ```bash
 python3 scripts/preflight_probe.py --out /app/work/env.json
 python3 scripts/budget_guard.py --init
@@ -36,8 +36,9 @@ python3 scripts/claim_verifier.py --input /input --output /app/output --work /ap
 **What Step 1 produces**:
 - Builds an immutable **Citation Legend** (`[1]..[N]` -> `source_document_id`, `title`, `doi`, `source_file`, `file_sha256`, `page_count`, `coverage_status`) and writes `/app/work/corpus_paragraphs.json` for full-context reading.
 - Decomposes compound claims in `/input/claims-to-verify.json` across English and Chinese connectives (`;`, `and`, `while`, `whereas`, `because`, `thereby`, `outperforming`, `同时`, `然而`, `从而`, `并且`, `显著优于`) into atomic sub-claims annotated with `claim_types`, `comparator`, `negation_markers`, `significance_markers`, `scope_conditions`, and 5D `E/M/L/S/I` fingerprints.
-- Binds `cited_ref` strictly to explicit document metadata (DOI from header/metadata only—never bibliography lines—or exact `source_document_id`/filename), flags all four diagnostic failure modes, detects secondary citations and abstract-vs-body conflicts, and audits inline citation markers vs. structured citation arrays.
-- Writes initial `/app/output/verification_cards.json`, `/app/output/verification_report.md`, and `/app/output/result.json`.
+- Automatically evaluates three deterministic entailment checks per sub-claim: (1) **numeric consistency** across percentages, scalars, and thousands-separated sample counts (catching e.g. `"35%"` vs `"18.2%"` on the matching target as `contradicted`), (2) **polarity & comparative direction** (preventing `"no significant difference / failed to improve / stationary (p=0.200)"` from being mislabeled `supported`), and (3) **scope & extrapolation boundary** (classifying `"all/universal/adults/clinical cure"` against pediatric `0-19 years` / `in vitro` / observational sources strictly as `insufficient_evidence`, never `contradicted`).
+- Binds `cited_ref` strictly to explicit document metadata (DOI from Page-1 header/metadata only—never bibliography lines—or exact `source_document_id`/filename), flags all four diagnostic failure modes, detects secondary citations (including numeric superscript references in Introductions) and abstract-vs-body conflicts, and audits inline citation markers vs. structured citation arrays.
+- Writes `/app/output/verification_cards.json`, `/app/output/verification_report.md`, and `/app/output/result.json`.
 
 **Step 1 completion criterion**: `env.json`, `corpus_paragraphs.json`, `verification_cards.json`, `verification_report.md`, and `result.json` exist and account for every claim in `/input/claims-to-verify.json`.
 
@@ -122,15 +123,17 @@ python3 scripts/claim_verifier.py \
   --work /app/work \
   --validate-verifications /app/work/verifications_draft.json
 ```
-The validator enforces five blocking rules and exits with code `1` on any violation:
+The validator enforces seven blocking rules and exits with code `1` on any violation:
 
 | Blocking Error Code | Trigger Condition | Required Fix |
 | --- | --- | --- |
 | `UNKNOWN_PARAGRAPH_ID` / `CROSS_DOCUMENT_ANCHOR_MISMATCH` | `paragraph_id` does not exist or belongs to another `source_document_id`. | Anchor strictly to the owning document's `paragraph_id`. |
 | `QUOTE_MISMATCH` | `quote` is not a whitespace-normalized verbatim substring of the cited paragraph. | Copy exact substring without paraphrasing. |
-| `INLINE_STRUCTURED_CITATION_DRIFT` | Inline `[n]` markers in claim/report text do not match `structured_citations[]` count or IDs. | Reconcile structured citations or record explicit drift gap before finalizing. |
+| `INLINE_STRUCTURED_CITATION_DRIFT` / `CITATION_LEGEND_DRIFT` | Inline `[n]` markers do not match `structured_citations[]` count/IDs, or `[n]` points to another document in `citation_legend`. | Reconcile structured citations and `citation_legend` mapping before finalizing. |
 | `SUPPORTED_WITHOUT_EVIDENCE` / `DOI_MISMATCH_SUPPORTED` | Verdict is `supported` with empty evidence or evidence borrowed from a non-matching DOI. | Downgrade to `insufficient_evidence` or cite exact matching DOI evidence. |
+| `SUPPORTED_HAS_UNRESOLVED_NUMERIC_CONTRADICTION` / `SUPPORTED_HAS_UNRESOLVED_POLARITY_CONTRADICTION` | Verdict is `supported` even though its cited quote reports a conflicting number (e.g. `18.2%` vs claimed `35%`) or explicit negation/null (`no significant difference`, `stationary`, `p >= 0.05`). | Reclassify as `contradicted` (or `partially_supported` if mixed) with opposing quote anchored. |
 | `CONTRADICTED_WITHOUT_OPPOSING_EVIDENCE` / `CONTRADICTED_ON_LOCALIZATION_GAP` | Verdict is `contradicted` without grounded opposing evidence or when `localization_insufficient` is true. | Downgrade to `insufficient_evidence` unless direct opposing evidence is anchored. |
+| `CONTRADICTED_ON_UNTESTED_EXTRAPOLATION` | Verdict is `contradicted` on a claim extrapolating to untested scope/population tokens (`adults`, `universal`, `human clinical cure`) absent from cited quotes. | Reclassify strictly as `insufficient_evidence` with `untested_extrapolation_detected: true`. |
 
 Re-run Step 3 after fixes until `schema_validation.ok == true` (exit code `0`).
 

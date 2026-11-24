@@ -1,0 +1,32 @@
+{
+  "title": "Continuous-Flow Photocatalytic CO2 Reduction Apparatus",
+  "subtitle": "Illustrative Synthetic Setup — 4 Stages, 8 Units, 6 Stream Classes & Native Draw.io Bindings",
+  "canvas_width_px": 1220,
+  "canvas_height_px": 680,
+  "zones": [
+    {"id": "feed", "label": "Stage 1: Feed Conditioning", "stage_order": 1, "fill": "#EDF4F5", "stroke": "#547FA3", "source_ref": "SOP:Sec2.1"},
+    {"id": "react", "label": "Stage 2: Photoreaction", "stage_order": 2, "fill": "#F6F1E8", "stroke": "#D19A45", "source_ref": "SOP:Sec2.2"},
+    {"id": "sep", "label": "Stage 3: Gas-Liquid Separation", "stage_order": 3, "fill": "#EEF5F0", "stroke": "#4E9187", "source_ref": "SOP:Sec2.3"},
+    {"id": "anal", "label": "Stage 4: Online Analytics", "stage_order": 4, "fill": "#F4F1F8", "stroke": "#967A9C", "source_ref": "SOP:Sec2.4"}
+  ],
+  "units": [
+    {"id": "mfc", "step_number": 1, "label": "CO2 Mass Flow Ctrl", "spec_text": "20 mL/min, 99.99%", "zone": "feed", "role": "inlet", "category": "primary", "ports": ["in:gas", "out:mix"], "source_ref": "SOP:T1:R1"},
+    {"id": "sat", "step_number": 2, "label": "H2O Vapor Saturator", "spec_text": "25 C bubbler", "zone": "feed", "role": "unit", "category": "secondary", "ports": ["in:mix", "out:wet"], "source_ref": "SOP:T1:R2"},
+    {"id": "lamp", "step_number": 3, "label": "300 W Xe Arc Lamp", "spec_text": "AM 1.5G, 100 mW/cm2", "zone": "react", "role": "source", "category": "warning", "ports": ["out:beam"], "source_ref": "SOP:T1:R3"},
+    {"id": "cell", "step_number": 4, "label": "Quartz Flow Reactor", "spec_text": "65 C, 0.12 MPa", "zone": "react", "role": "unit", "category": "primary", "ports": ["in:wet", "in:beam", "out:prod"], "missing_params": ["catalyst_loading_mg"], "source_ref": "SOP:T1:R4"},
+    {"id": "cond", "step_number": 5, "label": "Peltier Cold Trap", "spec_text": "4 C condenser", "zone": "sep", "role": "unit", "category": "accent", "ports": ["in:prod", "out:dry", "out:drain"], "source_ref": "SOP:T1:R5"},
+    {"id": "vent", "step_number": 6, "label": "Liquid Waste Drain", "spec_text": "condensate trap", "zone": "sep", "role": "sink", "category": "muted", "ports": ["in:drain"], "source_ref": "SOP:T1:R6"},
+    {"id": "gcms", "step_number": 7, "label": "Online GC-TCD/FID", "spec_text": "15 min sampling", "zone": "anal", "role": "outlet", "category": "accent", "ports": ["in:dry", "out:sig"], "source_ref": "SOP:T1:R7"},
+    {"id": "pid", "step_number": 8, "label": "PID Flow Controller", "spec_text": "closed-loop PLC", "zone": "anal", "role": "sensor", "category": "alert", "ports": ["in:sig", "out:ctrl"], "source_ref": "SOP:T1:R8"}
+  ],
+  "streams": [
+    {"id": "s1", "source": "mfc", "target": "sat", "source_port": "out:mix", "target_port": "in:mix", "stream_type": "material", "label": "dry CO2", "source_ref": "SOP:Sec2.1"},
+    {"id": "s2", "source": "sat", "target": "cell", "source_port": "out:wet", "target_port": "in:wet", "stream_type": "material", "label": "CO2+H2O", "source_ref": "SOP:Sec2.2"},
+    {"id": "s3", "source": "lamp", "target": "cell", "source_port": "out:beam", "target_port": "in:beam", "stream_type": "optical", "label": "UV-Vis", "source_ref": "SOP:Sec2.2"},
+    {"id": "s4", "source": "cell", "target": "cond", "source_port": "out:prod", "target_port": "in:prod", "stream_type": "material", "label": "CO+H2+H2O", "source_ref": "SOP:Sec2.3"},
+    {"id": "s5", "source": "cond", "target": "vent", "source_port": "out:drain", "target_port": "in:drain", "stream_type": "waste", "label": "condensate", "source_ref": "SOP:Sec2.3"},
+    {"id": "s6", "source": "cond", "target": "gcms", "source_port": "out:dry", "target_port": "in:dry", "stream_type": "material", "label": "dry gas", "source_ref": "SOP:Sec2.4"},
+    {"id": "s7", "source": "gcms", "target": "pid", "source_port": "out:sig", "target_port": "in:sig", "stream_type": "signal", "label": "CO ppm", "source_ref": "SOP:Sec2.4"},
+    {"id": "s8", "source": "pid", "target": "mfc", "source_port": "out:ctrl", "target_port": "in:gas", "stream_type": "feedback", "label": "flow trim", "source_ref": "SOP:Sec2.4"}
+  ]
+}

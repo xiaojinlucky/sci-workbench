@@ -1,0 +1,60 @@
+{
+  "columns": [
+    "method",
+    "method_family",
+    "cells_detected_fig2c",
+    "elongation_corr_fig2e",
+    "source_pmcid"
+  ],
+  "rows": [
+    [
+      "Chromium",
+      "reference_scRNA",
+      "22294",
+      "",
+      "PMC10787788"
+    ],
+    [
+      "BIDCell",
+      "dl_model",
+      "103209",
+      "0.95",
+      "PMC10787788"
+    ],
+    [
+      "Cellpose nuclei dilated",
+      "dilation_baseline",
+      "104307",
+      "0.99",
+      "PMC10787788"
+    ],
+    [
+      "10x",
+      "vendor_expansion",
+      "160254",
+      "0.33",
+      "PMC10787788"
+    ],
+    [
+      "Voronoi",
+      "morph_expansion",
+      "106227",
+      "0.19",
+      "PMC10787788"
+    ],
+    [
+      "Watershed",
+      "morph_expansion",
+      "105527",
+      "0.76",
+      "PMC10787788"
+    ],
+    [
+      "Baysor (no prior)",
+      "probabilistic",
+      "191698",
+      "0.13",
+      "PMC10787788"
+    ]
+  ]
+}

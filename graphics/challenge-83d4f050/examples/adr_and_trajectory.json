@@ -1,0 +1,102 @@
+{
+  "schema_version": "1.0",
+  "run_label": "bio-pathway-adr-replay",
+  "chain_integrity": {
+    "algorithm": "SHA-256",
+    "genesis_hash": "d4a6c4baffe97c5bca8e6dc2e3a4bd50b0742c84f866139187cecf96cfcfb1ef",
+    "entry_count": 5,
+    "tail_hash": "4fd13d0b589fcc55c9efd4c526024f95ce6231fa9c46cdf91ddd60afcfa124cb"
+  },
+  "entries": [
+    {
+      "entry_id": "bio-pathway-ev-01",
+      "created_at_utc": "2026-11-18T15:00:00Z",
+      "phase": "stage1",
+      "action": "PROPOSE_WORKFLOW",
+      "actor": "generator",
+      "record_id": "R1",
+      "input_hash": null,
+      "output_hash": "45909f50046c43ec5306d6484b2cdcd0aaa24b2395f46074569cee1294e1a547",
+      "output": {
+        "reconstructed": true,
+        "adr_lock_sha256": "35a01df833c4b03db2c83ab01be7d25acd24b5f847bba55a3513b4efa35dffc6"
+      },
+      "decision": "PROPOSED",
+      "previous_entry_hash": "d4a6c4baffe97c5bca8e6dc2e3a4bd50b0742c84f866139187cecf96cfcfb1ef"
+    },
+    {
+      "entry_id": "bio-pathway-ev-02",
+      "created_at_utc": "2026-11-18T15:00:00Z",
+      "phase": "stage2",
+      "action": "OVER_DEFENSE_OBJECTION",
+      "actor": "critic",
+      "record_id": "R2",
+      "input_hash": null,
+      "output_hash": "3c0a8d36aea70dbc1bd79a624a49e0a3f163454ce36ecea130e59e6c6538f3fc",
+      "output": {
+        "proposed_option": "blanket_over_defense_caveat_spam"
+      },
+      "decision": "CHALLENGED",
+      "previous_entry_hash": "967bd0dc4d02244641278bb19fd1d557ec498c08a1d3990c7cfc68d5db4423dd"
+    },
+    {
+      "entry_id": "bio-pathway-ev-03",
+      "created_at_utc": "2026-11-18T15:00:00Z",
+      "phase": "stage2",
+      "action": "LOCK_ADR_001",
+      "actor": "coordinator",
+      "record_id": "ADR-001",
+      "input_hash": null,
+      "output_hash": "e3f0d36ded07cc13bfb40477e7836837f0d787ec2f5e66c6392a1fc865bbfa19",
+      "output": {
+        "adr_id": "ADR-001",
+        "adr_lock_sha256": "35a01df833c4b03db2c83ab01be7d25acd24b5f847bba55a3513b4efa35dffc6"
+      },
+      "decision": "ACCEPTED",
+      "previous_entry_hash": "e1f7bb43fc1b38950910ad966c03fd540fd5b6755971f58948e94c4d71969f6e"
+    },
+    {
+      "entry_id": "bio-pathway-ev-04",
+      "created_at_utc": "2026-11-18T15:00:00Z",
+      "phase": "stage3",
+      "action": "RESTORE_ZOMBIE_INTERSECTION",
+      "actor": "downstream",
+      "record_id": "ADR-002",
+      "input_hash": null,
+      "output_hash": "2a9efd34df593ff749a34ec25b83e08de0855235122aafabd7e1f7ea1033b0c5",
+      "output": {
+        "attempted_rejected_option": "mechanical_3algo_intersection"
+      },
+      "decision": "BLOCKED",
+      "previous_entry_hash": "8da06c228a10ffcb6772f0f781bc07db9302c02af4090cfd617745f9e7e33d54"
+    },
+    {
+      "entry_id": "bio-pathway-ev-05",
+      "created_at_utc": "2026-11-18T15:00:00Z",
+      "phase": "stage4",
+      "action": "EMIT_WORKBENCH",
+      "actor": "integrator",
+      "record_id": "REL-01",
+      "input_hash": null,
+      "output_hash": "a6de3a7ccad75da12044d1c4e2047b16c39c97dcab85900c5efbd3473bcafd2e",
+      "output": {
+        "runtime_verified": true
+      },
+      "decision": "PASSED",
+      "previous_entry_hash": "0beba326f8b15c6f20b5cdc0d121e061bc2abdf899404d7de1405aa24608d37e"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "ADR-001",
+      "status": "ACCEPTED",
+      "decision": "Align statistical unit to claim scope (no blind donor-collapse on exploratory cell panels; require biological replicates for cross-donor outcomes).",
+      "rejected_options": [
+        "blanket_over_defense_caveat_spam",
+        "mechanical_3algo_intersection"
+      ],
+      "evidence_sha256": "048635ce84b6855fa50b82e13916b75090f4f41fc3007bf10cf11873c0536bf7"
+    }
+  ],
+  "adr_lock_sha256": "35a01df833c4b03db2c83ab01be7d25acd24b5f847bba55a3513b4efa35dffc6"
+}

@@ -1,0 +1,7 @@
+id,category,value,unit,color,source_ref
+rnp,primary,3.2,uM,#547FA3,SYNTH-EX:Table1:R1
+lnp,secondary,85,nm,#66A9B4,SYNTH-EX:Table1:R2
+dsb,warm,91.4,%,#D19A45,SYNTH-EX:Table1:R3
+dnapk,highlight,1.0,uM,#D77C70,SYNTH-EX:Table1:R4
+hdr,teal,64.8,%,#4E9187,SYNTH-EX:Table1:R5
+nhej,neutral,11.2,%,#F4F6F8,SYNTH-EX:Table1:R6

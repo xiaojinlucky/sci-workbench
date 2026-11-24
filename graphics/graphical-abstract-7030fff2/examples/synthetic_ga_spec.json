@@ -1,0 +1,86 @@
+{
+  "schema": "graphical_abstract_spec_v1",
+  "title": "SYNTHETIC EXAMPLE: Lipid-Shell Nanoparticle Delivery Overcomes Endosomal Trapping",
+  "subtitle": "Four-stage summary from delivery barrier to targeted mRNA expression",
+  "width_mm": 174.0,
+  "height_mm": 96.0,
+  "layout": "1x4",
+  "takeaway": "pH-responsive ionizable shell boosts cytosolic release 3.4-fold with preserved cell viability (>= 92%).",
+  "entity_colors": {
+    "barrier": "#D77C70",
+    "carrier": "#547FA3",
+    "trigger": "#D19A45",
+    "outcome": "#4E9187"
+  },
+  "panels": [
+    {
+      "id": "p1_question",
+      "stage": "question",
+      "badge": "1 | Bottleneck",
+      "title": "Endosomal Trapping",
+      "accent": "#D77C70",
+      "source_ref": "SYNTH-MS-Fig1",
+      "bullets": [
+        "Conventional LNPs retain in late endosomes",
+        "High lysosomal degradation (<15% escape)"
+      ],
+      "highlight": "~85% payload trapped",
+      "nodes": [
+        {"label": "Standard LNP", "color": "#547FA3"},
+        {"label": "Lysosomal Decay", "color": "#D77C70"}
+      ]
+    },
+    {
+      "id": "p2_method",
+      "stage": "method",
+      "badge": "2 | Engineering",
+      "title": "pH-Switchable Shell",
+      "accent": "#547FA3",
+      "source_ref": "SYNTH-MS-Methods",
+      "bullets": [
+        "Branched ester-amine lipid (pKa 6.4)",
+        "Triggered protonation at endosome pH 5.8"
+      ],
+      "highlight": "pH 6.4 membrane switch",
+      "nodes": [
+        {"label": "Engineered LNP", "color": "#547FA3"},
+        {"label": "Acidic Disruption", "color": "#D19A45"}
+      ]
+    },
+    {
+      "id": "p3_result",
+      "stage": "result",
+      "badge": "3 | Core Result",
+      "title": "Cytosolic Release Gain",
+      "accent": "#4E9187",
+      "source_ref": "SYNTH-MS-Fig3B",
+      "bullets": [
+        "3.4x reporter translation vs control",
+        "92% viability across n=6 replicates"
+      ],
+      "highlight": "3.4x release (p < 0.001)",
+      "mini_bars": [
+        {"label": "Ctrl", "value": 1.0, "color": "#D77C70"},
+        {"label": "Base", "value": 1.6, "color": "#547FA3"},
+        {"label": "pH-LNP", "value": 3.4, "color": "#4E9187"}
+      ]
+    },
+    {
+      "id": "p4_conclusion",
+      "stage": "conclusion",
+      "badge": "4 | Conclusion",
+      "title": "Selective mRNA Rescue",
+      "accent": "#D19A45",
+      "source_ref": "SYNTH-MS-Discussion",
+      "bullets": [
+        "Rapid cytosolic mRNA release",
+        "Lower required systemic dose"
+      ],
+      "highlight": "Effective & Biocompatible",
+      "nodes": [
+        {"label": "Cytosolic mRNA", "color": "#4E9187"},
+        {"label": "Target Protein", "color": "#D19A45"}
+      ]
+    }
+  ]
+}

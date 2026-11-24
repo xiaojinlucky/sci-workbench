@@ -1,0 +1,28 @@
+{
+  "id": "route-template-v1",
+  "name": "Parametric Apparatus & Route Template",
+  "type": "template",
+  "domain": ["experimental-apparatus", "technical-route"],
+  "tags": ["apparatus", "tikz", "standalone"],
+  "author": "harbor-apparatus-builder",
+  "license": "MIT",
+  "requires": ["tikz"],
+  "preview": "route_template.png",
+  "edit_contract": {
+    "parameters": [
+      {"name": "\\BoxW", "type": "dimension", "meaning": "Unit box width", "default": "3.0cm"},
+      {"name": "\\BoxH", "type": "dimension", "meaning": "Unit box height", "default": "1.1cm"},
+      {"name": "\\StageGap", "type": "dimension", "meaning": "Horizontal stage separation", "default": "1.4cm"}
+    ],
+    "node_naming": "Semantic stage/unit IDs (inlet, reactor, sensor, outlet)",
+    "styles": ["unitbox", "sensorbox", "matflow", "sigflow", "feedbackflow"],
+    "operations": [
+      {"id": "adjust-spacing", "summary": "Modify \\BoxW, \\BoxH, or \\StageGap"},
+      {"id": "update-labels", "summary": "Edit unit text grounded in source SOP"}
+    ],
+    "invariants": [
+      "Zero inline hex codes inside tikzpicture; use named preamble colors",
+      "Relative positioning only; preserve feedback edge semantics"
+    ]
+  }
+}

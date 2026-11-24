@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "description": "Dynamic standalone TikZ template specification emitted at runtime by apparatus_route_builder.py (no static .tex packaged inside Skill submission).",
+  "document_class": "\\documentclass[border=10pt]{standalone}",
+  "packages": ["tikz"],
+  "tikz_libraries": ["positioning", "arrows.meta", "calc", "fit"],
+  "cjk_conditional_packages": ["xeCJK (under XeLaTeX)", "ctex (under pdfLaTeX)"],
+  "named_palette_tokens": {
+    "otblue": "#547FA3",
+    "otteal": "#4E9187",
+    "otamber": "#D19A45",
+    "otcoral": "#D77C70",
+    "otpurple": "#967A9C",
+    "otslate": "#64748B",
+    "otzonebg": "#F4F7F9"
+  },
+  "default_parameters": {
+    "\\BoxW": "3.4cm",
+    "\\BoxH": "1.2cm",
+    "\\StageGap": "1.6cm",
+    "\\RowGap": "1.0cm"
+  },
+  "style_classes": [
+    "unitbox",
+    "sensorbox",
+    "zonebox",
+    "matflow",
+    "optflow",
+    "sigflow",
+    "ctrlflow",
+    "feedbackflow"
+  ],
+  "invariants": [
+    "Zero inline hex colors inside tikzpicture; reference named \\definecolor tokens only.",
+    "Primary material/signal routes remain monotonically ordered from inlet to outlet.",
+    "Multi-stage zones lay out columns via right=\\StageGap and parallel units via below=\\RowGap."
+  ]
+}

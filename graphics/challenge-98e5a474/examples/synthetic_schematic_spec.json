@@ -1,0 +1,43 @@
+{
+  "title": "CRISPR-Cas9 RNP Delivery & DSB Repair Pathway Selection",
+  "subtitle": "Illustrative Synthetic Example — Source-Bound Entities, Typed Relations & Efficiency Table",
+  "canvas_width_px": 1020,
+  "canvas_height_px": 640,
+  "container_layout": "columns",
+  "assets": [
+    {
+      "id": "motif-rnp-box",
+      "author": "Skill Vector Primitives",
+      "license": "CC0-1.0",
+      "source": "internal-vector-primitive",
+      "version": "1.0"
+    }
+  ],
+  "containers": [
+    {"id": "delivery", "label": "1. Delivery & Entry", "fill": "#EDF4F5", "stroke": "#547FA3", "source_ref": "SYNTH-EX:Sec1"},
+    {"id": "cleavage", "label": "2. Nuclear Targeting", "fill": "#F6F1E8", "stroke": "#D19A45", "source_ref": "SYNTH-EX:Sec2"},
+    {"id": "repair", "label": "3. DSB Repair Outcome", "fill": "#EEF5F0", "stroke": "#4E9187", "source_ref": "SYNTH-EX:Sec3"}
+  ],
+  "nodes": [
+    {"id": "rnp", "label": "Cas9-sgRNA RNP", "container": "delivery", "category": "primary", "asset_id": "motif-rnp-box", "source_ref": "SYNTH-EX:Fig1A"},
+    {"id": "lnp", "label": "Ionizable LNP", "container": "delivery", "category": "secondary", "shape": "ellipse", "source_ref": "SYNTH-EX:Fig1A"},
+    {"id": "dsb", "label": "Target Locus DSB", "container": "cleavage", "category": "warm", "source_ref": "SYNTH-EX:Fig1B"},
+    {"id": "dnapk", "label": "DNA-PKcs Inhibitor", "container": "cleavage", "category": "highlight", "source_ref": "SYNTH-EX:Fig1B"},
+    {"id": "hdr", "label": "Precise HDR Knock-In", "container": "repair", "category": "teal", "source_ref": "SYNTH-EX:Table1"},
+    {"id": "nhej", "label": "Error-Prone NHEJ", "container": "repair", "category": "neutral", "source_ref": "SYNTH-EX:Table1"}
+  ],
+  "edges": [
+    {"id": "e1", "source": "lnp", "target": "rnp", "relation": "sequence", "label": "encapsulate", "source_ref": "SYNTH-EX:Sec1"},
+    {"id": "e2", "source": "rnp", "target": "dsb", "relation": "activate", "label": "cleave", "source_ref": "SYNTH-EX:Sec2"},
+    {"id": "e3", "source": "dsb", "target": "hdr", "relation": "activate", "label": "ssODN donor", "source_ref": "SYNTH-EX:Sec3"},
+    {"id": "e4", "source": "dsb", "target": "nhej", "relation": "parallel", "label": "default", "source_ref": "SYNTH-EX:Sec3"},
+    {"id": "e5", "source": "dnapk", "target": "nhej", "relation": "inhibit", "label": "block", "source_ref": "SYNTH-EX:Sec3"},
+    {"id": "e6", "source": "hdr", "target": "rnp", "relation": "feedback", "label": "QC readout", "source_ref": "SYNTH-EX:Sec3"}
+  ],
+  "legend": [
+    {"key": "primary", "label": "RNP Complex", "color": "#547FA3"},
+    {"key": "warm", "label": "DSB Intermediate", "color": "#D19A45"},
+    {"key": "teal", "label": "HDR Product", "color": "#4E9187"},
+    {"key": "highlight", "label": "Small-Mol Inhibitor", "color": "#D77C70"}
+  ]
+}

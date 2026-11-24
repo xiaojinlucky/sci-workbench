@@ -1,0 +1,42 @@
+{
+  "presets": {
+    "cell_300dpi": {
+      "description": "Cell-oriented publication raster preview alongside searchable vector PDF and layered SVG/Draw.io",
+      "dpi": 300,
+      "color_space": "RGB",
+      "preferred_backend": "rsvg-convert",
+      "font_family": "Arial, Liberation Sans, DejaVu Sans, sans-serif",
+      "min_font_pt": 7.0
+    },
+    "nature_300dpi": {
+      "description": "Nature/Science-compatible 300 dpi composite preview with vector PDF/SVG master",
+      "dpi": 300,
+      "color_space": "RGB",
+      "preferred_backend": "rsvg-convert",
+      "font_family": "Arial, Liberation Sans, DejaVu Sans, sans-serif",
+      "min_font_pt": 6.5
+    },
+    "lineart_600dpi": {
+      "description": "High-resolution 600 dpi line-art PNG for crisp schematic print proofs alongside vector PDF",
+      "dpi": 600,
+      "color_space": "RGB",
+      "preferred_backend": "rsvg-convert",
+      "font_family": "Arial, Liberation Sans, DejaVu Sans, sans-serif",
+      "min_font_pt": 7.0
+    },
+    "presentation_150dpi": {
+      "description": "Lightweight 150 dpi preview for rapid draft review (not for final manuscript submission)",
+      "dpi": 150,
+      "color_space": "RGB",
+      "preferred_backend": "rsvg-convert",
+      "font_family": "Arial, Liberation Sans, DejaVu Sans, sans-serif",
+      "min_font_pt": 10.0
+    }
+  },
+  "default_preset": "cell_300dpi",
+  "backend_fallback_notes": {
+    "rsvg-convert": "Primary vector PDF + PNG renderer; preserves inline <tspan> bold, italic, color, and xml:space whitespace.",
+    "resvg_py": "High-fidelity PNG renderer when librsvg CLI is unavailable.",
+    "matplotlib": "Pure-Python fallback vector PDF/PNG mirror; emits degraded_warning when SVG contains multi-run styled <tspan> text."
+  }
+}

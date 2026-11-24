@@ -1,0 +1,19 @@
+{
+  "case_id": "bio-pathway-worked-pmc10787788",
+  "title": "Subcellular Spatial Segmentation & Nuclei Schematic",
+  "primary_doi": "10.1038/s41467-023-44560-w",
+  "pmcid": "PMC10787788",
+  "license": "CC-BY-4.0",
+  "abstract": "Recent advances in subcellular imaging transcriptomics platforms have enabled high-resolution spatial mapping of gene expression, while also introducing significant analytical challenges in accurately identifying cells and assigning transcripts. Existing methods grapple with cell segmentation, frequently leading to fragmented cells or oversized cells that capture contaminated expression. To this end, we present BIDCell, a self-supervised deep learning-based framework with biologically-informed loss functions that learn relationships between spatially resolved gene expression and cell morphology. BIDCell incorporates cell-type data, including single-cell transcriptomics data from public repositories, with cell morphology information. Using a comprehensive evaluation framework consisting of metrics in five complementary categories for cell segmentation performance, we demonstrate that BIDCell outperforms other state-of-the-art methods according to many metrics across a variety of tissue types and technology platforms. Our findings underscore the potential of BIDCell to significantly enhance single-cell spatial expression analyses, enabling great potential in biological discovery.",
+  "sections_provided": [
+    "Abstract",
+    "Results",
+    "Figures"
+  ],
+  "input_documents": [
+    "paper_text.md",
+    "observations.json",
+    "workbench_config_example.json"
+  ],
+  "domain_mode": "graphics_pathway"
+}

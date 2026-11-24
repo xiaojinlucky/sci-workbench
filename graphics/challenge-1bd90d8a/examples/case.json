@@ -1,0 +1,19 @@
+{
+  "case_id": "scientific-chart-worked-pmc8479118",
+  "title": "Source-Grounded Publication Figure Assembly",
+  "primary_doi": "10.1038/s41467-021-25960-2",
+  "pmcid": "PMC8479118",
+  "license": "CC-BY-4.0",
+  "abstract": "Differential expression analysis in single-cell transcriptomics enables the dissection of cell-type-specific responses to perturbations such as disease, trauma, or experimental manipulations. While many statistical methods are available to identify differentially expressed genes, the principles that distinguish these methods and their performance remain unclear. Here, we show that the relative performance of these methods is contingent on their ability to account for variation between biological replicates. Methods that ignore this inevitable variation are biased and prone to false discoveries. Indeed, the most widely used methods can discover hundreds of differentially expressed genes in the absence of biological differences. To exemplify these principles, we exposed true and false discoveries of differentially expressed genes in the injured mouse spinal cord.",
+  "sections_provided": [
+    "Abstract",
+    "Results",
+    "Figures"
+  ],
+  "input_documents": [
+    "paper_text.md",
+    "observations.json",
+    "workbench_config_example.json"
+  ],
+  "domain_mode": "charting"
+}

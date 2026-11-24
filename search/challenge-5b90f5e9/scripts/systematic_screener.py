@@ -29,7 +29,13 @@ import preflight_probe
 import result_guard
 from audit_chain import append_audit_entry, init_audit_log
 from corpus_loader import load_input_bundle
-from evidence_state_guard import extract_sentence_anchor, fold_unicode
+from evidence_state_guard import (
+    align_output_contract,
+    clause_term_match,
+    extract_sentence_anchor,
+    extract_sentence_anchor_detail,
+    fold_unicode,
+)
 from prisma_flow_auditor import deduplicate_bibliography, verify_prisma_conservation
 
 REASON_CODES: dict[str, str] = {
@@ -128,6 +134,39 @@ def compute_dual_reviewer_stats(reviewer_opinions: dict[str, list[dict[str, Any]
     }
 
 
+SEMANTIC_EXCLUSION_NEGATION_RE = re.compile(
+    r"\b(?:not\s+(?:an?\s+)?|non[- ]|unlike\s+(?:an?\s+)?|rather\s+than\s+|in\s+contrast\s+to\s+|both\s+|in\s+addition\s+to\s+|combined\s+with\s+)",
+    re.I,
+)
+CLINICAL_OR_INVIVO_CONTRAST_RE = re.compile(
+    r"\b(?:in\s+vivo|human\s+(?:patients|cohort|subjects|trial)|clinical\s+trial|randomized|murine\s+model|patients?\s+with)\b",
+    re.I,
+)
+
+
+def _check_semantic_exclusion_boundary(term: str, text_blob: str) -> tuple[bool, bool, dict[str, Any]]:
+    """Return (matched, is_ambiguous_boundary, anchor_detail) preventing silent auto-exclusion on negated/mixed sentences."""
+    text_low = fold_unicode(text_blob).lower()
+    ok, _ = clause_term_match(term, text_low)
+    if not ok and " " in term:
+        ok = bool(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text_low, re.I))
+    if not ok:
+        return False, False, {}
+    det = extract_sentence_anchor_detail(text_blob, re.escape(term))
+    sent = det.get("quote") or ""
+    sent_low = fold_unicode(sent).lower()
+    # Check local negation/contrast before the exclusion term
+    m_pos = re.search(re.escape(term), sent_low, re.I)
+    prefix = sent_low[max(0, (m_pos.start() - 45) if m_pos else 0):(m_pos.start() if m_pos else 45)]
+    is_negated = bool(SEMANTIC_EXCLUSION_NEGATION_RE.search(prefix))
+    # Check mixed study design (e.g. 'in vitro' paired with 'in vivo' or 'patients'/'clinical trial' in same record)
+    is_mixed_boundary = (
+        ("in vitro" in term or "animal" in term)
+        and bool(CLINICAL_OR_INVIVO_CONTRAST_RE.search(fold_unicode(text_blob).lower()))
+    )
+    return True, (is_negated or is_mixed_boundary), det
+
+
 def screen_record_with_clauses(
     rec: dict[str, Any],
     criteria: dict[str, Any],
@@ -138,12 +177,13 @@ def screen_record_with_clauses(
     title = str(rec.get("title") or "").strip()
     abstract = str(rec.get("abstract") or "").strip()
     body = str(rec.get("text") or "").strip()
-    blob = " ".join(part for part in (title, abstract, body) if part).strip()
-    low = fold_unicode(blob).lower()
+    # STRICT Stage 1 (Title/Abstract ONLY) vs Stage 2 (Full-Text) separation
+    tiab_blob = " ".join(part for part in (title, abstract) if part).strip()
+    tiab_low = fold_unicode(tiab_blob).lower()
+    ft_blob = body.strip()
+    ft_low = fold_unicode(ft_blob).lower()
 
     raw_req = criteria.get("required_terms") or criteria.get("include_keywords") or []
-    # Support both flat strings and synonym-group lists or PICO clause dicts:
-    # e.g. required_terms=[["butyrate", "SCFA"], ["colitis", "IBD"]] or pico_clauses={"P": [...], "I": [...]}
     clause_groups: list[tuple[str, list[str]]] = []
     if isinstance(criteria.get("pico_clauses"), dict) and criteria["pico_clauses"]:
         for ck, cv in criteria["pico_clauses"].items():
@@ -183,82 +223,206 @@ def screen_record_with_clauses(
     decision = "include"
     reason_code = "INC_MATCH"
     triggered_clause = "all_inclusion_clauses_satisfied"
-    evidence_quote = extract_sentence_anchor(blob, req_terms[0]) if req_terms else " ".join(blob.split())[:200]
+    screening_stage = "stage1_title_abstract"
+    stage1_decision = "pass_to_stage2"
+    stage2_decision = "not_evaluated"
+    evidence_quote = extract_sentence_anchor(tiab_blob, req_terms[0]) if (req_terms and tiab_blob) else " ".join(tiab_blob.split())[:200]
     matched_hits: list[str] = []
     missing_clauses: list[str] = []
+    match_modes: list[str] = []
+    anchor_detail: dict[str, Any] = {"sentence_index": None, "char_start": None, "char_end": None, "anchor_granularity": "sentence"}
 
-    # Step 1: Hard exclusions that are decisive even if abstract/year is absent
-    design_hit = next((d for d in excl_designs if re.search(rf"\b{re.escape(d)}\b", low)), None)
-    if not design_hit:
+    # Stage 1 (Title & Abstract ONLY — rec['text'] fulltext is NEVER mixed into Stage 1!)
+    stage1_design_hit = next((d for d in excl_designs if re.search(rf"\b{re.escape(d)}\b", tiab_low)), None)
+    if not stage1_design_hit:
         for pat in DEFAULT_EXCLUDED_DESIGN_PATTERNS:
-            m = re.search(pat, low, re.I)
+            m = re.search(pat, tiab_low, re.I)
             if m and (excl_terms or excl_designs or criteria.get("exclude_non_empirical", True)):
                 if any(tok in m.group(0).lower() for tok in ("editorial", "commentary", "erratum", "corrigendum", "retraction")):
-                    design_hit = m.group(0).lower()
+                    stage1_design_hit = m.group(0).lower()
                     break
 
-    excl_hit = next((et for et in excl_terms if et in low), None)
+    stage1_excl_hit = None
+    stage1_excl_ambig = False
+    stage1_excl_det: dict[str, Any] = {}
+    for et in excl_terms:
+        m_ok, m_ambig, m_det = _check_semantic_exclusion_boundary(et, tiab_blob)
+        if m_ok:
+            stage1_excl_hit = et
+            stage1_excl_ambig = m_ambig
+            stage1_excl_det = m_det
+            break
 
     if disagreement:
         decision = "borderline"
+        stage1_decision = "borderline_arbitration"
         reason_code = "BORDERLINE_NEEDS_ARBITRATION"
         triggered_clause = f"dual_reviewer_conflict:{conflict_type}"
-        evidence_quote = " ".join((title or blob).split())[:200]
+        evidence_quote = " ".join((title or tiab_blob).split())[:200]
     elif allowed_langs and rec_lang and rec_lang not in allowed_langs:
         decision = "exclude"
+        stage1_decision = "exclude"
         reason_code = "EXC_WRONG_LANGUAGE"
         triggered_clause = f"allowed_languages={allowed_langs}"
         evidence_quote = f"Declared record language='{rec_lang}' outside allowed {allowed_langs}; title: {title[:140]}"
     elif year_min is not None and yr is not None and int(yr) < int(year_min):
         decision = "exclude"
+        stage1_decision = "exclude"
         reason_code = "EXC_OUT_OF_DATE_RANGE"
         triggered_clause = f"year_min={year_min}"
         evidence_quote = f"Publication year {yr} < frozen protocol year_min {year_min}; title: {title[:140]}"
     elif year_max is not None and yr is not None and int(yr) > int(year_max):
         decision = "exclude"
+        stage1_decision = "exclude"
         reason_code = "EXC_OUT_OF_DATE_RANGE"
         triggered_clause = f"year_max={year_max}"
         evidence_quote = f"Publication year {yr} > frozen protocol year_max {year_max}; title: {title[:140]}"
-    elif excl_hit is not None:
+    elif stage1_excl_hit is not None:
+        matched_hits = [stage1_excl_hit]
+        anchor_detail = stage1_excl_det or extract_sentence_anchor_detail(tiab_blob, re.escape(stage1_excl_hit))
+        evidence_quote = anchor_detail.get("quote", "")
+        if stage1_excl_ambig:
+            decision = "borderline"
+            stage1_decision = "borderline_semantic_exclusion"
+            reason_code = "BORDERLINE_NEEDS_ARBITRATION"
+            triggered_clause = f"semantic_exclusion_boundary_stage1:{stage1_excl_hit}"
+        else:
+            decision = "exclude"
+            stage1_decision = "exclude"
+            is_des = stage1_excl_hit in {"editorial", "commentary", "erratum", "corrigendum", "letter", "review", "protocol"}
+            reason_code = "EXC_WRONG_DESIGN" if is_des else "EXC_WRONG_POPULATION_OR_OBJECT"
+            triggered_clause = f"stage1_exclude_term:{stage1_excl_hit}"
+    elif stage1_design_hit is not None and (excl_designs or any(k in stage1_design_hit for k in ("editorial", "commentary", "erratum", "retraction"))):
         decision = "exclude"
-        is_des = excl_hit in {"editorial", "commentary", "erratum", "corrigendum", "letter", "review", "protocol"}
-        reason_code = "EXC_WRONG_DESIGN" if is_des else "EXC_WRONG_POPULATION_OR_OBJECT"
-        triggered_clause = f"exclude_term:{excl_hit}"
-        matched_hits = [excl_hit]
-        evidence_quote = extract_sentence_anchor(blob, re.escape(excl_hit))
-    elif design_hit is not None and (excl_designs or any(k in design_hit for k in ("editorial", "commentary", "erratum", "retraction"))):
-        decision = "exclude"
+        stage1_decision = "exclude"
         reason_code = "EXC_WRONG_DESIGN"
-        triggered_clause = f"exclude_design:{design_hit}"
-        matched_hits = [design_hit]
-        evidence_quote = extract_sentence_anchor(blob, re.escape(design_hit))
+        triggered_clause = f"stage1_exclude_design:{stage1_design_hit}"
+        matched_hits = [stage1_design_hit]
+        anchor_detail = extract_sentence_anchor_detail(tiab_blob, re.escape(stage1_design_hit))
+        evidence_quote = anchor_detail["quote"]
     elif not abstract and not body:
         decision = "borderline"
+        stage1_decision = "borderline_missing_abstract"
         reason_code = "BORDERLINE_NEEDS_ARBITRATION"
         triggered_clause = "missing_abstract_and_body"
         evidence_quote = title[:200]
-    elif clause_groups:
+    elif not clause_groups or criteria.get("inclusion_ambiguous"):
+        # Safety gate: NEVER auto-include when inclusion criteria are empty or explicitly ambiguous
+        decision = "borderline"
+        stage1_decision = "borderline_ambiguous_criteria"
+        reason_code = "BORDERLINE_NEEDS_ARBITRATION"
+        triggered_clause = "empty_or_ambiguous_inclusion_criteria_requires_human_confirmation"
+        evidence_quote = " ".join(tiab_blob.split())[:200]
+    else:
+        # Stage 1 inclusion check strictly on title + abstract ONLY
         hits = []
         missing_clauses = []
         for cname, synonyms in clause_groups:
-            matched_syn = next((syn for syn in synonyms if syn in low), None)
+            matched_syn = None
+            matched_mode = "none"
+            for syn in synonyms:
+                ok_m, mode_m = clause_term_match(syn, tiab_low)
+                if ok_m:
+                    matched_syn = syn
+                    matched_mode = mode_m
+                    break
             if matched_syn is not None:
                 hits.append(matched_syn)
+                match_modes.append(f"stage1:{matched_syn}:{matched_mode}")
             else:
                 missing_clauses.append(f"{cname}:{'|'.join(synonyms[:3])}")
         matched_hits = hits
         if not hits:
             decision = "exclude"
+            stage1_decision = "exclude"
             reason_code = "EXC_WRONG_POPULATION_OR_OBJECT"
-            triggered_clause = f"required_clauses_none_matched:{[c[0] for c in clause_groups]}"
+            triggered_clause = f"stage1_required_clauses_none_matched:{[c[0] for c in clause_groups]}"
             evidence_quote = " ".join((abstract or title).split())[:200]
         elif len(hits) < len(clause_groups) and len(clause_groups) >= 2:
             decision = "borderline"
+            stage1_decision = "borderline_partial_stage1"
             reason_code = "BORDERLINE_PARTIAL_CLAUSE_MATCH"
-            triggered_clause = f"missing_required_clauses:{missing_clauses}"
-            evidence_quote = extract_sentence_anchor(blob, re.escape(hits[0]))
+            triggered_clause = f"stage1_missing_required_clauses:{missing_clauses}"
+            anchor_detail = extract_sentence_anchor_detail(tiab_blob, re.escape(hits[0][:5]))
+            evidence_quote = anchor_detail["quote"]
         else:
-            evidence_quote = extract_sentence_anchor(blob, re.escape(hits[0]))
+            stage1_decision = "pass_to_stage2"
+            anchor_detail = extract_sentence_anchor_detail(tiab_blob, re.escape(hits[0][:5]))
+            evidence_quote = anchor_detail["quote"]
+
+    # Stage 2 (Full-Text Eligibility Assessment — runs ONLY for records passing Stage 1)
+    if decision in {"include", "borderline"} and stage1_decision in {"pass_to_stage2", "borderline_partial_stage1"}:
+        screening_stage = "stage2_fulltext"
+        ft_status = str(rec.get("retrieval_status") or "").strip().lower()
+        ft_unavailable = (
+            ft_status in {"not_retrieved", "unavailable", "paywalled", "missing_fulltext"}
+            or (require_fulltext and rec.get("fulltext_available") is False)
+        )
+        if decision == "include" and ft_unavailable:
+            decision = "not_retrieved"
+            stage2_decision = "not_retrieved"
+            reason_code = "FULLTEXT_NOT_RETRIEVED"
+            triggered_clause = "fulltext_unavailable_after_tiab_pass"
+        elif ft_blob:
+            # Check fulltext-only exclusions (with semantic boundary guard) and Stage-2 clause confirmation
+            ft_excl_hit = None
+            ft_excl_ambig = False
+            ft_excl_det: dict[str, Any] = {}
+            for et in excl_terms:
+                m_ok, m_ambig, m_det = _check_semantic_exclusion_boundary(et, ft_blob)
+                if m_ok:
+                    ft_excl_hit = et
+                    ft_excl_ambig = m_ambig
+                    ft_excl_det = m_det
+                    break
+            if ft_excl_hit is not None:
+                matched_hits = list(dict.fromkeys(matched_hits + [ft_excl_hit]))
+                anchor_detail = ft_excl_det or extract_sentence_anchor_detail(ft_blob, re.escape(ft_excl_hit))
+                evidence_quote = anchor_detail.get("quote", "")
+                if ft_excl_ambig:
+                    decision = "borderline"
+                    stage2_decision = "borderline_semantic_exclusion_stage2"
+                    reason_code = "BORDERLINE_NEEDS_ARBITRATION"
+                    triggered_clause = f"semantic_exclusion_boundary_stage2:{ft_excl_hit}"
+                else:
+                    decision = "exclude"
+                    stage2_decision = "exclude"
+                    is_des = ft_excl_hit in {"editorial", "commentary", "erratum", "corrigendum", "letter", "review", "protocol"}
+                    reason_code = "EXC_WRONG_DESIGN" if is_des else "EXC_WRONG_POPULATION_OR_OBJECT"
+                    triggered_clause = f"stage2_fulltext_exclude_term:{ft_excl_hit}"
+            elif decision == "borderline" and stage1_decision == "borderline_partial_stage1" and clause_groups:
+                # Re-check missing Stage 1 clauses against Stage 2 fulltext
+                ft_hits = []
+                ft_missing = []
+                for cname, synonyms in clause_groups:
+                    matched_syn = None
+                    matched_mode = "none"
+                    for syn in synonyms:
+                        ok_m, mode_m = clause_term_match(syn, tiab_low + " " + ft_low)
+                        if ok_m:
+                            matched_syn = syn
+                            matched_mode = mode_m
+                            break
+                    if matched_syn:
+                        ft_hits.append(matched_syn)
+                        match_modes.append(f"stage2:{matched_syn}:{matched_mode}")
+                    else:
+                        ft_missing.append(f"{cname}:{'|'.join(synonyms[:3])}")
+                if len(ft_hits) == len(clause_groups):
+                    decision = "include"
+                    stage2_decision = "include_fulltext_verified"
+                    reason_code = "INC_MATCH"
+                    triggered_clause = "stage2_fulltext_all_inclusion_clauses_satisfied"
+                    missing_clauses = []
+                    matched_hits = ft_hits
+                    anchor_detail = extract_sentence_anchor_detail(ft_blob, re.escape(ft_hits[-1][:5]))
+                    evidence_quote = anchor_detail["quote"]
+                else:
+                    stage2_decision = "borderline_stage2"
+            else:
+                stage2_decision = "include_fulltext_verified" if decision == "include" else "borderline_stage2"
+        else:
+            stage2_decision = "tiab_only_no_fulltext_body" if decision == "include" else "borderline_no_fulltext"
 
     missing_critical_fields: list[str] = []
     if year_missing and decision != "exclude":
@@ -268,17 +432,6 @@ def screen_record_with_clauses(
             reason_code = "BORDERLINE_MISSING_REQUIRED_METADATA"
             triggered_clause = f"missing_protocol_bounded_year[{year_min},{year_max}]"
 
-    # Separate FULLTEXT_NOT_RETRIEVED from exclusion cleanly (PRISMA 2020)
-    ft_status = str(rec.get("retrieval_status") or "").strip().lower()
-    ft_unavailable = (
-        ft_status in {"not_retrieved", "unavailable", "paywalled", "missing_fulltext"}
-        or (require_fulltext and rec.get("fulltext_available") is False)
-    )
-    if decision == "include" and ft_unavailable:
-        decision = "not_retrieved"
-        reason_code = "FULLTEXT_NOT_RETRIEVED"
-        triggered_clause = "fulltext_unavailable_after_tiab_pass"
-
     return {
         "record_id": rid,
         "title": title,
@@ -287,13 +440,24 @@ def screen_record_with_clauses(
         "alt_dois": rec.get("alt_dois", []),
         "found_in_sources": rec.get("found_in_sources", [rec.get("source")]),
         "source_file": rec.get("source_file"),
+        "screening_stage": screening_stage,
+        "stage1_decision": stage1_decision,
+        "stage2_decision": stage2_decision,
         "decision": decision,
         "reason_code": reason_code,
         "reason_description": REASON_CODES.get(reason_code, ""),
         "triggered_clause": triggered_clause,
         "matched_terms": matched_hits,
+        "match_modes": match_modes,
         "missing_clauses": missing_clauses,
         "evidence_quote": evidence_quote,
+        "quote_anchor": {
+            "stage": screening_stage,
+            "sentence_index": anchor_detail.get("sentence_index"),
+            "char_start": anchor_detail.get("char_start"),
+            "char_end": anchor_detail.get("char_end"),
+            "granularity": anchor_detail.get("anchor_granularity"),
+        },
         "missing_critical_fields": missing_critical_fields,
         "reviewer_opinions": opinions,
         "conflict_type": conflict_type,
@@ -362,6 +526,17 @@ def render_markdown_ledger(ledger: dict[str, Any]) -> str:
             "## 5. Protocol Criteria-Drift Audit",
             f"Detected `{len(ledger['criteria_drift_audit'])}` record(s) whose prior decision diverges from the active frozen protocol and require retroactive re-screening.",
         ])
+
+    if ledger.get("ingest_diagnostics"):
+        lines.extend([
+            "",
+            "## 6b. Snapshot Input Provenance (Per-File Record Accounting)",
+            "",
+            "| Source Artifact | Format | Records Ingested |",
+            "| --- | --- | ---: |",
+        ])
+        for diag in ledger["ingest_diagnostics"]:
+            lines.append(f"| `{diag.get('file')}` | `{diag.get('format')}` | {diag.get('count', diag.get('chars', 0))} |")
 
     lines.extend([
         "",
@@ -579,6 +754,10 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         ],
         "gaps": gaps,
     }
+    patch, oc_gaps = align_output_contract(patch, case_data)
+    if oc_gaps:
+        gaps.extend(oc_gaps)
+        patch["gaps"] = gaps
     res = result_guard.update_result(result_path, patch, finalize=True)
     grounding = gap_gate.check_grounding(res, [input_dir])
     if not grounding["ok"]:

@@ -33,7 +33,9 @@ from audit_chain import append_audit_entry, init_audit_log
 from corpus_loader import load_input_bundle
 from evidence_state_guard import (
     RETRACTION_CUE_RE,
+    align_output_contract,
     classify_five_state_support,
+    clause_term_match,
     fold_unicode,
     normalize_doi,
     normalize_first_author_surname,
@@ -288,8 +290,8 @@ def attribute_omission(
     missing_blocks: list[list[str]] = []
     title_only_blocked_blocks: list[list[str]] = []
     for blk in concept_blocks:
-        in_title = any(t in title_txt for t in blk)
-        in_full = any(t in full_blob for t in blk)
+        in_title = any(clause_term_match(t, title_txt)[0] for t in blk)
+        in_full = any(clause_term_match(t, full_blob)[0] for t in blk)
         if not in_full:
             missing_blocks.append(blk)
         elif not in_title and in_full and "title" in field_scope and "abstract" not in field_scope and "all" not in field_scope:
@@ -463,7 +465,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"| Post-Supplemental Coverage Ratio (Raw / Actionable) | {report['post_supplemental_coverage_ratio']} / {report['actionable_post_supplemental_coverage_ratio']} |",
         f"| Supplemental Marginal Net Gain | {report['supplemental_marginal_gain']} |",
         f"| Supplemental Empty Spin Detected | {report['supplemental_empty_spin_detected']} |",
-        f"| Residual Omissions | {len(report['residual_omissions'])} |",
+        f"| Residual Omissions (Raw / Actionable) | {len(report['residual_omissions'])} / {report.get('actionable_residual_omission_count', len(report['residual_omissions']))} |",
         "",
         "## 2. Omission Breakdown by Category",
         "",
@@ -476,26 +478,53 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         if base_counts.get(cat, 0) or res_counts.get(cat, 0):
             lines.append(f"| `{cat}` | {base_counts.get(cat, 0)} | {res_counts.get(cat, 0)} |")
 
+    if report.get("ingest_diagnostics"):
+        lines.extend([
+            "",
+            "## 2b. Snapshot Input Provenance (Traceable Hit Pool)",
+            "",
+            "| Source Artifact | Format | Parsed Records |",
+            "| --- | --- | ---: |",
+        ])
+        for diag in report["ingest_diagnostics"]:
+            lines.append(f"| `{diag.get('file')}` | `{diag.get('format')}` | {diag.get('count', diag.get('chars', 0))} |")
+
     if report.get("per_source_coverage"):
         lines.extend([
             "",
-            "## 3. Per-Source & Per-Query Contribution",
+            "## 3. Per-Source & Per-Query Contribution (In-Window Verified)",
             "",
-            "| Source / Query | Matched Seeds | Unique-Only Seeds | Coverage of Raw Ref |",
-            "| --- | --- | --- | --- |",
+            "| Source / Query | Raw Hits | Matched Seeds | Unique-Only Seeds | Coverage of Raw Ref |",
+            "| --- | ---: | ---: | ---: | ---: |",
         ])
         for row in report["per_source_coverage"]:
             lines.append(
-                f"| `{row['source_or_query']}` | {row['matched_count']} | {row['unique_matched_count']} | {row['coverage_ratio']} |"
+                f"| `{row['source_or_query']}` | {row.get('raw_hit_count', 0)} | {row['matched_count']} | {row['unique_matched_count']} | {row['coverage_ratio']} |"
             )
 
-    lines.extend(["", "## 4. Itemized Missed References & Attribution", ""])
+    if report.get("out_of_window_snapshot_matches"):
+        lines.extend(["", "## 3b. Out-of-Window Snapshot Matches Excluded from In-Window Coverage", ""])
+        for oow in report["out_of_window_snapshot_matches"]:
+            lines.append(
+                f"- **{oow['reference_id']}** (year={oow['year']}) matched raw snapshot `{oow['source_file']}` via `{oow['match_method']}`, "
+                f"excluded from in-window query `{oow['query_id']}` ({oow['window_min']}–{oow['window_max']}) and attributed to `date_window_cutoff`."
+            )
+
+    recovered_map = {s["reference_id"]: s["query_id"] for s in report.get("supplemental_recoveries", [])}
+    lines.extend(["", "## 4. Itemized Baseline Missed References & Post-Supplemental Status", ""])
     if not report["missed_references_attributed"]:
         lines.append("No baseline omissions detected against the frozen reference set.")
     else:
         for m in report["missed_references_attributed"]:
+            rid = m["record_id"]
+            if rid in recovered_map:
+                post_tag = f"RECOVERED by `{recovered_map[rid]}`"
+            elif m["omission_category"] == "retracted_or_unavailable":
+                post_tag = "EXCLUDED FROM ACTIONABLE DENOMINATOR (retracted/unavailable)"
+            else:
+                post_tag = "RESIDUAL ACTIONABLE OMISSION"
             lines.append(
-                f"- **{m['record_id']}** ({m.get('year') or 'n.d.'}) — `{m['omission_category']}` "
+                f"- **{rid}** ({m.get('year') or 'n.d.'}) — `{m['omission_category']}` [{post_tag}] "
                 f"[query=`{m['query_id']}`, field=`{m['field_scope']}`]: {m['evidence']}"
             )
 
@@ -550,28 +579,175 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
     ).hexdigest()
 
     query_specs = _collect_query_specs(case_data)
+    if not query_specs:
+        query_specs = [{"query_id": "Q_baseline", "field_scope": "unspecified"}]
     failed_sources = _collect_failed_sources(case_data)
+    primary_qm = query_specs[0]
+    q_year_min = primary_qm.get("year_min")
+    q_year_max = primary_qm.get("year_max")
+    q_primary_id = str(primary_qm.get("query_id") or "Q_baseline")
+
+    def _has_complex_nested_boolean(qstr: str) -> bool:
+        depth = 0
+        max_depth = 0
+        for ch in (qstr or ""):
+            if ch == "(":
+                depth += 1
+                max_depth = max(max_depth, depth)
+            elif ch == ")":
+                depth = max(0, depth - 1)
+        if max_depth >= 2:
+            return True
+        return bool(re.search(r"\b(?:NOT\s*\(|NEAR/\d+|ADJ\d*|W/\d+)\b", qstr or "", re.I))
+
+    def _is_within_window(ref_obj: dict[str, Any], hit_obj: dict[str, Any], y_min: Any, y_max: Any) -> tuple[bool, int | None]:
+        yr = ref_obj.get("year") if ref_obj.get("year") is not None else hit_obj.get("year")
+        if yr is None:
+            return True, None
+        try:
+            y_int = int(yr)
+        except Exception:
+            return True, None
+        if y_min is not None and y_int < int(y_min):
+            return False, y_int
+        if y_max is not None and y_int > int(y_max):
+            return False, y_int
+        return True, y_int
+
+    def _is_within_query_window(ref_obj: dict[str, Any], hit_obj: dict[str, Any]) -> tuple[bool, int | None]:
+        return _is_within_window(ref_obj, hit_obj, q_year_min, q_year_max)
+
+    # Build strict per-query (query x reference) attribution matrix — never mix multi-query concept blocks
+    complex_boolean_queries: list[str] = []
+    query_reference_matrix: list[dict[str, Any]] = []
+    ref_in_window_hits: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    ref_per_query_omissions: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    out_of_window_matches: list[dict[str, Any]] = []
+
+    for q_idx, qspec in enumerate(query_specs, 1):
+        qid = str(qspec.get("query_id") or f"Q{q_idx}_baseline")
+        qstr = str(qspec.get("query_string") or qspec.get("query") or "")
+        q_dbs = {str(d).lower() for d in (qspec.get("databases") or qspec.get("sources") or []) if d}
+        if qspec.get("database"):
+            q_dbs.add(str(qspec["database"]).lower())
+        y_min_q = qspec.get("year_min")
+        y_max_q = qspec.get("year_max")
+        f_scope_q = str(qspec.get("field_scope") or "unspecified").lower()
+        is_complex_bool = _has_complex_nested_boolean(qstr)
+        if is_complex_bool:
+            complex_boolean_queries.append(qid)
+
+        # Scope hits to this executed query (match query_id or, when single baseline query, all baseline hits)
+        if len(query_specs) == 1:
+            q_hits_pool = dedup_hits
+        else:
+            q_hits_pool = [
+                h for h in dedup_hits
+                if (str(h.get("query_id") or "") == qid)
+                or (not h.get("query_id") and (not q_dbs or str(h.get("source") or "").lower() in q_dbs))
+            ]
+
+        q_status = str(qspec.get("status") or ("partial_source_failure" if failed_sources else "executed"))
+        for ref in frozen_refs:
+            hit, method, identity_candidate = match_reference_against_hits(ref, q_hits_pool)
+            if hit is not None:
+                in_win, eff_yr = _is_within_window(ref, hit, y_min_q, y_max_q)
+                if in_win:
+                    match_rec = {
+                        "reference_id": ref["record_id"],
+                        "hit_id": hit["record_id"],
+                        "title": ref.get("title"),
+                        "doi": ref.get("doi") or hit.get("doi") or None,
+                        "match_method": method,
+                        "source": hit.get("source"),
+                        "found_in_sources": hit.get("found_in_sources", [hit.get("source")]),
+                        "source_file": hit.get("source_file"),
+                        "query_id": qid,
+                        "field_scope": f_scope_q,
+                        "year_window": [y_min_q, y_max_q],
+                        "evidence_state": "SUPPORTED",
+                    }
+                    ref_in_window_hits[ref["record_id"]].append(match_rec)
+                    query_reference_matrix.append({
+                        "query_id": qid,
+                        "reference_id": ref["record_id"],
+                        "status": "matched_in_window",
+                        "match_method": method,
+                        "field_scope": f_scope_q,
+                        "year_window": [y_min_q, y_max_q],
+                        "query_status": q_status,
+                        "needs_human_review": False,
+                    })
+                else:
+                    out_of_window_matches.append({
+                        "reference_id": ref["record_id"],
+                        "hit_id": hit["record_id"],
+                        "year": eff_yr,
+                        "window_min": y_min_q,
+                        "window_max": y_max_q,
+                        "match_method": method,
+                        "source": hit.get("source"),
+                        "source_file": hit.get("source_file"),
+                        "query_id": qid,
+                    })
+                    miss_q = attribute_omission(ref, case_data, [qspec], failed_sources, identity_candidate=identity_candidate)
+                    miss_q["query_id"] = qid
+                    miss_q["year_window"] = [y_min_q, y_max_q]
+                    miss_q["needs_human_review"] = bool(is_complex_bool and miss_q["omission_category"] in {"synonym_gap", "field_restriction_too_narrow"})
+                    miss_q["evidence"] = (
+                        f"{miss_q['evidence']} (Note: raw snapshot `{hit.get('source_file')}` contained an identifier match via `{method}`, "
+                        f"rejected from in-window `{qid}` [{y_min_q}–{y_max_q}] to prevent date-window inflation.)"
+                    )
+                    miss_q["out_of_window_snapshot_hit"] = {
+                        "hit_id": hit["record_id"],
+                        "source_file": hit.get("source_file"),
+                        "match_method": method,
+                    }
+                    ref_per_query_omissions[ref["record_id"]].append(miss_q)
+                    query_reference_matrix.append({
+                        "query_id": qid,
+                        "reference_id": ref["record_id"],
+                        "status": "rejected_out_of_window",
+                        "omission_category": miss_q["omission_category"],
+                        "field_scope": f_scope_q,
+                        "year_window": [y_min_q, y_max_q],
+                        "query_status": q_status,
+                        "needs_human_review": miss_q["needs_human_review"],
+                    })
+            else:
+                miss_q = attribute_omission(ref, case_data, [qspec], failed_sources, identity_candidate=identity_candidate)
+                miss_q["query_id"] = qid
+                miss_q["year_window"] = [y_min_q, y_max_q]
+                miss_q["needs_human_review"] = bool(is_complex_bool and miss_q["omission_category"] in {"synonym_gap", "field_restriction_too_narrow"})
+                if miss_q["needs_human_review"]:
+                    miss_q["evidence"] += " [Flagged needs_human_review: complex nested Boolean/proximity syntax detected in query_string.]"
+                ref_per_query_omissions[ref["record_id"]].append(miss_q)
+                query_reference_matrix.append({
+                    "query_id": qid,
+                    "reference_id": ref["record_id"],
+                    "status": "missed",
+                    "omission_category": miss_q["omission_category"],
+                    "field_scope": f_scope_q,
+                    "year_window": [y_min_q, y_max_q],
+                    "query_status": q_status,
+                    "needs_human_review": miss_q["needs_human_review"],
+                })
 
     matched_items: list[dict[str, Any]] = []
     missed_items: list[dict[str, Any]] = []
     for ref in frozen_refs:
-        hit, method, identity_candidate = match_reference_against_hits(ref, dedup_hits)
-        if hit is not None:
-            matched_items.append({
-                "reference_id": ref["record_id"],
-                "hit_id": hit["record_id"],
-                "title": ref.get("title"),
-                "doi": ref.get("doi") or hit.get("doi") or None,
-                "match_method": method,
-                "source": hit.get("source"),
-                "found_in_sources": hit.get("found_in_sources", [hit.get("source")]),
-                "source_file": hit.get("source_file"),
-                "query_id": hit.get("query_id") or (query_specs[0].get("query_id") if query_specs else "Q_baseline"),
-                "evidence_state": "SUPPORTED",
-            })
+        rid = ref["record_id"]
+        if ref_in_window_hits.get(rid):
+            matched_items.append(ref_in_window_hits[rid][0])
         else:
-            miss = attribute_omission(ref, case_data, query_specs, failed_sources, identity_candidate=identity_candidate)
-            missed_items.append(miss)
+            q_omissions = ref_per_query_omissions.get(rid) or []
+            primary_miss = dict(q_omissions[0]) if q_omissions else attribute_omission(ref, case_data, query_specs, failed_sources)
+            if len(q_omissions) > 1:
+                primary_miss["per_query_attributions"] = [
+                    {"query_id": x["query_id"], "omission_category": x["omission_category"], "field_scope": x["field_scope"], "year_window": x.get("year_window"), "needs_human_review": x.get("needs_human_review", False)}
+                    for x in q_omissions
+                ]
+            missed_items.append(primary_miss)
 
     n_ref = len(frozen_refs)
     n_hit = len(matched_items)
@@ -581,10 +757,10 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
     baseline_cov = round(n_hit / n_ref, 4) if n_ref > 0 else None
     actionable_base_cov = round(n_hit / n_actionable, 4) if n_actionable > 0 else None
 
-    # Per-source / per-query breakdown over raw hits
+    # Per-source / per-query breakdown over raw hits (enforcing identical date-window rule)
     hits_by_bucket: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for h in raw_hits:
-        bucket = f"{h.get('source', 'unknown')}::{h.get('query_id') or 'Q_baseline'}"
+        bucket = f"{h.get('source', 'unknown')}::{h.get('query_id') or q_primary_id}"
         hits_by_bucket[bucket].append(h)
 
     ref_matched_buckets: dict[str, set[str]] = defaultdict(set)
@@ -592,7 +768,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
     for bucket, bhits in hits_by_bucket.items():
         for ref in frozen_refs:
             h_match, _, _ = match_reference_against_hits(ref, bhits)
-            if h_match is not None:
+            if h_match is not None and _is_within_query_window(ref, h_match)[0]:
                 bucket_matched_refs[bucket].add(ref["record_id"])
                 ref_matched_buckets[ref["record_id"]].add(bucket)
 
@@ -608,18 +784,27 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
             "coverage_ratio": round(len(mset) / n_ref, 4) if n_ref > 0 else None,
         })
 
-    # Supplemental query marginal-gain audit (per supplemental query_id if present)
+    # Supplemental query marginal-gain audit (per supplemental query_id, reusing strict window + identity validation)
+    supp_specs_map: dict[str, dict[str, Any]] = {}
+    for item in (case_data.get("supplemental_queries") or case_data.get("queries") or []):
+        if isinstance(item, dict) and item.get("query_id"):
+            supp_specs_map[str(item["query_id"])] = item
+
     supp_by_q: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for sh in dedup_supp:
         supp_by_q[str(sh.get("query_id") or sh.get("source_file") or "Q_supplemental")].append(sh)
 
     supp_new_hits: list[dict[str, Any]] = []
+    out_of_window_supp_rejected: list[dict[str, Any]] = []
     recovered_ids: set[str] = set()
     marginal_gain_curve: list[dict[str, Any]] = []
     cum_matched = n_hit
 
     for sqid in sorted(supp_by_q):
         q_hits = supp_by_q[sqid]
+        sq_meta = supp_specs_map.get(sqid) or {}
+        sq_ymin = sq_meta.get("year_min", q_year_min)
+        sq_ymax = sq_meta.get("year_max", q_year_max)
         newly_recovered_here: list[str] = []
         for miss in missed_items:
             rid = miss["record_id"]
@@ -628,6 +813,19 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
             ref_obj = next((r for r in frozen_refs if r["record_id"] == rid), miss)
             hit, method, identity_candidate = match_reference_against_hits(ref_obj, q_hits)
             if hit is not None:
+                in_win_s, eff_yr_s = _is_within_window(ref_obj, hit, sq_ymin, sq_ymax)
+                if not in_win_s:
+                    out_of_window_supp_rejected.append({
+                        "reference_id": rid,
+                        "hit_id": hit.get("record_id") or hit.get("id"),
+                        "year": eff_yr_s,
+                        "window_min": sq_ymin,
+                        "window_max": sq_ymax,
+                        "query_id": sqid,
+                        "match_method": method,
+                        "reason": "supplemental_hit_outside_query_year_window",
+                    })
+                    continue
                 recovered_ids.add(rid)
                 newly_recovered_here.append(rid)
                 supp_new_hits.append({
@@ -639,6 +837,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
                     "source": hit.get("source"),
                     "source_file": hit.get("source_file"),
                     "query_id": sqid,
+                    "window_verified": [sq_ymin, sq_ymax],
                 })
             elif identity_candidate is not None and "supplemental_candidate_match_evidence" not in miss:
                 miss["supplemental_candidate_match_evidence"] = identity_candidate
@@ -647,6 +846,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
             "supplemental_query_id": sqid,
             "returned_dedup_records": len(q_hits),
             "net_new_reference_recoveries": len(newly_recovered_here),
+            "out_of_window_rejected_count": sum(1 for x in out_of_window_supp_rejected if x["query_id"] == sqid),
             "cumulative_coverage_ratio": round(cum_matched / n_ref, 4) if n_ref > 0 else None,
             "zero_gain_spin": len(newly_recovered_here) == 0,
         })
@@ -696,9 +896,14 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         "per_source_coverage": per_source_coverage,
         "supplemental_marginal_gain_curve": marginal_gain_curve,
         "matched_references": matched_items,
+        "query_reference_matrix": query_reference_matrix,
+        "complex_boolean_queries_flagged": complex_boolean_queries,
+        "out_of_window_snapshot_matches": out_of_window_matches,
+        "out_of_window_supplemental_rejected": out_of_window_supp_rejected,
         "missed_references_attributed": missed_items,
         "supplemental_recoveries": supp_new_hits,
         "residual_omissions": still_missed,
+        "actionable_residual_omission_count": sum(1 for m in still_missed if m["omission_category"] != "retracted_or_unavailable"),
         "targeted_remediation_actions": remediation,
         "verification_sample": verification_sample,
         "reference_dedup_removed": len(ref_dups),
@@ -795,6 +1000,10 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         ],
         "gaps": gaps,
     }
+    patch, oc_gaps = align_output_contract(patch, case_data)
+    if oc_gaps:
+        gaps.extend(oc_gaps)
+        patch["gaps"] = gaps
     res = result_guard.update_result(result_path, patch, finalize=True)
     grounding = gap_gate.check_grounding(res, [input_dir])
     if not grounding["ok"]:

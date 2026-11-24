@@ -94,13 +94,27 @@ MULTILINGUAL_GLOSSARY: list[dict[str, Any]] = [
         },
     },
     {
-        "canonical": "reference values and percentiles",
+        "canonical": "percentiles",
         "domain": "biostatistics",
+        "relation_type": "exact",
+        "related_concepts": ["reference values", "percentage"],
         "terms": {
-            "en": ["standard reference", "reference values", "percentiles", "percentile", "reference equations"],
-            "pt": ["distribuição padrão", "distribuicao padrao", "valores de referência", "percentuais", "percentis", "equações de referência"],
-            "zh": ["标准参考值", "参考值", "百分位数", "参考方程"],
-            "es": ["valores de referencia", "percentiles"],
+            "en": ["percentiles", "percentile"],
+            "pt": ["percentis", "percentil"],
+            "zh": ["百分位数", "百分位"],
+            "es": ["percentiles", "percentil"],
+        },
+    },
+    {
+        "canonical": "reference values and distribution",
+        "domain": "biostatistics",
+        "relation_type": "related",
+        "related_concepts": ["percentiles"],
+        "terms": {
+            "en": ["standard reference", "reference values", "reference equations"],
+            "pt": ["distribuição padrão", "distribuicao padrao", "valores de referência", "equações de referência", "percentuais"],
+            "zh": ["标准参考值", "参考值", "参考方程"],
+            "es": ["valores de referencia"],
         },
     },
     {
@@ -136,11 +150,25 @@ MULTILINGUAL_GLOSSARY: list[dict[str, Any]] = [
     {
         "canonical": "systematic review",
         "domain": "methodology",
+        "relation_type": "exact",
+        "related_concepts": ["meta-analysis", "evidence synthesis"],
         "terms": {
-            "en": ["systematic review", "meta-analysis", "evidence synthesis"],
-            "pt": ["revisão sistemática", "revisao sistematica", "metanálise", "meta-análise"],
-            "zh": ["系统综述", "系统评价", "荟萃分析"],
-            "es": ["revisión sistemática", "metanálisis"],
+            "en": ["systematic review", "systematic reviews"],
+            "pt": ["revisão sistemática", "revisao sistematica"],
+            "zh": ["系统综述", "系统评价"],
+            "es": ["revisión sistemática"],
+        },
+    },
+    {
+        "canonical": "meta-analysis",
+        "domain": "methodology",
+        "relation_type": "narrower",
+        "broader_concept": "systematic review",
+        "terms": {
+            "en": ["meta-analysis", "meta-analyses"],
+            "pt": ["metanálise", "meta-análise", "meta-analise"],
+            "zh": ["荟萃分析", "Meta分析"],
+            "es": ["metanálisis"],
         },
     },
     {
@@ -726,12 +754,41 @@ def _extract_short_acronyms(query: str) -> list[str]:
     return found
 
 
+KATAKANA_RE = re.compile(r"[\u30a0-\u30ffー]{2,}")
+PARENTHETICAL_ACRONYM_RE = re.compile(r"\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ-]{2,}(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ-]{1,}){1,4})\s*\(([A-Z][A-Z0-9]{1,5})\)")
+
+
+def mine_corpus_bilingual_terms(works: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Adaptively mine bilingual acronym-expansion pairs & parallel title terms from loaded works."""
+    mined: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for w in works:
+        for v in w.get("_internal_views", []):
+            lg = v.get("body_language") or "unknown"
+            blob = f"{v.get('raw_title', '')} {v.get('_raw_abstract', '')} {v.get('_raw_text', '')[:3000]}"
+            for m in PARENTHETICAL_ACRONYM_RE.finditer(blob):
+                phrase = " ".join(m.group(1).split())
+                acr = m.group(2).strip()
+                k = f"{acr.lower()}::{fold_diacritics(phrase.lower())}"
+                if k in seen_keys or len(phrase) < 6 or acr in AMBIGUOUS_ACRONYMS:
+                    continue
+                seen_keys.add(k)
+                mined.append({
+                    "canonical": f"{phrase} ({acr})",
+                    "domain": "corpus_mined_acronym",
+                    "source_work_id": w["work_id"],
+                    "terms": {lg if lg != "unknown" else "raw": [phrase, acr]},
+                })
+    return mined[:40]
+
+
 def expand_query_terms(
     query: str,
     custom_glossary: dict[str, Any],
     observed_languages: list[str],
+    corpus_mined_concepts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Build controlled multilingual expansion, per-language queries, and risk audits."""
+    """Build controlled multilingual expansion, per-language queries, provenance mappings, and risk audits."""
     q_raw = query or ""
     q_low = q_raw.lower()
     q_folded = fold_diacritics(q_low)
@@ -740,15 +797,18 @@ def expand_query_terms(
     locked_symbols = _extract_locked_symbols(q_raw)
     short_acronyms = _extract_short_acronyms(q_raw)
 
-    # Merge custom glossary entries into structured concepts
+    # Merge built-in glossary, user case glossary, and corpus-mined adaptive terms
     concepts = list(MULTILINGUAL_GLOSSARY)
     for k, v in (custom_glossary or {}).items():
         if isinstance(v, list):
             concepts.append({"canonical": str(k), "domain": "case_glossary", "terms": {"en": [str(k)], "custom": [str(x) for x in v]}})
         elif isinstance(v, dict):
             concepts.append({"canonical": str(k), "domain": "case_glossary", "terms": v})
+    for mc in (corpus_mined_concepts or []):
+        concepts.append(mc)
 
     terminology_alignments: list[dict[str, Any]] = []
+    term_mapping_provenance: list[dict[str, Any]] = []
     per_lang_terms: dict[str, list[str]] = defaultdict(list)
     expanded_terms: list[str] = []
 
@@ -778,13 +838,27 @@ def expand_query_terms(
                 break
         if matched_trigger:
             aligned_by_lang: dict[str, list[str]] = {}
+            trig_lang = "zh" if ZH_RE.search(matched_trigger) else (src_lang if src_lang != "unknown" else "en")
+            map_src = str(concept.get("domain") or "controlled_glossary")
+            rel_type = str(concept.get("relation_type") or "exact")
             for lg, flist in terms_map.items():
-                aligned_by_lang[lg] = list(dict.fromkeys(flist))
-                for f in flist:
+                dedup_flist = list(dict.fromkeys(flist))
+                aligned_by_lang[lg] = dedup_flist
+                for f in dedup_flist:
                     _add_term(f, lg)
+                term_mapping_provenance.append({
+                    "source_term": matched_trigger,
+                    "source_lang": trig_lang,
+                    "target_lang": lg,
+                    "target_terms": dedup_flist,
+                    "canonical_concept": concept["canonical"],
+                    "relation_type": rel_type,
+                    "mapping_source": map_src,
+                })
             terminology_alignments.append({
                 "canonical_concept": concept["canonical"],
-                "domain": concept.get("domain", "general"),
+                "domain": map_src,
+                "relation_type": rel_type,
                 "triggered_by": matched_trigger,
                 "aligned_by_language": aligned_by_lang,
                 "back_translation_verified": True,
@@ -835,6 +909,15 @@ def expand_query_terms(
                 "verification": "Require co-occurrence with domain concept or persistent DOI/PID.",
             })
 
+    for kt in KATAKANA_RE.findall(q_raw):
+        _add_term(kt, "ja")
+        risk_flags.append({
+            "risk_type": "katakana_transliteration_guard",
+            "token": kt,
+            "detail": "Japanese katakana loanword preserved verbatim; verify romaji/English orthographic variants against target corpus.",
+            "verification": "Pair katakana token with Latin scientific equivalent or DOI/PMID anchor.",
+        })
+
     # Construct explicit per-language controlled queries
     target_langs = sorted(set(observed_languages) | set(per_lang_terms.keys()) - {"locked_symbol", "short_acronym", "raw", "custom", "unknown"})
     target_language_queries: dict[str, str] = {}
@@ -850,6 +933,7 @@ def expand_query_terms(
         "zero_translation_locked_symbols": locked_symbols,
         "short_acronyms_protected": short_acronyms,
         "terminology_alignments": terminology_alignments,
+        "term_mapping_provenance": term_mapping_provenance,
         "expanded_terms": expanded_terms,
         "false_friend_or_acronym_risk": risk_flags,
     }
@@ -904,33 +988,55 @@ def _render_markdown_report(alignment_doc: dict[str, Any]) -> str:
         f"- **Homonyms with Distinct DOIs Kept Separate**: {alignment_doc['summary']['homonym_distinct_doi_separated_count']}",
         f"- **Original Title Overwrites**: {alignment_doc['title_overwrite_audit']['overwritten_count']} (audit passed: `{alignment_doc['title_overwrite_audit']['audit_passed']}`)",
         "",
-        "## 2. Canonical Works & 4-Class View Inventory",
+        "## 2. Canonical Works & 4-Class View Inventory (Stable Source IDs & Verbatim Titles)",
         "",
-        "| Work ID | DOI / PID | Orig. Lang | Original Title | Languages | Views (Raw / Non-Dup) | View Breakdown |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Canonical ID | DOI | SciELO PID | Source Files | Orig. Lang | Verbatim Original Title | Languages | Views (Raw / Non-Dup) | View Breakdown |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for w in alignment_doc["canonical_works"]:
-        ident = w.get("doi") or w.get("scielo_pid") or "none"
+        doi_s = w.get("doi") or "none"
+        pid_s = w.get("scielo_pid") or "none"
+        sfiles = ", ".join(sorted({v.get("source_file") or "" for v in w.get("views", []) if v.get("source_file")})[:3])
         vbreak = ", ".join(f"{k}:{v}" for k, v in (w.get("view_type_counts") or {}).items())
-        orig_t = (w.get("original_title") or "").replace("|", "/")[:90]
+        orig_t = (w.get("original_title") or "").replace("|", "/")
         lines.append(
-            f"| {w['work_id']} | `{ident}` | {w['original_language']} | {orig_t} | "
+            f"| `{w['work_id']}` | `{doi_s}` | `{pid_s}` | `{sfiles}` | {w['original_language']} | {orig_t} | "
             f"{','.join(w['languages_present'])} | {w['view_count_raw']} / {w['distinct_non_duplicate_views']} | {vbreak} |"
         )
 
     if alignment_doc["homonym_distinct_doi_separated"]:
-        lines.extend(["", "## 3. Homonym / Distinct-DOI Separation Audit", ""])
+        lines.extend(["", "## 3. Homonym / Distinct-DOI Separation & `HOMONYM_WORK_ID_CONFLICT` Adjudication", ""])
         for h in alignment_doc["homonym_distinct_doi_separated"]:
             lines.append(
-                f"- Separated `{h['record_ids'][0]}` (`{h['dois'][0]}`) from `{h['record_ids'][1]}` (`{h['dois'][1]}`) "
-                f"despite title similarity `{h['title_jaccard']}` (`{h['reason']}`)."
+                f"- **Adjudication (`HOMONYM_WORK_ID_CONFLICT`)**: Separated `{h['record_ids'][0]}` (DOI `{h['dois'][0]}`) "
+                f"from `{h['record_ids'][1]}` (DOI `{h['dois'][1]}`) despite title similarity `{h['title_jaccard']}` "
+                f"(`{h['reason']}`). Normalized DOI took precedence over colliding title/work_id metadata; both kept as distinct works."
             )
 
-    lines.extend(["", "## 4. Bidirectional Cross-Lingual Query Results & Verifiable Evidence", ""])
+    if alignment_doc.get("corpus_mined_bilingual_terms"):
+        lines.extend([
+            "",
+            f"## 3b. Corpus-Mined Bilingual Acronyms & Adaptive Glossary ({len(alignment_doc['corpus_mined_bilingual_terms'])} entries)",
+            "",
+            "| Canonical Expansion | Source Work | Language | Mined Terms |",
+            "| --- | --- | --- | --- |",
+        ])
+        for mt in alignment_doc["corpus_mined_bilingual_terms"]:
+            for lg, tlist in (mt.get("terms") or {}).items():
+                lines.append(f"| {mt['canonical']} | `{mt.get('source_work_id', '-')}` | `{lg}` | {', '.join(tlist)} |")
+
+    lines.extend(["", "## 4. Bidirectional Cross-Lingual Query Results, Term Mappings & All Grounded Sentence Anchors", ""])
     for qr in alignment_doc["cross_lingual_query_results"]:
         qe = qr["query_expansion"]
         lines.append(f"### {qr['question_id']}: {qe['query']}")
         lines.append(f"- **Detected Source Language**: `{qe['source_language']}`")
+        if qe.get("term_mapping_provenance"):
+            lines.append("- **Controlled Term Mapping Provenance (with `relation_type`)**:")
+            for tm in qe["term_mapping_provenance"]:
+                lines.append(
+                    f"  - `{tm['source_term']}` ({tm['source_lang']}) -> `{tm['target_lang']}`: "
+                    f"{', '.join(tm['target_terms'])} [concept=`{tm['canonical_concept']}`, relation=`{tm.get('relation_type', 'exact')}`, source=`{tm['mapping_source']}`]"
+                )
         if qe["target_language_queries"]:
             for lg, qstr in qe["target_language_queries"].items():
                 lines.append(f"- **Controlled Query ({lg})**: `{qstr}`")
@@ -944,11 +1050,14 @@ def _render_markdown_report(alignment_doc: dict[str, Any]) -> str:
             f"(non-duplicate views matched: {qr['matched_non_duplicate_view_count']}; exact duplicates excluded: {qr['excluded_duplicate_views_count']})"
         )
         for mw in qr["matched_works"]:
-            lines.append(f"  - **{mw['work_id']}** (`{mw.get('doi') or mw.get('scielo_pid') or 'no-id'}` | langs: {', '.join(mw['languages_present'])} | terms: {', '.join(mw['matched_terms'][:6])})")
-            for anc in mw["evidence_anchors"][:3]:
+            lines.append(
+                f"  - **`{mw['work_id']}`** | DOI: `{mw.get('doi') or 'none'}` | PID: `{mw.get('scielo_pid') or 'none'}` | "
+                f"Original Title: *{mw.get('original_title') or 'unknown'}* | langs: {', '.join(mw['languages_present'])} | terms: {', '.join(mw['matched_terms'][:8])}"
+            )
+            for anc in mw["evidence_anchors"]:
                 q_clean = anc["quote"].replace("\n", " ")
                 lines.append(
-                    f"    - [{anc['body_language']} | `{anc['view_type']}` | `{anc['source_file']}` | verified={anc['verified_in_source']}]: \"{q_clean}\""
+                    f"    - Anchor [{anc['body_language']} | `{anc['view_type']}` | `{anc['source_file']}` | verified={anc['verified_in_source']}]: \"{q_clean}\""
                 )
         lines.append("")
 
@@ -983,6 +1092,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
 
     custom_glossary = case_data.get("glossary") if isinstance(case_data.get("glossary"), dict) else {}
     works, exact_dups, title_overwrite_audit, homonym_separated = group_works_and_views(bundle["records"])
+    corpus_mined_concepts = mine_corpus_bilingual_terms(works)
 
     observed_languages = sorted({lg for w in works for lg in w["languages_present"] if lg != "unknown"})
 
@@ -993,7 +1103,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
     for idx, q in enumerate(bundle["queries"], 1):
         qtxt = q.get("question") or q.get("query") or str(q) if isinstance(q, dict) else str(q)
         qid = str(q.get("question_id") or q.get("id") or f"Q{idx}") if isinstance(q, dict) else f"Q{idx}"
-        exp = expand_query_terms(qtxt, custom_glossary, observed_languages)
+        exp = expand_query_terms(qtxt, custom_glossary, observed_languages, corpus_mined_concepts=corpus_mined_concepts)
         total_false_friend_alerts += len(exp["false_friend_or_acronym_risk"])
         locked_set = set(exp["zero_translation_locked_symbols"])
         acronym_set = set(exp["short_acronyms_protected"])
@@ -1135,6 +1245,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         "homonym_distinct_doi_separated_count": len(homonym_separated),
         "title_overwritten_count": title_overwrite_audit["overwritten_count"],
         "query_count": len(query_results),
+        "corpus_mined_glossary_count": len(corpus_mined_concepts),
         "false_friend_or_acronym_alert_count": total_false_friend_alerts,
         "verified_sentence_anchor_count": total_verified_anchors,
     }
@@ -1144,6 +1255,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         "scope_note": "Finite multilingual snapshot only; preserves original/translation/abstract-only/duplicate distinctions, original-title immutability, and distinct-DOI separation without live-coverage or unseen-language claims.",
         "observed_languages": observed_languages,
         "summary": summary_stats,
+        "corpus_mined_bilingual_terms": corpus_mined_concepts,
         "title_overwrite_audit": title_overwrite_audit,
         "homonym_distinct_doi_separated": homonym_separated,
         "canonical_works": clean_works_out,
@@ -1191,10 +1303,21 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
             "source": "cross_lingual_matcher",
             "message": f"Prevented merging {len(homonym_separated)} homonymous title pair(s) carrying distinct normalized DOIs.",
         })
+        gaps.append({
+            "code": "HOMONYM_WORK_ID_CONFLICT",
+            "severity": "warning",
+            "source": "cross_lingual_matcher",
+            "message": (
+                f"Detected {len(homonym_separated)} distinct-DOI homonym boundary record(s) whose supplied metadata or title collided with an existing canonical work; "
+                "reassigned independent canonical work_id(s) by normalized DOI priority."
+            ),
+            "details": homonym_separated,
+        })
 
     patch = {
         "artifacts": ["result.json", "cross_lingual_alignment.json", "cross_lingual_report.md"],
         "observed_languages": observed_languages,
+        "corpus_mined_bilingual_terms": corpus_mined_concepts,
         "title_overwrite_audit": title_overwrite_audit,
         "homonym_distinct_doi_separated": homonym_separated,
         "canonical_works": clean_works_out,
@@ -1208,6 +1331,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
             "homonym_distinct_doi_separated_count": "cross_lingual_alignment.json:homonym_distinct_doi_separated",
             "title_overwritten_count": "cross_lingual_alignment.json:title_overwrite_audit",
             "query_count": "cross_lingual_alignment.json:cross_lingual_query_results",
+            "corpus_mined_glossary_count": "cross_lingual_alignment.json:corpus_mined_bilingual_terms",
             "false_friend_or_acronym_alert_count": "cross_lingual_alignment.json:cross_lingual_query_results",
             "verified_sentence_anchor_count": "cross_lingual_alignment.json:cross_lingual_query_results",
         },
@@ -1222,6 +1346,11 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         ],
         "gaps": gaps,
     }
+    from evidence_state_guard import align_output_contract
+    patch, oc_gaps = align_output_contract(patch, case_data)
+    if oc_gaps:
+        gaps.extend(oc_gaps)
+        patch["gaps"] = gaps
     res = result_guard.update_result(result_path, patch, finalize=True)
     grounding = gap_gate.check_grounding(res, [input_dir])
     if not grounding["ok"]:

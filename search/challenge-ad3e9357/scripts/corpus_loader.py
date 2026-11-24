@@ -683,7 +683,8 @@ def load_input_bundle(input_dir: Path) -> dict[str, Any]:
             raw_texts.append({"file": rel, "text": txt, "page_count": len(pages), "text_layer_status": tl_status, "extractor": extractor})
             ingest_diagnostics.append({"file": rel, "format": "pdf", "pages": len(pages), "chars": total_chars, "text_layer_status": tl_status, "extractor": extractor})
             records.append(normalize_record_dict({
-                "title": fp.stem,
+                "title": "unknown",
+                "title_provenance": "unknown_no_reliable_pdf_title",
                 "text": txt,
                 "paragraphs": paras,
                 "page_count": len(pages),

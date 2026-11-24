@@ -27,7 +27,7 @@ WIPO_KIND_DESC: dict[str, tuple[str, str]] = {
     "A1": ("published_application", "Published patent application with search report"),
     "A2": ("published_application", "Published patent application without search report"),
     "A3": ("published_application", "Separate publication of search report"),
-    "A4": ("reissue_or_correction", "Supplementary / amended / corrected application publication"),
+    "A4": ("amended_application_publication", "PCT Article 19 amended claims republication / supplementary application publication"),
     "A8": ("reissue_or_correction", "Corrected front page of published application"),
     "A9": ("reissue_or_correction", "Complete reprint / corrected published application"),
     "B": ("grant", "Granted patent specification"),
@@ -183,13 +183,14 @@ def normalize_cpc_ipc_code(raw: str) -> dict[str, str] | None:
     subclass, main_grp, sub_grp = m.group(1), m.group(2), m.group(3)
     canonical = f"{subclass} {main_grp}/{sub_grp}"
     compact = f"{subclass}{main_grp}/{sub_grp}"
-    escaped_slash = f"{subclass}{main_grp}\\/{sub_grp}"
+    escaped_spaced = f'{subclass} {main_grp}\\/{sub_grp}'
+    escaped_compact = f"{subclass}{main_grp}\\/{sub_grp}"
     return {
         "raw": raw.strip(),
         "canonical": canonical,
         "compact": compact,
         "quoted_query": f'"{canonical}"',
-        "lucene_escaped_query": f"cpc:({escaped_slash})",
+        "lucene_escaped_query": f'cpc:("{escaped_spaced}" OR {escaped_compact})',
         "espacenet_query": f'cpc="{canonical}"',
         "uspto_safe_query": f'cpc:"{canonical}"',
     }

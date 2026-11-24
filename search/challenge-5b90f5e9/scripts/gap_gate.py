@@ -81,7 +81,7 @@ def _extract_pdf_text(pdf_path: Path) -> str:
 
 def _collect_corpus_text(corpus_paths: list[Path]) -> str:
     chunks: list[str] = []
-    text_exts = {".md", ".txt", ".json", ".csv", ".tsv", ".tex", ".xml", ".html", ".yaml", ".yml"}
+    text_exts = {".md", ".txt", ".json", ".csv", ".tsv", ".tex", ".xml", ".html", ".htm", ".yaml", ".yml", ".ris", ".bib", ".nbib", ".enw"}
     for cp in corpus_paths:
         if cp.is_file():
             if cp.suffix.lower() == ".pdf":

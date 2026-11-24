@@ -30,7 +30,13 @@ import preflight_probe
 import result_guard
 from audit_chain import append_audit_entry, init_audit_log
 from corpus_loader import load_input_bundle, segment_text_to_paragraphs
-from evidence_state_guard import EvidenceState, RETRACTION_CUE_RE, extract_sentence_anchor
+from evidence_state_guard import (
+    EvidenceState,
+    RETRACTION_CUE_RE,
+    align_output_contract,
+    extract_sentence_anchor,
+    extract_sentence_anchor_detail,
+)
 from prisma_flow_auditor import is_preprint
 
 # Version-pinned appraisal scale registries
@@ -79,54 +85,111 @@ SCALES: dict[str, dict[str, Any]] = {
     },
     "ROBINS_I_V2_2024": {
         "scale_name": "ROBINS-I V2",
-        "scale_version": "V2 (2024)",
+        "scale_version": "V2 (2024, 6-domain official riskofbias.info order)",
         "applies_to": "non_randomized_intervention",
+        "version_migration_note": (
+            "Per riskofbias.info ROBINS-I V2 (2024), V2 streamlines ROBINS-I V1 (2016) from 7 to 6 domains "
+            "(absorbing standalone deviations from intended interventions into confounding/per-protocol) and "
+            "explicitly reorders D2 (classification of interventions) ahead of D3 (selection of participants "
+            "into the study). Classic 7-domain ROBINS-I V1 (2016: D2=Selection, D3=Classification, D4=Deviations) "
+            "is supported separately via scale='ROBINS-I-V1'."
+        ),
         "domains": [
             {
                 "dim_id": "ROBINS_V2_D1_confounding",
-                "label": "Bias due to confounding",
+                "label": "D1: Bias due to confounding (incl. per-protocol/time-varying confounding)",
                 "requires_fulltext": True,
                 "cues": [r"\b(?:propensity\s+score|multivariable\s+adjust|confound(?:er|ing)|DAG|inverse\s+probability|IPTW|stratified\s+by|混杂因素|倾向评分)\b"],
                 "concern_cues": [r"\b(?:unadjusted|residual\s+confounding|no\s+adjustment\s+for\s+confound|unmeasured\s+confounding|未校正混杂)\b"],
             },
             {
                 "dim_id": "ROBINS_V2_D2_classification",
-                "label": "Bias in classification of interventions",
+                "label": "D2: Bias in classification of interventions (reordered from V1 D3)",
                 "requires_fulltext": True,
                 "cues": [r"\b(?:intervention\s+definition|exposure\s+ascertainment|registry\s+record|pharmacy\s+dispensing|confirmed\s+dose)\b"],
                 "concern_cues": [r"\b(?:misclassification|self[- ]reported\s+exposure|immortal\s+time\s+bias|retrospective\s+recall)\b"],
             },
             {
                 "dim_id": "ROBINS_V2_D3_selection",
-                "label": "Bias in selection of participants into the study",
+                "label": "D3: Bias in selection of participants into the study (reordered from V1 D2)",
                 "requires_fulltext": True,
                 "cues": [r"\b(?:inclusion\s+criteria|consecutive\s+patients|target\s+trial|inception\s+cohort|eligibility\s+criteria|纳入标准)\b"],
                 "concern_cues": [r"\b(?:selection\s+bias|convenience\s+sample|survivor\s+bias|volunteer\s+bias|selected\s+after\s+start)\b"],
             },
             {
-                "dim_id": "ROBINS_V2_D4_deviations",
-                "label": "Bias due to deviations from intended interventions",
-                "requires_fulltext": True,
-                "cues": [r"\b(?:adherence|co[- ]?intervention|fidelity|protocol\s+compliance|treatment\s+switching)\b"],
-                "concern_cues": [r"\b(?:unbalanced\s+co[- ]?intervention|protocol\s+violation|untracked\s+switching)\b"],
-            },
-            {
-                "dim_id": "ROBINS_V2_D5_missing_data",
-                "label": "Bias due to missing data",
+                "dim_id": "ROBINS_V2_D4_missing_data",
+                "label": "D4: Bias due to missing data (renumbered from V1 D5)",
                 "requires_fulltext": True,
                 "cues": [r"\b(?:missing\s+data|multiple\s+imputation|complete[- ]case|sensitivity\s+analysis|follow[- ]?up\s+rate)\b"],
                 "concern_cues": [r"\b(?:high\s+missingness|missing\s+data\s+not\s+explained|excluded\s+due\s+to\s+missing|attrition\s+bias)\b"],
             },
             {
-                "dim_id": "ROBINS_V2_D6_measurement",
-                "label": "Bias in measurement of outcomes",
+                "dim_id": "ROBINS_V2_D5_measurement",
+                "label": "D5: Bias in measurement of outcomes (renumbered from V1 D6)",
                 "requires_fulltext": True,
                 "cues": [r"\b(?:blinded\s+outcome|objective\s+endpoint|ICD[- ]?10|validated\s+scale|adjudicated)\b"],
                 "concern_cues": [r"\b(?:unblinded\s+outcome|subjective\s+self[- ]report|unvalidated\s+outcome|detection\s+bias)\b"],
             },
             {
-                "dim_id": "ROBINS_V2_D7_reported_result",
-                "label": "Bias in selection of the reported result",
+                "dim_id": "ROBINS_V2_D6_reported_result",
+                "label": "D6: Bias in selection of the reported result (renumbered from V1 D7)",
+                "requires_fulltext": True,
+                "cues": [r"\b(?:pre[- ]?specified|statistical\s+analysis\s+plan|registered\s+protocol|sensitivity\s+analyses|data\s+availab|code\s+availab)\b"],
+                "concern_cues": [r"\b(?:post[- ]?hoc|selective\s+reporting|multiple\s+comparisons\s+without|no\s+protocol)\b"],
+            },
+        ],
+    },
+    "ROBINS_I_V1_2016": {
+        "scale_name": "ROBINS-I",
+        "scale_version": "V1 (2016, 7-domain classic order)",
+        "applies_to": "non_randomized_intervention",
+        "version_migration_note": "Classic 7-domain ROBINS-I (Sterne et al., BMJ 2016: D2=Selection, D3=Classification, D4=Deviations). Superseding 6-domain V2 (2024) is default unless V1/2016 is explicitly requested.",
+        "domains": [
+            {
+                "dim_id": "ROBINS_V1_D1_confounding",
+                "label": "D1: Bias due to confounding",
+                "requires_fulltext": True,
+                "cues": [r"\b(?:propensity\s+score|multivariable\s+adjust|confound(?:er|ing)|DAG|inverse\s+probability|IPTW|stratified\s+by|混杂因素|倾向评分)\b"],
+                "concern_cues": [r"\b(?:unadjusted|residual\s+confounding|no\s+adjustment\s+for\s+confound|unmeasured\s+confounding|未校正混杂)\b"],
+            },
+            {
+                "dim_id": "ROBINS_V1_D2_selection",
+                "label": "D2: Bias in selection of participants into the study",
+                "requires_fulltext": True,
+                "cues": [r"\b(?:inclusion\s+criteria|consecutive\s+patients|target\s+trial|inception\s+cohort|eligibility\s+criteria|纳入标准)\b"],
+                "concern_cues": [r"\b(?:selection\s+bias|convenience\s+sample|survivor\s+bias|volunteer\s+bias|selected\s+after\s+start)\b"],
+            },
+            {
+                "dim_id": "ROBINS_V1_D3_classification",
+                "label": "D3: Bias in classification of interventions",
+                "requires_fulltext": True,
+                "cues": [r"\b(?:intervention\s+definition|exposure\s+ascertainment|registry\s+record|pharmacy\s+dispensing|confirmed\s+dose)\b"],
+                "concern_cues": [r"\b(?:misclassification|self[- ]reported\s+exposure|immortal\s+time\s+bias|retrospective\s+recall)\b"],
+            },
+            {
+                "dim_id": "ROBINS_V1_D4_deviations",
+                "label": "D4: Bias due to deviations from intended interventions",
+                "requires_fulltext": True,
+                "cues": [r"\b(?:adherence|co[- ]?intervention|fidelity|protocol\s+compliance|treatment\s+switching)\b"],
+                "concern_cues": [r"\b(?:unbalanced\s+co[- ]?intervention|protocol\s+violation|untracked\s+switching)\b"],
+            },
+            {
+                "dim_id": "ROBINS_V1_D5_missing_data",
+                "label": "D5: Bias due to missing data",
+                "requires_fulltext": True,
+                "cues": [r"\b(?:missing\s+data|multiple\s+imputation|complete[- ]case|sensitivity\s+analysis|follow[- ]?up\s+rate)\b"],
+                "concern_cues": [r"\b(?:high\s+missingness|missing\s+data\s+not\s+explained|excluded\s+due\s+to\s+missing|attrition\s+bias)\b"],
+            },
+            {
+                "dim_id": "ROBINS_V1_D6_measurement",
+                "label": "D6: Bias in measurement of outcomes",
+                "requires_fulltext": True,
+                "cues": [r"\b(?:blinded\s+outcome|objective\s+endpoint|ICD[- ]?10|validated\s+scale|adjudicated)\b"],
+                "concern_cues": [r"\b(?:unblinded\s+outcome|subjective\s+self[- ]report|unvalidated\s+outcome|detection\s+bias)\b"],
+            },
+            {
+                "dim_id": "ROBINS_V1_D7_reported_result",
+                "label": "D7: Bias in selection of the reported result",
                 "requires_fulltext": True,
                 "cues": [r"\b(?:pre[- ]?specified|statistical\s+analysis\s+plan|registered\s+protocol|sensitivity\s+analyses|data\s+availab|code\s+availab)\b"],
                 "concern_cues": [r"\b(?:post[- ]?hoc|selective\s+reporting|multiple\s+comparisons\s+without|no\s+protocol)\b"],
@@ -241,10 +304,9 @@ def detect_study_type_and_scale(rec: dict[str, Any], case_data: dict[str, Any]) 
     if "general" in req_scale or "scientific" in req_scale:
         return "experimental_observational_or_computational", dict(SCALES["GENERAL_SCIENTIFIC_V1"])
     if "robins" in req_scale:
-        scale = dict(SCALES["ROBINS_I_V2_2024"])
-        if req_ver and "2016" in req_ver:
-            scale["version_warning"] = "Legacy ROBINS-I 2016 requested; mapped explicitly while flagging V2 (2024) domain updates."
-        return "non_randomized_intervention", scale
+        if "v1" in req_scale or "2016" in req_scale or (req_ver and ("v1" in req_ver or "2016" in req_ver)):
+            return "non_randomized_intervention", dict(SCALES["ROBINS_I_V1_2016"])
+        return "non_randomized_intervention", dict(SCALES["ROBINS_I_V2_2024"])
     if "rob 2" in req_scale or "rob2" in req_scale:
         return "randomized_controlled_trial", dict(SCALES["ROB2_2019"])
     if "amstar" in req_scale:
@@ -299,26 +361,77 @@ def _extract_anchored_segments(rec: dict[str, Any]) -> list[dict[str, Any]]:
     return segs
 
 
+NEGATION_GUARD_RE = re.compile(
+    r"\b(?:not\s+(?:been\s+)?|no\s+|never\s+|without\s+|failed\s+to\s+|did\s+not\s+|were\s+not\s+|was\s+not\s+|"
+    r"unable\s+to\s+|lack(?:ed|ing|s)?\s+(?:of\s+)?|absent\s+|unadjusted|non[- ]randomi[sz]ed|unblinded|not\s+blinded)\b",
+    re.I,
+)
+MODALITY_HEDGE_RE = re.compile(
+    r"\b(?:may\s+have|might\s+have|could\s+have|planned\s+to|will\s+be|should\s+be|unclear\s+whether|assumed\s+to|potentially)\b",
+    re.I,
+)
+ADEQUACY_DETAIL_RE = re.compile(
+    r"(?:\b(?:n\s*=\s*\d+|\d+(?:\.\d+)?\s*%|p\s*[<=>]\s*0?\.\d+|95%\s*CI|FDR|Bonferroni|Benjamini|IPTW|propensity\s+score\s+match|"
+    r"multivariable\s+(?:regression|logistic|Cox|model|adjust)|adjusted\s+for\s+[a-z]+|sealed\s+envelope|central\s+randomi[sz]ation|"
+    r"NCT\d{8}|ISRCTN\d+|ChiCTR\d+|PROSPERO|CRD\d+|github\.com|zenodo\.org|doi\.org|multiple\s+imputation|"
+    r"complete[- ]case|blinded\s+(?:assessor|adjudicat|outcome)|validated\s+(?:scale|instrument)|calibrated\s+(?:with|against|using)|"
+    r"triplicate|biological\s+replicate|IRB|ethics\s+committee|approval\s+no|ARRIVE|CONSORT|PRISMA|inter[- ]rater|kappa)\b)",
+    re.I,
+)
+NON_SUBSTANTIVE_SECTIONS = {"references", "reference", "bibliography", "acknowledgments", "acknowledgements"}
+
+
+def _evaluate_cue_sentence_4layer(quote: str, matched_pattern: str) -> tuple[str, str]:
+    """Apply Layer 2 (Negation/Modality) and Layer 3 (Methodological Adequacy) to a nominated positive sentence."""
+    q_low = (quote or "").lower()
+    m = re.search(matched_pattern, q_low, re.I)
+    prefix = q_low[max(0, (m.start() - 48) if m else 0):(m.end() + 24 if m else 80)]
+    if NEGATION_GUARD_RE.search(prefix):
+        return "negated_positive_cue", "explicitly_present"
+    if MODALITY_HEDGE_RE.search(prefix):
+        return "hedged_or_modal_cue", "plausible_concern"
+    if ADEQUACY_DETAIL_RE.search(quote or ""):
+        return "adequacy_detail_verified", "no_indication_observed"
+    return "reporting_present_adequacy_unverified", "plausible_concern"
+
+
 def appraise_single_study(
     rec: dict[str, Any],
     case_data: dict[str, Any],
     human_overrides: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     segs = _extract_anchored_segments(rec)
-    body = [seg for seg in segs if not seg["is_abstract"]]
+    # Exclude bibliography/references sections from substantive methodological appraisal
+    substantive_segs = [s for s in segs if s.get("section", "body").lower() not in NON_SUBSTANTIVE_SECTIONS]
+    body = [seg for seg in substantive_segs if not seg["is_abstract"]]
+    body_chars = sum(len(seg["text"]) for seg in body)
+    distinct_body_secs = {seg.get("section", "body") for seg in body}
+    page_count = int(rec.get("page_count") or 0)
+    is_truncated = bool(rec.get("truncated") or rec.get("partial_text_only"))
     tl_status = str(rec.get("text_layer_status") or "").lower()
     explicitly_abstract = (
         rec.get("fulltext_available") is False
         or str(rec.get("view_type", "")).casefold().endswith("abstract_only")
     )
 
+    # Strict material-tier separation: short/truncated body excerpts MUST be marked 'partial_text', NEVER 'fulltext_verified'
+    explicit_fulltext_structured = bool(rec.get("fulltext_available") is True and len(body) >= 3 and body_chars >= 450 and not is_truncated)
     if tl_status == "empty_or_scanned":
         material_tier = "scanned_or_unparsed_pdf"
         has_fulltext = False
-    elif body and not explicitly_abstract:
+    elif explicitly_abstract:
+        material_tier = "abstract_only"
+        has_fulltext = False
+    elif body and not is_truncated and (
+        (body_chars >= 1200 and (len(distinct_body_secs) >= 2 or page_count >= 2 or len(body) >= 4))
+        or explicit_fulltext_structured
+    ):
         material_tier = "fulltext_verified"
         has_fulltext = True
-    elif segs:
+    elif body:
+        material_tier = "partial_text"
+        has_fulltext = False
+    elif substantive_segs:
         material_tier = "abstract_only"
         has_fulltext = False
     else:
@@ -326,7 +439,6 @@ def appraise_single_study(
         has_fulltext = False
 
     study_type, scale = detect_study_type_and_scale(rec, case_data)
-    # Allow custom domain list override from case.json while checking for unknown fields
     domains = list(scale["domains"])
     if isinstance(case_data.get("custom_domains"), list) and case_data["custom_domains"]:
         for idx, cd in enumerate(case_data["custom_domains"], 1):
@@ -339,7 +451,7 @@ def appraise_single_study(
                     "concern_cues": list(cd.get("concern_cues") or []),
                 })
 
-    full_text_blob = " ".join(s["text"] for s in segs)
+    full_text_blob = " ".join(s["text"] for s in substantive_segs)
     is_retracted = bool(RETRACTION_CUE_RE.search(f"{rec.get('title','')} {rec.get('abstract','')} {rec.get('status','')}"))
     is_pre = is_preprint(rec)
     causal_overclaim = bool(OBSERVATIONAL_DESIGN_RE.search(full_text_blob) and CAUSAL_OVERCLAIM_RE.search(full_text_blob))
@@ -353,53 +465,83 @@ def appraise_single_study(
                 "label": dim["label"],
                 "bias_rating": "insufficient_evidence",
                 "evidence_state": EvidenceState.UNKNOWN.value,
+                "gate_trace": {
+                    "layer1_reporting_presence": "abstained_non_fulltext_tier",
+                    "layer2_negation_modality": "skipped_abstained",
+                    "layer3_adequacy_check": "skipped_abstained",
+                    "layer4_abstention_triggered": True,
+                },
                 "evidence": [],
-                "rationale": f"Material tier is '{material_tier}'; full-text evidence is absent, so this domain is abstained (never defaulted to low risk).",
+                "rationale": f"Material tier is '{material_tier}'; verified full-text evidence is absent, so this domain is abstained (never defaulted to low risk).",
             })
             continue
 
-        pos_ev: list[dict[str, Any]] = []
+        verified_pos_ev: list[dict[str, Any]] = []
+        partial_pos_ev: list[dict[str, Any]] = []
         con_ev: list[dict[str, Any]] = []
-        search_segs = body if dim["requires_fulltext"] else segs
+        gate_notes: list[str] = []
+        search_segs = body if dim["requires_fulltext"] else substantive_segs
         for s in search_segs:
             matched_con = next((pat for pat in dim.get("concern_cues", []) if re.search(pat, s["text"], re.I)), None)
             matched_pos = next((pat for pat in dim.get("cues", []) if re.search(pat, s["text"], re.I)), None)
             if matched_con:
+                det = extract_sentence_anchor_detail(s["text"], matched_con)
                 con_ev.append({
                     "paragraph_id": s["paragraph_id"],
                     "section": s["section"],
                     "page_number": s["page_number"],
-                    "quote": extract_sentence_anchor(s["text"], matched_con),
+                    "sentence_index": det["sentence_index"],
+                    "char_span": [det["char_start"], det["char_end"]],
+                    "anchor_granularity": det["anchor_granularity"],
+                    "quote": det["quote"],
+                    "gate_verdict": "explicit_concern_cue",
                 })
             if matched_pos:
-                pos_ev.append({
+                det = extract_sentence_anchor_detail(s["text"], matched_pos)
+                g_label, g_rating = _evaluate_cue_sentence_4layer(det["quote"], matched_pos)
+                gate_notes.append(g_label)
+                ev_item = {
                     "paragraph_id": s["paragraph_id"],
                     "section": s["section"],
                     "page_number": s["page_number"],
-                    "quote": extract_sentence_anchor(s["text"], matched_pos),
-                })
+                    "sentence_index": det["sentence_index"],
+                    "char_span": [det["char_start"], det["char_end"]],
+                    "anchor_granularity": det["anchor_granularity"],
+                    "quote": det["quote"],
+                    "gate_verdict": g_label,
+                }
+                if g_rating == "explicitly_present":
+                    con_ev.append(ev_item)
+                elif g_rating == "plausible_concern":
+                    partial_pos_ev.append(ev_item)
+                else:
+                    verified_pos_ev.append(ev_item)
 
-        is_transparency_dim = any(k in dim["dim_id"].lower() for k in ("d5", "transparency", "funding", "reported_result"))
+        is_transparency_dim = any(k in dim["dim_id"].lower() for k in ("d5", "d6", "transparency", "funding", "reported_result"))
         if is_retracted and is_transparency_dim:
             bias = "explicitly_present"
             ev_state = EvidenceState.OUTDATED.value
             rationale = "Retraction, withdrawal, or erratum marker detected in source record."
-        elif con_ev and not pos_ev:
+        elif con_ev and not verified_pos_ev:
             bias = "explicitly_present"
             ev_state = EvidenceState.REFUTED.value
-            rationale = "Explicit methodological limitation or bias indicator anchored in verbatim sentence quote(s)."
-        elif con_ev and pos_ev:
+            rationale = "Explicit methodological limitation, negated safeguard, or bias indicator anchored in verbatim sentence quote(s)."
+        elif con_ev and verified_pos_ev:
             bias = "plausible_concern"
             ev_state = EvidenceState.PARTIAL.value
-            rationale = "Both methodological safeguards and explicit risk/limitation cues were found; inspect opposing quotes."
-        elif pos_ev:
+            rationale = "Both verified methodological safeguards and explicit risk/limitation cues were found; inspect opposing quotes."
+        elif verified_pos_ev:
             bias = "no_indication_observed"
             ev_state = EvidenceState.SUPPORTED.value
-            rationale = "Methodological reporting cues grounded in sentence-level quote(s); no explicit bias cue observed in supplied text."
+            rationale = "Methodological safeguard verified through 4-layer gate (reporting presence + non-negated + implementation detail) with verbatim sentence anchor(s)."
+        elif partial_pos_ev:
+            bias = "plausible_concern"
+            ev_state = EvidenceState.PARTIAL.value
+            rationale = "Reporting cue detected but lacked substantive adequacy detail or carried hedged/modal phrasing; held at plausible_concern rather than false low risk."
         else:
             bias = "insufficient_evidence"
             ev_state = EvidenceState.UNKNOWN.value
-            rationale = "Domain checkpoint not reported in available text; marked insufficient_evidence (not low risk)."
+            rationale = "Domain checkpoint not reported in substantive text; marked insufficient_evidence (not low risk)."
 
         if causal_overclaim and ("design" in dim["dim_id"].lower() or "confounding" in dim["dim_id"].lower()):
             if bias == "no_indication_observed":
@@ -412,7 +554,13 @@ def appraise_single_study(
             "label": dim["label"],
             "bias_rating": bias,
             "evidence_state": ev_state,
-            "evidence": (con_ev + pos_ev)[:3],
+            "gate_trace": {
+                "layer1_reporting_presence": bool(con_ev or verified_pos_ev or partial_pos_ev),
+                "layer2_negation_modality": "negated_or_hedged_intercepted" if any(x in {"negated_positive_cue", "hedged_or_modal_cue"} for x in gate_notes) else "clear",
+                "layer3_adequacy_check": "verified" if verified_pos_ev else ("unverified_bare_mention" if partial_pos_ev else "n/a"),
+                "layer4_abstention_triggered": ev_state == EvidenceState.UNKNOWN.value,
+            },
+            "evidence": (con_ev + verified_pos_ev + partial_pos_ev)[:3],
             "rationale": rationale,
         })
 
@@ -464,9 +612,12 @@ def appraise_single_study(
         "doi": rec.get("doi") or None,
         "year": rec.get("year"),
         "source_file": rec.get("source_file"),
+        "pdf_extraction_backend": rec.get("pdf_extractor") or ("text_field_structured" if has_fulltext else "n/a"),
+        "text_layer_chars": len(full_text_blob),
         "study_type_detected": study_type,
         "scale_name": scale["scale_name"],
         "scale_version": scale["scale_version"],
+        "scale_version_migration_note": scale.get("version_migration_note"),
         "material_tier": material_tier,
         "fulltext_available": has_fulltext,
         "publication_status": "retracted_or_erratum" if is_retracted else ("preprint_not_peer_reviewed" if is_pre else "standard_or_unspecified"),
@@ -493,20 +644,30 @@ def render_markdown_report(table: dict[str, Any]) -> str:
         "",
         "## 1. Study Overview & Traffic-Light Matrix",
         "",
-        "| Record ID | Scale & Version | Material Tier | Overall Tier | Domain Ratings |",
-        "| --- | --- | --- | --- | --- |",
+        "| Record ID | Scale & Version | Material Tier | Extractor | Overall Tier | Domain Ratings |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for a in table["appraisals"]:
         dom_str = " ".join(f"{d['dimension_id'].split('_')[0]}:{icon.get(d['bias_rating'], '[?]')}" for d in a["dimensions"])
         lines.append(
-            f"| `{a['record_id']}` | {a['scale_name']} ({a['scale_version']}) | `{a['material_tier']}` | `{a['overall_quality_tier']}` | {dom_str} |"
+            f"| `{a['record_id']}` | {a['scale_name']} ({a['scale_version']}) | `{a['material_tier']}` | `{a.get('pdf_extraction_backend', 'n/a')}` | `{a['overall_quality_tier']}` | {dom_str} |"
         )
+
+    migration_notes = sorted({a["scale_version_migration_note"] for a in table["appraisals"] if a.get("scale_version_migration_note")})
+    if migration_notes:
+        lines.extend(["", "### Scale Version Governance Notes", ""])
+        for note in migration_notes:
+            lines.append(f"- {note}")
+
+    if table.get("ranking_policy_note"):
+        lines.extend(["", f"**Ranking Policy**: {table['ranking_policy_note']}"])
 
     lines.extend(["", "## 2. Itemized Evidence-Anchored Appraisals", ""])
     for a in table["appraisals"]:
         lines.append(f"### `{a['record_id']}` — {a['title']}")
         lines.append(
             f"- Scale: **{a['scale_name']} {a['scale_version']}** | Material: `{a['material_tier']}` | "
+            f"Extractor: `{a.get('pdf_extraction_backend', 'n/a')}` ({a.get('text_layer_chars', 0)} chars) | "
             f"Status: `{a['publication_status']}` | Code/Data Disclosed: `{a['data_or_code_availability_detected']}`"
         )
         lines.append(f"- Overall Tier: **`{a['overall_quality_tier']}`** ({a['tier_derivation_rule']})")
@@ -514,7 +675,7 @@ def render_markdown_report(table: dict[str, Any]) -> str:
             ev_txt = ""
             if d["evidence"]:
                 e0 = d["evidence"][0]
-                loc = f"{e0['paragraph_id']}/sec={e0.get('section')}" + (f"/p.{e0['page_number']}" if e0.get("page_number") else "")
+                loc = f"{e0['paragraph_id']}/sec={e0.get('section')}" + (f"/p.{e0['page_number']}" if e0.get("page_number") else "") + (f"/sent={e0.get('sentence_index')}" if e0.get("sentence_index") is not None else "")
                 ev_txt = f" — Anchor `{loc}`: \"{e0['quote'][:160]}\""
             lines.append(
                 f"  - `{d['dimension_id']}` ({d['label']}): **{d['bias_rating']}** (`{d['evidence_state']}`) — {d['rationale']}{ev_txt}"
@@ -551,20 +712,26 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         "low_observed_concern": 1,
         "mixed_needs_review": 2,
         "incomplete_reporting": 3,
-        "incomplete_material_abstract_only": 4,
-        "unassessable_scanned_pdf": 5,
-        "moderate_or_high_concern": 6,
+        "moderate_or_high_concern": 4,
+        "incomplete_material_abstract_only": 5,
+        "unassessable_scanned_pdf": 6,
         "high_risk_or_outdated": 7,
     }
     tier_triage_action = {
         "low_observed_concern": "retain_primary_evidence",
         "mixed_needs_review": "retain_with_targeted_domain_verification",
         "incomplete_reporting": "retain_with_reporting_caveat",
+        "moderate_or_high_concern": "downgrade_or_sensitivity_analysis",
         "incomplete_material_abstract_only": "hold_pending_fulltext_retrieval",
         "unassessable_scanned_pdf": "hold_pending_ocr_or_clean_pdf",
-        "moderate_or_high_concern": "downgrade_or_sensitivity_analysis",
         "high_risk_or_outdated": "exclude_or_flag_retracted_outdated",
     }
+    ranking_policy_note = (
+        "Appraised full-text studies (tiers 1-4: low_observed_concern -> mixed_needs_review -> "
+        "incomplete_reporting -> moderate_or_high_concern, tie-broken by grounded SUPPORTED domain count) "
+        "always rank ahead of unappraised/abstained incomplete material (tiers 5-6: abstract_only / scanned PDF, "
+        "which are deferred pending full-text retrieval) and retracted/outdated records (tier 7)."
+    )
     ranked_candidates = sorted(
         appraisals,
         key=lambda a: (
@@ -577,11 +744,25 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         {
             "rank": idx,
             "record_id": a["record_id"],
+            "stable_source_id": a.get("doi") or a.get("source_file") or a["record_id"],
+            "doi": a.get("doi"),
+            "source_file": a.get("source_file"),
             "title": a["title"],
             "scale": f"{a['scale_name']} ({a['scale_version']})",
             "material_tier": a["material_tier"],
+            "comparable_fulltext_appraised": a["material_tier"] == "fulltext_verified",
             "overall_quality_tier": a["overall_quality_tier"],
             "recommended_triage": tier_triage_action.get(a["overall_quality_tier"], "manual_review"),
+            "screening_rationale": (
+                f"Material={a['material_tier']}; Scale={a['scale_name']} {a['scale_version']}; "
+                f"SUPPORTED={sum(1 for d in a['dimensions'] if d['evidence_state'] == 'SUPPORTED')}, "
+                f"CONCERN={sum(1 for d in a['dimensions'] if d['evidence_state'] in {'PARTIAL', 'REFUTED', 'OUTDATED'})}, "
+                f"UNKNOWN={sum(1 for d in a['dimensions'] if d['evidence_state'] == 'UNKNOWN')}."
+            ),
+            "locator_anchors": [
+                f"{d['evidence'][0]['paragraph_id']}/sec={d['evidence'][0].get('section')}" + (f"/p.{d['evidence'][0]['page_number']}" if d['evidence'][0].get("page_number") else "")
+                for d in a["dimensions"] if d.get("evidence")
+            ][:5],
             "grounded_domains": sum(1 for d in a["dimensions"] if d["evidence_state"] == "SUPPORTED"),
             "concern_domains": sum(1 for d in a["dimensions"] if d["evidence_state"] in {"PARTIAL", "REFUTED", "OUTDATED"}),
             "unknown_domains": sum(1 for d in a["dimensions"] if d["evidence_state"] == "UNKNOWN"),
@@ -590,12 +771,40 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         for idx, a in enumerate(ranked_candidates, start=1)
     ]
 
+    research_question = str(case_data.get("research_question") or case_data.get("topic") or bundle.get("task_md", "").splitlines()[0] if bundle.get("task_md") else f"Methodological quality & risk-of-bias screening for {case_id}")
+    query_and_screening_log = {
+        "snapshot_scope": "finite_local_authorized_corpus_only",
+        "sources_ingested": [d.get("file") for d in (bundle.get("ingest_diagnostics") or [])],
+        "candidates_screened_count": len(appraisals),
+        "fulltext_verified_count": sum(1 for a in appraisals if a["material_tier"] == "fulltext_verified"),
+        "partial_text_count": sum(1 for a in appraisals if a["material_tier"] == "partial_text"),
+        "abstract_only_count": sum(1 for a in appraisals if a["material_tier"] == "abstract_only"),
+        "scanned_unparsed_count": sum(1 for a in appraisals if a["material_tier"] == "scanned_or_unparsed_pdf"),
+        "scales_routed": scale_counts,
+    }
+    coverage_and_omission_disclosure = {
+        "fulltext_missing_or_incomplete_records": [
+            {"record_id": a["record_id"], "material_tier": a["material_tier"], "source_file": a.get("source_file")}
+            for a in appraisals if a["material_tier"] != "fulltext_verified"
+        ],
+        "offline_permission_and_scope_boundary": (
+            "Offline appraisal over supplied local snapshot only; paywalled full texts, supplemental appendices, "
+            "or trial registry records not included in /input are NOT fetched and their dependent domains remain UNKNOWN."
+        ),
+        "abstained_domain_total": sum(1 for a in appraisals for d in a["dimensions"] if d["evidence_state"] == "UNKNOWN"),
+    }
+
     table = {
         "case_id": case_id,
-        "scope_note": "Structured, version-pinned dimension appraisal over supplied local records only; abstract-only and scanned inputs abstain (UNKNOWN) on fulltext-only criteria rather than defaulting to low risk.",
+        "research_question": research_question,
+        "scope_note": "Structured, version-pinned 4-layer gated quality appraisal & candidate triage over supplied local records only; partial/abstract-only/scanned inputs abstain (UNKNOWN) on fulltext-only criteria rather than defaulting to low risk.",
+        "query_and_screening_log": query_and_screening_log,
+        "ranking_policy_note": ranking_policy_note,
         "scales_applied": scale_counts,
         "overall_tier_distribution": tier_counts,
         "ranked_evidence_candidates": ranked_evidence_candidates,
+        "deferred_incomplete_material": [c for c in ranked_evidence_candidates if not c["comparable_fulltext_appraised"]],
+        "coverage_and_omission_disclosure": coverage_and_omission_disclosure,
         "appraisals": appraisals,
         "ingest_diagnostics": bundle.get("ingest_diagnostics", []),
     }
@@ -644,9 +853,13 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
 
     patch = {
         "artifacts": ["result.json", "quality_appraisal_table.json", "quality_appraisal_report.md"],
+        "research_question": research_question,
+        "query_and_screening_log": query_and_screening_log,
         "scales_applied": scale_counts,
         "overall_tier_distribution": tier_counts,
         "ranked_evidence_candidates": ranked_evidence_candidates,
+        "deferred_incomplete_material": [c for c in ranked_evidence_candidates if not c["comparable_fulltext_appraised"]],
+        "coverage_and_omission_disclosure": coverage_and_omission_disclosure,
         "appraisals": appraisals,
         "metrics": {
             "appraised_study_count": len(appraisals),
@@ -673,6 +886,10 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         ],
         "gaps": gaps,
     }
+    patch, oc_gaps = align_output_contract(patch, case_data)
+    if oc_gaps:
+        gaps.extend(oc_gaps)
+        patch["gaps"] = gaps
     res = result_guard.update_result(result_path, patch, finalize=True)
     grounding = gap_gate.check_grounding(res, [input_dir])
     if not grounding["ok"]:

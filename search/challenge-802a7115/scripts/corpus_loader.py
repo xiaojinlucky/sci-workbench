@@ -62,32 +62,49 @@ def reconstruct_openalex_abstract(inv_index: Any) -> str:
     return " ".join(pos_map[i] for i in sorted(pos_map))
 
 
+def _count_glued_words(text: str) -> int:
+    return len(re.findall(r"[A-Za-z]{20,}", text or ""))
+
+
 def read_pdf_pages_safe(pdf_path: Path) -> tuple[list[dict[str, Any]], str]:
-    """Extract per-page text safely using non-banned tools only (pdfplumber / pypdf / pdftotext)."""
-    pages: list[dict[str, Any]] = []
-    extractor = "unavailable"
+    """Extract per-page text safely using non-banned tools only (pdfplumber / pypdf / pdftotext).
+
+    Uses tuned word-spacing tolerance (x_tolerance=1.2) to prevent inter-word gluing in two-column
+    or tight-kerning academic PDFs, falling back to pypdf/pdftotext when cleaner spacing is produced.
+    """
+    candidates: list[tuple[int, int, str, list[dict[str, Any]]]] = []
     try:
         import pdfplumber  # type: ignore
         with pdfplumber.open(str(pdf_path)) as doc:
+            pgs: list[dict[str, Any]] = []
             for idx, page in enumerate(doc.pages, start=1):
-                txt = (page.extract_text() or "").strip()
-                pages.append({"page_number": idx, "text": txt, "char_count": len(txt)})
-        extractor = "pdfplumber"
+                txt = (page.extract_text(x_tolerance=1.2, y_tolerance=3) or "").strip()
+                if not txt:
+                    txt = (page.extract_text() or "").strip()
+                pgs.append({"page_number": idx, "text": txt, "char_count": len(txt)})
+        total_chars = sum(p["char_count"] for p in pgs)
+        glued = sum(_count_glued_words(p["text"]) for p in pgs)
+        if total_chars > 0:
+            candidates.append((glued, -total_chars, "pdfplumber", pgs))
     except Exception:
-        pages = []
+        pass
 
-    if not pages:
+    if not candidates or candidates[0][0] > 3:
         try:
             from pypdf import PdfReader  # type: ignore
             reader = PdfReader(str(pdf_path))
+            pgs = []
             for idx, page in enumerate(reader.pages, start=1):
                 txt = (page.extract_text() or "").strip()
-                pages.append({"page_number": idx, "text": txt, "char_count": len(txt)})
-            extractor = "pypdf"
+                pgs.append({"page_number": idx, "text": txt, "char_count": len(txt)})
+            total_chars = sum(p["char_count"] for p in pgs)
+            glued = sum(_count_glued_words(p["text"]) for p in pgs)
+            if total_chars > 0:
+                candidates.append((glued, -total_chars, "pypdf", pgs))
         except Exception:
-            pages = []
+            pass
 
-    if not pages:
+    if not candidates:
         bin_p = shutil.which("pdftotext")
         if bin_p:
             proc = subprocess.run(
@@ -99,15 +116,23 @@ def read_pdf_pages_safe(pdf_path: Path) -> tuple[list[dict[str, Any]], str]:
                 timeout=30,
             )
             if proc.returncode == 0 and proc.stdout:
+                pgs = []
                 raw_pages = proc.stdout.split("\x0c")
                 for idx, chunk in enumerate(raw_pages, start=1):
                     txt = chunk.strip()
                     if idx == len(raw_pages) and not txt:
                         continue
-                    pages.append({"page_number": idx, "text": txt, "char_count": len(txt)})
-                extractor = "pdftotext"
+                    pgs.append({"page_number": idx, "text": txt, "char_count": len(txt)})
+                total_chars = sum(p["char_count"] for p in pgs)
+                glued = sum(_count_glued_words(p["text"]) for p in pgs)
+                if total_chars > 0:
+                    candidates.append((glued, -total_chars, "pdftotext", pgs))
 
-    return pages, extractor
+    if candidates:
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        _, _, best_extractor, best_pages = candidates[0]
+        return best_pages, best_extractor
+    return [], "unavailable"
 
 
 def read_pdf_text_safe(pdf_path: Path) -> str:
@@ -577,13 +602,28 @@ def load_input_bundle(input_dir: Path) -> dict[str, Any]:
                 elif isinstance(it, str) and it.strip():
                     target.append(normalize_record_dict({"title": it.strip()}, default_id=f"{src}_{idx:04d}", source_file=src, default_source=src_name))
 
+    case_record_count = 0
     for key in ("records", "papers", "documents", "candidates", "results", "sources", "patents", "views", "previous_snapshot", "current_snapshot"):
-        if key in case_data:
-            _collect_list(case_data[key], records, "case.json", str(case_data.get("source") or key))
+        val = case_data.get(key)
+        if not isinstance(val, list) or not val:
+            continue
+        # Guard: 'sources' may be a list of database names (strings) rather than bibliographic records
+        if key == "sources" and all(isinstance(x, str) for x in val):
+            continue
+        before_k = len(records)
+        _collect_list(val, records, f"case.json:{key}", str(case_data.get("source") or key))
+        added = len(records) - before_k
+        case_record_count += added
+        if added > 0:
+            ingest_diagnostics.append({"file": f"case.json:{key}", "format": "case_json", "count": added})
     if "reference_set" in case_data:
+        before_ref = len(reference_set)
         _collect_list(case_data["reference_set"], reference_set, "case.json:reference_set", "reference_set")
+        ingest_diagnostics.append({"file": "case.json:reference_set", "format": "case_json_ref", "count": len(reference_set) - before_ref})
     if "supplemental_hits" in case_data:
+        before_supp = len(supplemental_hits)
         _collect_list(case_data["supplemental_hits"], supplemental_hits, "case.json:supplemental_hits", "supplemental")
+        ingest_diagnostics.append({"file": "case.json:supplemental_hits", "format": "case_json_supp", "count": len(supplemental_hits) - before_supp})
 
     for fp in sorted(p for p in input_dir.rglob("*") if p.is_file()):
         if fp.name in ("case.json", "task.md"):
@@ -635,8 +675,16 @@ def load_input_bundle(input_dir: Path) -> dict[str, Any]:
                 paras.extend(segment_text_to_paragraphs(p["text"], record_id=fp.stem, page_number=p["page_number"]))
             raw_texts.append({"file": rel, "text": txt, "page_count": len(pages), "text_layer_status": tl_status, "extractor": extractor})
             ingest_diagnostics.append({"file": rel, "format": "pdf", "pages": len(pages), "chars": total_chars, "text_layer_status": tl_status, "extractor": extractor})
+            pdf_title = "unknown"
+            if pages and pages[0].get("text"):
+                first_lines = [ln.strip() for ln in pages[0]["text"].splitlines() if len(ln.strip()) >= 12]
+                for cand_ln in first_lines[:4]:
+                    if not re.match(r"^(?:arXiv:|https?://|doi:|page\s+\d|preprint\b|submitted\s+to\b|\d{4}\b)", cand_ln, re.I):
+                        pdf_title = cand_ln[:220]
+                        break
             records.append(normalize_record_dict({
-                "title": fp.stem,
+                "title": pdf_title,
+                "title_provenance": "pdf_first_page_heading" if pdf_title != "unknown" else "unknown_no_reliable_pdf_title",
                 "text": txt,
                 "paragraphs": paras,
                 "page_count": len(pages),

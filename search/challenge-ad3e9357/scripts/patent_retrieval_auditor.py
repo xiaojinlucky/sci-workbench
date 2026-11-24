@@ -89,6 +89,8 @@ def _decompose_claims(claims_text: str, source_label: str) -> dict[str, Any]:
         return {
             "claim_version_source": source_label,
             "claims_present_in_source": False,
+            "claim_parse_status": "absent_in_source",
+            "manual_verification_required": False,
             "observed_claim_count": 0,
             "independent_claim_count": 0,
             "dependent_claim_count": 0,
@@ -115,16 +117,17 @@ def _decompose_claims(claims_text: str, source_label: str) -> dict[str, Any]:
             claims_list.append((num, ctext))
 
     if not claims_list:
-        # Fallback: check single Claim 1 mention
-        m1 = re.search(r"claim\s+1\b(.{10,260})", clean, re.I)
-        excerpt = f"Claim 1{m1.group(1)}".strip()[:260] if m1 else clean[:260]
+        # Honest fallback: NEVER fabricate independent_claim_count=1 when numbered claims could not be segmented
         return {
             "claim_version_source": source_label,
             "claims_present_in_source": True,
-            "observed_claim_count": 1,
-            "independent_claim_count": 1,
-            "dependent_claim_count": 0,
-            "independent_claim_1_excerpt": excerpt,
+            "claim_parse_status": "unknown_manual_check",
+            "manual_verification_required": True,
+            "observed_claim_count": 0,
+            "independent_claim_count": None,
+            "dependent_claim_count": None,
+            "independent_claim_1_excerpt": None,
+            "unparsed_text_excerpt": clean[:240],
             "equal_claim_scope_assumed": False,
         }
 
@@ -142,6 +145,8 @@ def _decompose_claims(claims_text: str, source_label: str) -> dict[str, Any]:
     return {
         "claim_version_source": source_label,
         "claims_present_in_source": True,
+        "claim_parse_status": "parsed_numbered_claims",
+        "manual_verification_required": False,
         "observed_claim_count": len(claims_list),
         "independent_claim_count": indep_cnt,
         "dependent_claim_count": dep_cnt,
@@ -325,6 +330,11 @@ def parse_patent_records(bundle: dict[str, Any]) -> tuple[list[dict[str, Any]], 
             "filing_date": filing_date,
             "publication_date": publication_date,
             "grant_date": grant_date,
+            "date_provenance": {
+                "source_files": source_files,
+                "sources": sources,
+                "note": "Dates parsed verbatim from listed local snapshot files; never inferred across family members.",
+            },
             "assignee": list(dict.fromkeys(assignees)),
             "inventors": list(dict.fromkeys(inventors)),
             "priority_numbers_raw": sorted(set(priorities_raw)),
@@ -338,6 +348,15 @@ def parse_patent_records(bundle: dict[str, Any]) -> tuple[list[dict[str, Any]], 
             "ipc_cpc_query_variants": cpc_ipc_structured,
             "claims_analysis": claims_info,
             "claim_version_source": claims_info["claim_version_source"],
+            "claim_extraction_provenance": {
+                "claims_present": claims_info["claims_present_in_source"],
+                "source": claims_info["claim_version_source"],
+                "method": (
+                    "google_patents_html_dom_section"
+                    if ".html" in str(claims_info["claim_version_source"]).lower()
+                    else ("structured_json_claims_field" if claims_info["claims_present_in_source"] else "absent_in_metadata_only_snapshot")
+                ),
+            },
             "equal_claim_scope_assumed": False,
             "observed_snapshot_legal_status": observed_status,
             "legal_status_snapshot_date": status_date or publication_date,
@@ -564,6 +583,166 @@ def build_dual_track_queries(
     }
 
 
+QUERY_STOPWORDS = {
+    "the", "and", "for", "with", "from", "into", "over", "under", "that", "this", "these", "those",
+    "patent", "patents", "family", "claims", "claim", "compare", "audit", "find", "retrieve", "search",
+    "check", "verify", "status", "legal", "document", "documents", "using", "based", "method", "system",
+    "analysis", "including", "versus", "between", "separate", "only", "local", "snapshot",
+}
+
+
+def execute_local_three_track_retrieval(
+    patents: list[dict[str, Any]],
+    scientific_papers: list[dict[str, Any]],
+    dual_track_queries: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Execute genuine per-query 3-track local retrieval (number, CPC/IPC, technical topic) with ranking & exclusion logs."""
+    results: list[dict[str, Any]] = []
+    unmatched_queries: list[str] = []
+
+    for pq in dual_track_queries.get("patent_search_queries", []):
+        qid = pq["query_id"]
+        qtxt = pq["raw_query"]
+        q_pats_norm = {x["normalized"] for x in pq.get("detected_patent_numbers", []) if x.get("normalized")}
+        q_pats_base = {x["base_number"] for x in pq.get("detected_patent_numbers", []) if x.get("base_number")}
+        q_cpcs_exact = {c["canonical"] for c in pq.get("cpc_ipc_normalized", []) if c.get("canonical")}
+        q_cpcs_sub = {c.split()[0] for c in q_cpcs_exact if c}
+        q_tokens = [
+            tok for tok in dict.fromkeys(re.findall(r"[a-z0-9]{3,}", qtxt.lower()))
+            if tok not in QUERY_STOPWORDS and not re.match(r"^(?:us|ep|wo|cn|jp|kr|nl)\d", tok)
+        ]
+
+        matched: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+
+        for p in patents:
+            pub_norm = p.get("publication_number") or ""
+            base_num = (p.get("publication_parsed") or {}).get("base_number") or ""
+            p_cpcs = set(p.get("ipc_cpc_codes") or [])
+            p_sub = {c.split()[0] for c in p_cpcs if c}
+            title_l = (p.get("title") or "").lower()
+            abs_l = (p.get("abstract") or "").lower()
+            claim1_l = ((p.get("claims_analysis") or {}).get("independent_claim_1_excerpt") or "").lower()
+            blob_l = (p.get("_search_blob") or "").lower()
+
+            tracks_hit: list[str] = []
+            fields_hit: list[str] = []
+            score = 0.0
+            reasons: list[str] = []
+
+            # Track 1: Patent Publication / Base Number Match
+            if pub_norm and pub_norm in q_pats_norm:
+                tracks_hit.append("number_lookup_exact")
+                fields_hit.append("publication_number")
+                score += 100.0
+                reasons.append(f"exact publication number match `{pub_norm}`")
+            elif base_num and base_num in q_pats_base:
+                tracks_hit.append("number_lookup_same_base")
+                fields_hit.append("base_number")
+                score += 80.0
+                reasons.append(f"same base publication series `{base_num}` (different kind code `{p.get('kind_code')}`)")
+
+            # Track 2: CPC / IPC Classification Match
+            cpc_exact_hit = sorted(q_cpcs_exact & p_cpcs)
+            cpc_sub_hit = sorted(q_cpcs_sub & p_sub)
+            if cpc_exact_hit:
+                tracks_hit.append("cpc_ipc_exact")
+                fields_hit.append("ipc_cpc_codes")
+                score += 40.0 + 10.0 * len(cpc_exact_hit)
+                reasons.append(f"exact CPC/IPC class match {cpc_exact_hit}")
+            elif cpc_sub_hit:
+                tracks_hit.append("cpc_ipc_subclass")
+                fields_hit.append("ipc_cpc_codes")
+                score += 15.0 * len(cpc_sub_hit)
+                reasons.append(f"CPC/IPC subclass overlap {cpc_sub_hit}")
+
+            # Track 3: Technical Topic Token Match
+            tok_title = [t for t in q_tokens if re.search(rf"\b{re.escape(t)}\b", title_l)]
+            tok_abs = [t for t in q_tokens if re.search(rf"\b{re.escape(t)}\b", abs_l)]
+            tok_claim = [t for t in q_tokens if re.search(rf"\b{re.escape(t)}\b", claim1_l)]
+            tok_all = sorted(set(tok_title + tok_abs + tok_claim))
+            if tok_all:
+                tracks_hit.append("technical_topic")
+                if tok_title:
+                    fields_hit.append("title")
+                if tok_abs:
+                    fields_hit.append("abstract")
+                if tok_claim:
+                    fields_hit.append("claim_1")
+                score += 8.0 * len(tok_title) + 4.0 * len(tok_abs) + 5.0 * len(tok_claim)
+                reasons.append(f"technical terms matched {tok_all[:6]}")
+
+            # Inclusion threshold: number match OR CPC exact OR >=2 topic tokens (or 1 topic + CPC subclass)
+            include_ok = bool(
+                ("number_lookup_exact" in tracks_hit)
+                or ("number_lookup_same_base" in tracks_hit)
+                or ("cpc_ipc_exact" in tracks_hit)
+                or (len(tok_all) >= 2)
+                or (len(tok_all) >= 1 and "cpc_ipc_subclass" in tracks_hit)
+                or (len(q_tokens) == 1 and len(tok_all) == 1)
+            )
+            if include_ok and score > 0:
+                matched.append({
+                    "record_id": p["record_id"],
+                    "publication_number": p.get("publication_number"),
+                    "kind_code": p.get("kind_code"),
+                    "stage": p.get("stage"),
+                    "title": p.get("title"),
+                    "relevance_score": round(score, 2),
+                    "matched_tracks": tracks_hit,
+                    "matched_fields": list(dict.fromkeys(fields_hit)),
+                    "evidence_locator": f"{(p.get('source_files') or ['snapshot'])[0]}#fields={','.join(dict.fromkeys(fields_hit))}",
+                    "inclusion_rationale": "; ".join(reasons),
+                })
+            else:
+                excl_reason = (
+                    f"weak_single_term_overlap_only ({tok_all})"
+                    if tok_all
+                    else (f"cpc_subclass_only_no_topic_or_number ({cpc_sub_hit})" if cpc_sub_hit else "no_number_cpc_or_topic_overlap")
+                )
+                excluded.append({
+                    "record_id": p["record_id"],
+                    "publication_number": p.get("publication_number"),
+                    "exclusion_reason": excl_reason,
+                })
+
+        matched.sort(key=lambda x: (-x["relevance_score"], x["record_id"]))
+        for rank_idx, m in enumerate(matched, start=1):
+            m["rank"] = rank_idx
+
+        # Also run separate academic comparison paper topic match for this query
+        sci_hits: list[dict[str, Any]] = []
+        for sp in scientific_papers:
+            s_blob = f"{sp.get('title', '')} {sp.get('abstract', '')}".lower()
+            s_toks = [t for t in q_tokens if re.search(rf"\b{re.escape(t)}\b", s_blob)]
+            if len(s_toks) >= 2 or (len(q_tokens) == 1 and len(s_toks) == 1):
+                sci_hits.append({
+                    "record_id": sp["record_id"],
+                    "doi": sp.get("doi"),
+                    "title": sp.get("title"),
+                    "matched_terms": s_toks[:6],
+                    "track": "scientific_literature_separate_track",
+                })
+
+        if not matched:
+            unmatched_queries.append(qid)
+
+        results.append({
+            "query_id": qid,
+            "query_type": pq["query_type"],
+            "raw_query": qtxt,
+            "matched_patent_count": len(matched),
+            "excluded_patent_count": len(excluded),
+            "matched_scientific_paper_count": len(sci_hits),
+            "unmatched_query": len(matched) == 0,
+            "matched_candidates": matched,
+            "excluded_candidates": excluded,
+            "matched_scientific_papers": sci_hits,
+        })
+
+    return results, unmatched_queries
+
+
 def _render_landscape_markdown(report: dict[str, Any]) -> str:
     fam = report["family_consolidation"]
     lines: list[str] = [
@@ -591,7 +770,12 @@ def _render_landscape_markdown(report: dict[str, Any]) -> str:
         dates_s = f"{p.get('filing_date') or '-'} / {p.get('publication_date') or '-'} / {p.get('grant_date') or '-'}"
         st_s = f"{p.get('observed_snapshot_legal_status') or 'none'} (live: `{p['current_official_legal_status']}`)"
         ca = p["claims_analysis"]
-        cl_s = f"{ca['observed_claim_count']} ({ca['independent_claim_count']}/{ca['dependent_claim_count']})" if ca["claims_present_in_source"] else "none"
+        if ca.get("claim_parse_status") == "unknown_manual_check":
+            cl_s = "unknown_manual_check"
+        elif ca["claims_present_in_source"]:
+            cl_s = f"{ca['observed_claim_count']} ({ca['independent_claim_count']}/{ca['dependent_claim_count']})"
+        else:
+            cl_s = "none (metadata-only)"
         ocr_s = "YES" if p["wo_merged_ocr_boundary"] else "no"
         lines.append(
             f"| `{p.get('publication_number') or p['record_id']}` | `{p.get('application_number') or '-'}` | "
@@ -626,6 +810,26 @@ def _render_landscape_markdown(report: dict[str, Any]) -> str:
         lines.append(f"  - USPTO-safe quoted CPC: `{pq['slash_safe_uspto_query']}`")
         lines.append(f"  - Lucene slash-escaped CPC: `{pq['slash_safe_lucene_query']}`")
 
+    if report.get("query_execution_results"):
+        lines.extend(["", "## 5b. Per-Query Local 3-Track Retrieval, Candidate Ranking & Exclusion Log", ""])
+        for qres in report["query_execution_results"]:
+            lines.append(
+                f"### `{qres['query_id']}` ({qres['query_type']}): matched **{qres['matched_patent_count']}** patent(s), "
+                f"excluded **{qres['excluded_patent_count']}**, scientific hits **{qres['matched_scientific_paper_count']}**"
+            )
+            if qres["unmatched_query"]:
+                lines.append("- **UNMATCHED QUERY**: 0 patent records met number/CPC/topic threshold in local snapshot.")
+            else:
+                for cand in qres["matched_candidates"][:6]:
+                    lines.append(
+                        f"  - Rank {cand['rank']}: `{cand['record_id']}` (score={cand['relevance_score']}, tracks={cand['matched_tracks']}, "
+                        f"locator=`{cand['evidence_locator']}`) — {cand['inclusion_rationale']}"
+                    )
+            if qres["excluded_candidates"]:
+                excl_preview = ", ".join(f"`{e['record_id']}` ({e['exclusion_reason']})" for e in qres["excluded_candidates"][:5])
+                lines.append(f"  - Excluded sample ({len(qres['excluded_candidates'])} total): {excl_preview}")
+            lines.append("")
+
     lines.extend([
         "",
         "## 6. Authorization Tiers & Honest Limitations",
@@ -657,9 +861,16 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
     patents, scientific_papers, raw_patent_count = parse_patent_records(bundle)
     family_consolidation = group_dual_patent_families(patents)
     dual_track_queries = build_dual_track_queries(patents, bundle["queries"])
+    query_execution_results, unmatched_queries = execute_local_three_track_retrieval(
+        patents, scientific_papers, dual_track_queries
+    )
 
     wo_ocr_count = sum(1 for p in patents if p["wo_merged_ocr_boundary"])
-    claims_extracted_count = sum(1 for p in patents if p["claims_analysis"]["claims_present_in_source"])
+    claims_extracted_count = sum(
+        1 for p in patents
+        if p["claims_analysis"]["claims_present_in_source"]
+        and p["claims_analysis"].get("claim_parse_status") == "parsed_numbered_claims"
+    )
     kind_breakdown: dict[str, int] = defaultdict(int)
     for p in patents:
         kind_breakdown[p["stage"]] += 1
@@ -713,6 +924,8 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         "family_consolidation": family_consolidation,
         "patent_families": family_consolidation["inpadoc_extended_families"],
         "dual_track_queries": dual_track_queries,
+        "query_execution_results": query_execution_results,
+        "unmatched_queries": unmatched_queries,
         "comparison_scientific_papers": comp_papers_out,
     }
     report_path = output_dir / "patent_search_report.json"
@@ -752,6 +965,23 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
             "source": "patent_retrieval_auditor",
             "message": f"{wo_ocr_count} patent document(s) carry WO/OCR boundary caveat requiring facsimile verification before claim interpretation.",
         })
+    patents_missing_claims = [
+        {"publication_number": p["record_id"], "source_files": p.get("source_files", [])}
+        for p in clean_patents
+        if not p["claims_analysis"]["claims_present_in_source"]
+    ]
+    if patents_missing_claims:
+        gaps.append({
+            "code": "CLAIMS_ABSENT_IN_METADATA_SNAPSHOT",
+            "severity": "info",
+            "source": "patent_retrieval_auditor",
+            "message": (
+                f"{len(patents_missing_claims)}/{len(clean_patents)} patent publication(s) supplied as metadata-only records "
+                f"lack claim text in the local snapshot ({[x['publication_number'] for x in patents_missing_claims]}); "
+                "claims were NOT fabricated or copied across family members (equal_claim_scope_assumed=False)."
+            ),
+            "affected_publications": patents_missing_claims,
+        })
     if not clean_patents:
         gaps.append({
             "code": "NO_PATENT_RECORDS_PARSED",
@@ -767,6 +997,8 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         "family_consolidation": family_consolidation,
         "patent_families": family_consolidation["inpadoc_extended_families"],
         "dual_track_queries": dual_track_queries,
+        "query_execution_results": query_execution_results,
+        "unmatched_queries": unmatched_queries,
         "comparison_scientific_papers": comp_papers_out,
         "metrics": summary_metrics,
         "metric_provenance": {
@@ -794,6 +1026,11 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
         ],
         "gaps": gaps,
     }
+    from evidence_state_guard import align_output_contract
+    patch, oc_gaps = align_output_contract(patch, bundle.get("case_data") or {})
+    if oc_gaps:
+        gaps.extend(oc_gaps)
+        patch["gaps"] = gaps
     res = result_guard.update_result(result_path, patch, finalize=True)
     grounding = gap_gate.check_grounding(res, [input_dir])
     if not grounding["ok"]:

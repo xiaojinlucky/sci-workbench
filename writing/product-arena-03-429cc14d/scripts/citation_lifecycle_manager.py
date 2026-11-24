@@ -13,6 +13,7 @@ import json
 import re
 import sys
 import unicodedata
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from writing_io_and_invariants import (  # noqa: E402
     build_writing_result,
     inspect_docx_ooxml,
+    load_case_contract,
     read_document_text,
 )
 
@@ -258,13 +260,127 @@ def parse_ris(text: str, source_file: str) -> list[dict[str, Any]]:
     return records
 
 
+def _extract_crossref_year(msg: dict[str, Any]) -> tuple[str, str]:
+    """Extract publication year from Crossref date-parts, falling back honestly to created/deposited when issued is null."""
+    for key in ("published-print", "published-online", "published", "issued", "created", "deposited"):
+        block = msg.get(key)
+        if isinstance(block, dict):
+            dp = block.get("date-parts")
+            if isinstance(dp, list) and dp and isinstance(dp[0], list) and dp[0] and dp[0][0] is not None:
+                yr = re.sub(r"[^0-9]", "", str(dp[0][0]))[:4]
+                if len(yr) == 4:
+                    return yr, key
+    return "", ""
+
+
+def _parse_crossref_work(msg: dict[str, Any], source_file: str, idx: int) -> dict[str, Any]:
+    """Convert a single Crossref REST API work object (`message`) into a canonical bibliography record."""
+    raw_auths = msg.get("author") or []
+    authors: list[dict[str, str]] = []
+    for a in raw_auths:
+        if isinstance(a, dict):
+            if a.get("name"):
+                authors.append(_parse_author_name(str(a["name"])))
+            else:
+                fam, giv = str(a.get("family", "")).strip(), str(a.get("given", "")).strip()
+                authors.append({"family": fam, "given": giv, "raw": f"{fam}, {giv}".strip(", ")})
+        elif isinstance(a, str):
+            authors.append(_parse_author_name(a))
+
+    title_val = msg.get("title")
+    title = str(title_val[0] if isinstance(title_val, list) and title_val else (title_val or "")).strip()
+    orig_title_val = msg.get("original-title")
+    alt_title = str(orig_title_val[0] if isinstance(orig_title_val, list) and orig_title_val else (orig_title_val or "")).strip()
+    ct_val = msg.get("container-title") or msg.get("short-container-title") or []
+    venue = str(ct_val[0] if isinstance(ct_val, list) and ct_val else (ct_val or msg.get("publisher") or "")).strip()
+
+    year, date_src = _extract_crossref_year(msg)
+    cr_type = str(msg.get("type") or "journal-article").lower()
+    etype = {
+        "journal-article": "article",
+        "proceedings-article": "inproceedings",
+        "book": "book",
+        "book-chapter": "incollection",
+        "dissertation": "phdthesis",
+        "posted-content": "misc",
+        "component": "misc",
+    }.get(cr_type, "article")
+
+    doi = normalize_doi(msg.get("DOI") or msg.get("doi") or "")
+    # Capture parent DOI for Crossref component/supplemental items (e.g., ACS .s001 / .s003)
+    parent_doi = ""
+    rel = msg.get("relation") or {}
+    if isinstance(rel, dict):
+        for rkey in ("is-component-of", "is-part-of"):
+            for robj in (rel.get(rkey) or []):
+                if isinstance(robj, dict) and robj.get("id"):
+                    parent_doi = normalize_doi(str(robj["id"]))
+                    if parent_doi:
+                        break
+            if parent_doi:
+                break
+    desc = str(msg.get("description") or "").strip()
+    if not parent_doi and desc:
+        m_p = RE_DOI.search(desc)
+        if m_p:
+            cand_p = normalize_doi(m_p.group(1))
+            if cand_p and cand_p != doi:
+                parent_doi = cand_p
+
+    resource_url = ""
+    res_obj = msg.get("resource") or {}
+    if isinstance(res_obj, dict) and isinstance(res_obj.get("primary"), dict):
+        resource_url = str(res_obj["primary"].get("URL") or "")
+    url = resource_url or str(msg.get("URL") or "")
+
+    note_parts = [p for p in (desc, f"crossref_type={cr_type}", f"year_source={date_src}" if date_src and date_src != "issued" else "") if p]
+    abstract = re.sub(r"<[^>]+>", " ", str(msg.get("abstract") or "")).strip()
+    is_prep = cr_type == "posted-content" or bool(RE_PREPRINT.search(venue + " " + doi + " " + desc))
+
+    rec_id = Path(source_file).stem if idx == 1 else f"{Path(source_file).stem}_{idx:03d}"
+    if doi:
+        slug = re.sub(r"[^a-z0-9]+", "_", doi).strip("_")[-36:]
+        rec_id = f"cr_{slug}"
+
+    return {
+        "id": rec_id,
+        "source_format": "crossref_json",
+        "source_file": source_file,
+        "entry_type": etype,
+        "crossref_type": cr_type,
+        "parent_doi": parent_doi,
+        "authors": authors,
+        "year": year,
+        "title": title,
+        "alt_title": alt_title,
+        "venue": venue,
+        "volume": str(msg.get("volume") or ""),
+        "issue": str(msg.get("issue") or ""),
+        "pages": str(msg.get("page") or ""),
+        "publisher": str(msg.get("publisher") or ""),
+        "doi": doi,
+        "url": url,
+        "note": "; ".join(note_parts),
+        "abstract": abstract,
+        "is_preprint": is_prep,
+    }
+
+
 def parse_csl_json(text: str, source_file: str) -> list[dict[str, Any]]:
-    """CSL-JSON bibliography parser."""
+    """Parse CSL-JSON or native Crossref REST API JSON (`work` / `work-list`)."""
     data = json.loads(text)
+    if isinstance(data, dict) and data.get("message-type") == "work" and isinstance(data.get("message"), dict):
+        return [_parse_crossref_work(data["message"], source_file, 1)]
+    if isinstance(data, dict) and data.get("message-type") == "work-list" and isinstance(data.get("message"), dict):
+        return [_parse_crossref_work(it, source_file, idx) for idx, it in enumerate(data["message"].get("items", []), start=1) if isinstance(it, dict)]
+
     items = data if isinstance(data, list) else data.get("references", data.get("items", []))
     records: list[dict[str, Any]] = []
     for idx, item in enumerate(items, start=1):
         if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("title"), list) and ("DOI" in item or "prefix" in item):
+            records.append(_parse_crossref_work(item, source_file, idx))
             continue
         raw_auths = item.get("author", [])
         authors: list[dict[str, str]] = []
@@ -280,11 +396,12 @@ def parse_csl_json(text: str, source_file: str) -> list[dict[str, Any]]:
         issued = item.get("issued", {})
         if isinstance(issued, dict) and issued.get("date-parts"):
             dp = issued["date-parts"][0]
-            if dp:
+            if dp and dp[0] is not None:
                 year = str(dp[0])[:4]
         elif item.get("year"):
             year = str(item["year"])[:4]
-        venue = str(item.get("container-title") or item.get("journal") or item.get("publisher") or "")
+        ct = item.get("container-title") or item.get("journal") or item.get("publisher") or ""
+        venue = str(ct[0] if isinstance(ct, list) and ct else ct)
         csl_type = str(item.get("type", "article-journal")).lower()
         etype = {"article-journal": "article", "paper-conference": "inproceedings", "book": "book", "thesis": "phdthesis"}.get(csl_type, "article")
         doi = normalize_doi(item.get("DOI") or item.get("doi") or "")
@@ -313,11 +430,159 @@ def parse_csl_json(text: str, source_file: str) -> list[dict[str, Any]]:
     return records
 
 
-def load_library_files(paths: list[Path]) -> list[dict[str, Any]]:
+def parse_jats_xml_references(text: str, source_file: str) -> list[dict[str, Any]]:
+    """Parse EuropePMC / PubMed Central JATS XML `<ref-list><ref>` entries into canonical bibliography records."""
     records: list[dict[str, Any]] = []
-    for p in paths:
-        if not p.is_file():
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return records
+
+    for idx, ref in enumerate(root.findall(".//ref-list//ref"), start=1):
+        ref_id = ref.attrib.get("id") or f"jats_ref_{idx:03d}"
+        authors: list[dict[str, str]] = []
+        for nm in ref.findall(".//name"):
+            sn = (nm.findtext("surname") or "").strip()
+            gn = (nm.findtext("given-names") or "").strip()
+            if sn:
+                authors.append({"family": sn, "given": gn, "raw": f"{sn}, {gn}".strip(", ")})
+        title_el = ref.find(".//article-title")
+        title = " ".join("".join(title_el.itertext()).split()) if title_el is not None else ""
+        venue_el = ref.find(".//source")
+        venue = " ".join("".join(venue_el.itertext()).split()) if venue_el is not None else ""
+        year = re.sub(r"[^0-9]", "", ref.findtext(".//year") or "")[:4]
+        vol = (ref.findtext(".//volume") or "").strip()
+        iss = (ref.findtext(".//issue") or "").strip()
+        fp = (ref.findtext(".//fpage") or "").strip()
+        lp = (ref.findtext(".//lpage") or "").strip()
+        pages = f"{fp}-{lp}" if fp and lp else (fp or lp)
+        doi = ""
+        for pid in ref.findall(".//pub-id"):
+            if pid.attrib.get("pub-id-type") == "doi" and pid.text:
+                doi = normalize_doi(pid.text)
+                break
+        if not doi:
+            raw_ref = " ".join("".join(ref.itertext()).split())
+            m_d = RE_DOI.search(raw_ref)
+            if m_d:
+                doi = normalize_doi(m_d.group(1))
+        if not title:
+            title = " ".join("".join(ref.itertext()).split())[:180]
+        records.append({
+            "id": ref_id,
+            "source_format": "jats_xml",
+            "source_file": source_file,
+            "entry_type": "article",
+            "authors": authors,
+            "year": year,
+            "title": title,
+            "alt_title": "",
+            "venue": venue,
+            "volume": vol,
+            "issue": iss,
+            "pages": pages,
+            "publisher": "",
+            "doi": doi,
+            "url": "",
+            "note": "",
+            "abstract": "",
+            "is_preprint": bool(RE_PREPRINT.search(venue + " " + doi)),
+        })
+    return records
+
+
+def parse_markdown_references(text: str, source_file: str) -> list[dict[str, Any]]:
+    """Parse numbered or EuropePMC-exported `## References` blocks from Markdown/plain-text papers."""
+    _, ref_lines = _split_body_and_refs(text)
+    records: list[dict[str, Any]] = []
+    for _, ln in ref_lines:
+        st = ln.strip()
+        m = re.match(r"^(?:\[(\d+)\]|(\d+)\.)\s+(?:\d+\.\s+)?(.+)$", st)
+        if not m:
             continue
+        num = m.group(1) or m.group(2)
+        body = m.group(3).strip()
+        # Clean EuropePMC compact DOI trailing PMID/PMCID digits (e.g., 10.1021/jacs.4c0718539437413 -> 10.1021/jacs.4c07185)
+        doi = ""
+        m_doi = re.search(r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", body)
+        if m_doi:
+            raw_d = m_doi.group(1)
+            raw_d = re.sub(r"PMC\d+.*$", "", raw_d)
+            # Strip glued 8-digit PMID suffix after a dot/alphanumeric code when present
+            raw_d = re.sub(r"(?<=[a-zA-Z0-9])(\d{8})$", "", raw_d)
+            doi = normalize_doi(raw_d)
+
+        # Extract year (supports compact `J. Am. Chem. Soc.202414630078` and normal `(2024)` / `. 2024;`)
+        yr = ""
+        m_yr = re.search(r"(?:^|[^0-9])((?:19|20)\d{2})(?:[^0-9]|$)", body)
+        if not m_yr:
+            m_yr = re.search(r"\.((?:19|20)\d{2})\d", body)
+        if m_yr:
+            yr = m_yr.group(1)
+
+        # Extract leading authors before title
+        authors: list[dict[str, str]] = []
+        # EuropePMC compact author format: `KongF. HuangY. YuX.`
+        compact_auths = re.findall(r"\b([A-Z][a-z\-]{1,18})([A-Z]\.(?:[A-Z]\.)?)", body[:260])
+        if len(compact_auths) >= 2:
+            for fam, init in compact_auths[:12]:
+                authors.append({"family": fam, "given": init, "raw": f"{fam}, {init}"})
+            last_a = compact_auths[-1][0] + compact_auths[-1][1]
+            pos = body.find(last_a)
+            title_cand = body[pos + len(last_a):].strip(" .") if pos != -1 else body
+        else:
+            # Standard format: `Author A, Author B. Title. Journal (Year)...`
+            parts = [p.strip() for p in re.split(r"\.\s+", body) if p.strip()]
+            if parts:
+                for raw_a in re.split(r",\s*(?:and\s+)?|;\s*|\band\b", parts[0]):
+                    ra = raw_a.strip()
+                    if ra and len(ra) <= 40 and not re.search(r"\d{4}", ra):
+                        authors.append(_parse_author_name(ra))
+            title_cand = parts[1] if len(parts) > 1 else body
+
+        # Trim trailing journal/year/DOI from compact title
+        if yr and yr in title_cand:
+            title_cand = title_cand.split(yr, 1)[0].strip(" .,;(")
+        if doi and doi in title_cand.lower():
+            idx_d = title_cand.lower().find(doi)
+            title_cand = title_cand[:idx_d].strip(" .,;")
+
+        records.append({
+            "id": f"{Path(source_file).stem}_ref{num}",
+            "source_format": "markdown_refs",
+            "source_file": source_file,
+            "entry_type": "article",
+            "authors": authors,
+            "year": yr,
+            "title": title_cand[:240],
+            "alt_title": "",
+            "venue": "",
+            "volume": "",
+            "issue": "",
+            "pages": "",
+            "publisher": "",
+            "doi": doi,
+            "url": "",
+            "note": f"raw_ref_num={num}",
+            "abstract": "",
+            "is_preprint": bool(RE_PREPRINT.search(body)),
+        })
+    return records
+
+
+def load_library_files(paths: list[Path]) -> list[dict[str, Any]]:
+    """Load bibliography records from .bib, .ris, .json (CSL/Crossref), .xml (JATS), .md/.txt, or directories."""
+    expanded: list[Path] = []
+    for p in paths:
+        if p.is_dir():
+            for fp in sorted(p.rglob("*")):
+                if fp.is_file() and fp.suffix.lower() in {".bib", ".ris", ".json", ".xml"}:
+                    expanded.append(fp)
+        elif p.is_file():
+            expanded.append(p)
+
+    records: list[dict[str, Any]] = []
+    for p in expanded:
         txt = p.read_text(encoding="utf-8", errors="replace")
         suf = p.suffix.lower()
         if suf == ".bib":
@@ -326,6 +591,10 @@ def load_library_files(paths: list[Path]) -> list[dict[str, Any]]:
             records.extend(parse_ris(txt, p.name))
         elif suf == ".json":
             records.extend(parse_csl_json(txt, p.name))
+        elif suf == ".xml":
+            records.extend(parse_jats_xml_references(txt, p.name))
+        elif suf in {".md", ".txt"}:
+            records.extend(parse_markdown_references(txt, p.name))
     return records
 
 
@@ -362,10 +631,11 @@ def _titles_match(r1: dict[str, Any], r2: dict[str, Any]) -> tuple[bool, float, 
 
 
 def deduplicate_records(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Merge duplicates with explainable criteria while protecting distinct papers by homonymous authors."""
+    """Merge duplicates with explainable criteria while protecting distinct homonymous-author papers & SI components."""
     clusters: list[list[dict[str, Any]]] = []
     merge_decisions: list[dict[str, Any]] = []
     protected_homonymous_pairs: list[dict[str, Any]] = []
+    related_component_groups: dict[str, list[dict[str, Any]]] = {}
 
     for rec in records:
         placed = False
@@ -389,9 +659,25 @@ def deduplicate_records(records: list[dict[str, Any]]) -> dict[str, Any]:
                 placed = True
                 break
 
+            # Protect distinct Crossref Supplemental Information components (.s001 vs .s003) sharing parent DOI/title
+            is_distinct_si_components = (
+                doi1 and doi2 and doi1 != doi2
+                and (
+                    (rec.get("crossref_type") == "component" and rep.get("crossref_type") == "component")
+                    or (rec.get("parent_doi") and rec.get("parent_doi") == rep.get("parent_doi"))
+                    or (rec.get("parent_doi") == doi2 or rep.get("parent_doi") == doi1)
+                )
+            )
+            if is_distinct_si_components:
+                p_doi = rec.get("parent_doi") or rep.get("parent_doi") or doi2
+                grp = related_component_groups.setdefault(p_doi, [])
+                for item in (rep, rec):
+                    if item["id"] not in {x["id"] for x in grp}:
+                        grp.append({"id": item["id"], "doi": item.get("doi", ""), "type": item.get("crossref_type", item.get("entry_type")), "url": item.get("url", "")})
+                continue
+
             # Criterion 2: High title similarity (>=0.90) + author overlap (including preprint vs formal published or bilingual alt title)
             if t_match and (shared_authors or not (s1 and s2)):
-                # Distinguish preprint-vs-published vs cross-db export vs bilingual
                 if rec.get("is_preprint") != rep.get("is_preprint"):
                     crit = "preprint_vs_published_title_author_match"
                     rat = f"Same work detected across preprint and formal publication (title_sim={t_sim} via {t_via}, shared_authors={sorted(shared_authors)}); formal publication preferred."
@@ -432,15 +718,13 @@ def deduplicate_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         cluster_sorted = sorted(cluster, key=_record_completeness_score, reverse=True)
         winner = dict(cluster_sorted[0])
         merged_ids = [r["id"] for r in cluster_sorted[1:]]
-        # Backfill any missing fields (e.g., abstract, alt_title, pages) from losers without overwriting winner
         for loser in cluster_sorted[1:]:
-            for field in ("alt_title", "abstract", "pages", "volume", "issue", "url", "publisher"):
+            for field in ("alt_title", "abstract", "pages", "volume", "issue", "url", "publisher", "parent_doi"):
                 if not winner.get(field) and loser.get(field):
                     winner[field] = loser[field]
             if loser.get("is_preprint") and loser.get("doi") and loser["doi"] != winner.get("doi"):
                 winner["preprint_doi"] = loser["doi"]
         winner["merged_from"] = merged_ids
-        # Integrity flags (retraction / Expression of Concern)
         blob = f"{winner.get('title','')} {winner.get('note','')} {winner.get('venue','')}"
         if RE_RETRACT.search(blob):
             winner["integrity_flag"] = "retracted"
@@ -460,6 +744,7 @@ def deduplicate_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "merged_duplicates_count": len(records) - len(canonical_records),
         "merge_decisions": merge_decisions,
         "protected_homonymous_pairs": protected_homonymous_pairs,
+        "related_component_groups": related_component_groups,
         "alias_to_canonical": alias_to_canonical,
         "records": canonical_records,
     }
@@ -643,6 +928,12 @@ def audit_docx_live_fields(docx_path: Path) -> dict[str, Any]:
     return {
         "ok": True,
         "path": str(docx_path.name),
+        "verification_scope": "static_ooxml_field_inspection_only",
+        "word_zotero_dynamic_refresh_verified": False,
+        "scope_disclaimer": (
+            "静态 OOXML 域结构检查（未运行 Word/Zotero 动态 Refresh）：仅离线解析 word/document.xml 中的域指令与纯文本引文标记，"
+            "不能替代真实 Microsoft Word / Zotero Refresh 后的动态更新验证。"
+        ),
         "live_field_status": status,
         "live_citation_field_count": len(live_cite_fields),
         "live_bibliography_field_count": len(live_bib_fields),
@@ -704,6 +995,168 @@ def _split_body_and_refs(text: str) -> tuple[list[tuple[int, str]], list[tuple[i
     return body, refs
 
 
+# Outcome-aware polarity equivalence & condition-boundary helpers for Layer 2 verification
+RE_UNDESIRABLE_METRIC = re.compile(
+    r"\b(?:mortality|death|fatality|error|mae|rmse|loss|overpotential|risk|toxicity|inflammation|"
+    r"neuroinflammation|permeability|failure\s+rate|relapse|dissolution|degradation|agglomeration|"
+    r"complication|latency|cost|resistance|bias|leakage)\b|死亡率|误差|过电位|风险|毒性|炎症|渗透性|降解|失效",
+    re.I,
+)
+RE_DESIRABLE_METRIC = re.compile(
+    r"\b(?:survival|accuracy|auroc|auc|f1|efficiency|capacity|stability|retention|recovery|"
+    r"activity|selectivity|performance|integrity|durability|tolerance|butyrate|treg|efficacy)\b|"
+    r"生存率|准确率|效率|容量|稳定性|恢复|活性|选择性|完整性|疗效",
+    re.I,
+)
+RE_DIR_DECREASE = re.compile(
+    r"\b(?:reduc(?:es?|ed|ing)|decreas(?:es?|ed|ing)|lower(?:s|ed|ing)?|suppress(?:es?|ed|ing)|"
+    r"mitigat(?:es?|ed|ing)|alleviat(?:es?|ed|ing)|prevent(?:s|ed|ing)|inhibit(?:s|ed|ing)|"
+    r"attenuat(?:es?|ed|ing)|shorten(?:s|ed|ing)|minimis(?:es?|ed)|minimiz(?:es?|ed))\b|降低|减少|抑制|缓解|缩短",
+    re.I,
+)
+RE_DIR_INCREASE = re.compile(
+    r"\b(?:increas(?:es?|ed|ing)|improv(?:es?|ed|ing)|enhanc(?:es?|ed|ing)|elevat(?:es?|ed|ing)|"
+    r"higher|boost(?:s|ed|ing)|promot(?:es?|ed|ing)|outperform(?:s|ed|ing)|accelerat(?:es?|ed)|"
+    r"aggravat(?:es?|ed)|worsen(?:s|ed)|prolong(?:s|ed))\b|提高|增加|增强|改善|促进|优于|加重|恶化",
+    re.I,
+)
+RE_NULL_EFFECT = re.compile(
+    r"\b(?:no\s+significant\s+(?:effect|difference|improvement|benefit|change)|failed\s+to\s+(?:improve|reduce|increase|show)|"
+    r"did\s+not\s+(?:improve|reduce|increase|differ|change)|null\s+effect|no\s+benefit)\b|无显著|未能|未见明显",
+    re.I,
+)
+RE_SCOPE_CONDS = re.compile(
+    r"\b(?:acidic|alkaline|neutral|seawater|1\.?0?\s*m\s*koh|in\s+vitro|in\s+vivo|in\s+silico|"
+    r"in\s+mice|murine|rat\s+model|pediatric|elderly|high-?dose|low-?dose|chronic|acute|"
+    r"observational|retrospective|cross-?sectional|scaffold\s+splitting|random\s+splitting)\b|"
+    r"(?:酸性|碱性|海水|体外|体内|动物模型|小鼠|儿童|老年|高剂量|低剂量|回顾性|观察性)",
+    re.I,
+)
+SEMANTIC_SYNONYM_MAP = {
+    "mortality": "survival_axis", "death": "survival_axis", "survival": "survival_axis", "fatality": "survival_axis",
+    "error": "accuracy_axis", "rmse": "accuracy_axis", "mae": "accuracy_axis", "accuracy": "accuracy_axis",
+    "auroc": "accuracy_axis", "performance": "accuracy_axis", "overpotential": "activity_axis",
+    "activity": "activity_axis", "stability": "durability_axis", "durability": "durability_axis",
+    "dissolution": "durability_axis", "degradation": "durability_axis", "inflammation": "inflam_axis",
+    "neuroinflammation": "inflam_axis", "cytokines": "inflam_axis", "barrier": "barrier_axis",
+    "permeability": "barrier_axis", "microbiota": "gut_axis", "dysbiosis": "gut_axis", "scfas": "scfa_axis",
+    "butyrate": "scfa_axis", "mice": "murine_axis", "mouse": "murine_axis", "murine": "murine_axis",
+    "rats": "rodent_axis", "septic": "sepsis_axis", "sepsis": "sepsis_axis",
+    "therapy": "intervention_axis", "treatment": "intervention_axis", "supplementation": "intervention_axis",
+    "intervention": "intervention_axis", "catalyst": "catalyst_axis", "electrocatalyst": "catalyst_axis",
+    "electrocatalysts": "catalyst_axis", "catalysts": "catalyst_axis", "molecular": "molecule_axis",
+    "molecules": "molecule_axis", "molecule": "molecule_axis",
+}
+POLARITY_MODIFIER_STOP = {
+    "significantly", "markedly", "substantially", "reduced", "decreased", "lower", "lowered",
+    "improved", "increased", "higher", "enhanced", "targeted", "oral", "rates", "rate", "level", "levels",
+}
+
+
+def _normalize_outcome_polarity(text: str) -> str:
+    """Normalize direction + target valence so 'reduced mortality' == 'improved survival' ('beneficial')."""
+    if RE_NULL_EFFECT.search(text):
+        return "null_effect"
+    dec_undesir = bool(re.search(
+        rf"(?:{RE_DIR_DECREASE.pattern})\s+(?:[a-z0-9\-]+\s+){{0,3}}(?:{RE_UNDESIRABLE_METRIC.pattern})",
+        text, re.I,
+    ))
+    inc_desir = bool(re.search(
+        rf"(?:{RE_DIR_INCREASE.pattern})\s+(?:[a-z0-9\-]+\s+){{0,3}}(?:{RE_DESIRABLE_METRIC.pattern})",
+        text, re.I,
+    ))
+    inc_undesir = bool(re.search(
+        rf"(?:{RE_DIR_INCREASE.pattern})\s+(?:[a-z0-9\-]+\s+){{0,3}}(?:{RE_UNDESIRABLE_METRIC.pattern})",
+        text, re.I,
+    ))
+    dec_desir = bool(re.search(
+        rf"(?:{RE_DIR_DECREASE.pattern})\s+(?:[a-z0-9\-]+\s+){{0,3}}(?:{RE_DESIRABLE_METRIC.pattern})",
+        text, re.I,
+    ))
+    beneficial = dec_undesir or inc_desir or (bool(re.search(r"\b(?:improv(?:es?|ed)|outperform(?:s|ed)|benefit(?:s|ed)?|alleviat(?:es?|ed))\b|改善|优于|缓解", text, re.I)) and not inc_undesir)
+    adverse = inc_undesir or dec_desir or bool(re.search(r"\b(?:impair(?:s|ed)|worsen(?:s|ed)|aggravat(?:es?|ed)|adverse)\b|恶化|受损", text, re.I))
+    if beneficial and adverse:
+        return "mixed_conditional"
+    if beneficial:
+        return "beneficial"
+    if adverse:
+        return "adverse"
+    return "neutral"
+
+
+def _evaluate_claim_support_semantic(claim_text: str, source_text: str) -> tuple[str, str, dict[str, Any]]:
+    """Layer-2 semantic verifier combining concept overlap, polarity-equivalence normalization, and condition boundaries."""
+    ck = _tokenize_keywords(claim_text) - POLARITY_MODIFIER_STOP
+    sk = _tokenize_keywords(source_text) - POLARITY_MODIFIER_STOP
+    ck_sem = {SEMANTIC_SYNONYM_MAP.get(w, w) for w in ck}
+    sk_sem = {SEMANTIC_SYNONYM_MAP.get(w, w) for w in sk}
+    overlap = len(ck_sem & sk_sem)
+    ratio = overlap / max(1, len(ck_sem))
+
+    c_pol = _normalize_outcome_polarity(claim_text)
+    s_pol = _normalize_outcome_polarity(source_text)
+    c_conds = sorted({m.group(0).lower().strip() for m in RE_SCOPE_CONDS.finditer(claim_text)})
+    s_conds = sorted({m.group(0).lower().strip() for m in RE_SCOPE_CONDS.finditer(source_text)})
+
+    polarity_conflict = (
+        (c_pol == "beneficial" and s_pol in ("adverse", "null_effect"))
+        or (c_pol in ("adverse", "null_effect") and s_pol == "beneficial")
+    )
+    condition_mismatch = bool(
+        (set(c_conds) & {"acidic"} and set(s_conds) & {"alkaline"} and not (set(s_conds) & {"acidic"}))
+        or (set(c_conds) & {"alkaline"} and set(s_conds) & {"acidic"} and not (set(s_conds) & {"alkaline"}))
+    )
+    condition_omission = bool(s_conds and not c_conds and re.search(r"\b(?:universally|always|all\s+conditions|broadly)\b|普遍|始终", claim_text, re.I))
+
+    diag = {
+        "semantic_overlap": overlap,
+        "claim_terms": len(ck_sem),
+        "overlap_ratio": round(ratio, 3),
+        "claim_polarity": c_pol,
+        "source_polarity": s_pol,
+        "polarity_aligned": not polarity_conflict,
+        "claim_conditions": c_conds,
+        "source_conditions": s_conds,
+    }
+
+    if overlap < 1 or (overlap < 2 and ratio < 0.15):
+        return (
+            "mismatch_or_unsupported",
+            f"Source exists in library, but supplied text shows minimal semantic overlap ({overlap}/{len(ck_sem)}) with citing claim.",
+            diag,
+        )
+    if polarity_conflict:
+        return (
+            "contradicted_by_supplied_excerpt",
+            f"Polarity conflict: citing claim asserts `{c_pol}` while supplied source excerpt indicates `{s_pol}` (overlap={overlap}/{len(ck_sem)}).",
+            diag,
+        )
+    if condition_mismatch:
+        return (
+            "partially_supported",
+            f"Condition mismatch: claim specifies {c_conds} whereas supplied source is bounded by {s_conds}.",
+            diag,
+        )
+    if condition_omission:
+        return (
+            "partially_supported",
+            f"Scope overgeneralization: source is bounded by {s_conds}, omitted in broad citing claim.",
+            diag,
+        )
+    if ratio >= 0.30 and overlap >= 2:
+        pol_note = f", polarity aligned (`{c_pol}` <-> `{s_pol}`)" if c_pol != "neutral" or s_pol != "neutral" else ""
+        return (
+            "supported_by_supplied_excerpt",
+            f"Semantic & topical alignment verified against supplied source text ({overlap}/{len(ck_sem)} normalized concepts{pol_note}).",
+            diag,
+        )
+    return (
+        "partially_supported",
+        f"Partial semantic alignment ({overlap}/{len(ck_sem)} normalized concepts); manual verification recommended for exact scope.",
+        diag,
+    )
+
+
 def _tokenize_keywords(text: str) -> set[str]:
     en = set(re.findall(r"[a-z]{4,}", text.lower()))
     zh = set(re.findall(r"[\u4e00-\u9fff]{2,}", text))
@@ -732,10 +1185,13 @@ def sync_and_verify_manuscript(
     duplicate_bib_numbers = sorted(k for k, v in bib_by_num.items() if len(v) > 1)
 
     # Load optional structured source excerpts for Layer 2 (claim support verification)
+    # Strictly require substantive abstract (>=40 chars) or explicit --excerpts-dir text;
+    # metadata-only title/note strings MUST NOT masquerade as full-text/abstract excerpts.
     excerpt_corpus_by_key: dict[str, str] = {}
     for rec in dedup_records:
-        blob = " ".join(filter(None, [rec.get("title", ""), rec.get("abstract", ""), rec.get("note", "")])).strip()
-        if blob:
+        abs_txt = str(rec.get("abstract") or "").strip()
+        if len(abs_txt) >= 40:
+            blob = " ".join(filter(None, [rec.get("title", ""), abs_txt])).strip()
             excerpt_corpus_by_key[rec["id"].lower()] = blob
             if rec.get("doi"):
                 excerpt_corpus_by_key[rec["doi"].lower()] = blob
@@ -863,6 +1319,7 @@ def sync_and_verify_manuscript(
         if not source_text_for_support and f"ref_{old_n}" in excerpt_corpus_by_key:
             source_text_for_support = excerpt_corpus_by_key[f"ref_{old_n}"]
 
+        sem_diag: dict[str, Any] = {}
         if meta_status == "missing_from_library":
             support_status = "unverifiable_source_missing"
             support_note = "Citation has no bibliography record; cannot verify claim support."
@@ -870,19 +1327,7 @@ def sync_and_verify_manuscript(
             support_status = "unverified_fulltext_not_supplied"
             support_note = "Metadata record exists, but source abstract/full-text excerpt was not supplied locally; existence does NOT imply claim support."
         else:
-            ck = _tokenize_keywords(ctx_text)
-            sk = _tokenize_keywords(source_text_for_support)
-            overlap = len(ck & sk)
-            ratio = overlap / max(1, len(ck))
-            if ratio >= 0.35 and overlap >= 2:
-                support_status = "supported_by_supplied_excerpt"
-                support_note = f"Lexical/topical alignment verified against supplied source text ({overlap}/{len(ck)} claim terms matched)."
-            elif ratio >= 0.15 and overlap >= 1:
-                support_status = "partially_supported"
-                support_note = f"Partial alignment ({overlap}/{len(ck)} terms); manual check required for scope/strength match."
-            else:
-                support_status = "mismatch_or_unsupported"
-                support_note = f"Source exists in library, but supplied source text shows minimal topical overlap ({overlap}/{len(ck)}) with citing claim."
+            support_status, support_note, sem_diag = _evaluate_claim_support_semantic(ctx_text, source_text_for_support)
 
         two_layer_checks.append({
             "original_marker": f"[{old_n}]",
@@ -893,10 +1338,11 @@ def sync_and_verify_manuscript(
             "doi": (matched_rec.get("doi") if matched_rec else doi_found) or None,
             "metadata_existence_status": meta_status,
             "claim_support_status": support_status,
+            "semantic_diagnostics": sem_diag,
             "support_note": support_note,
         })
 
-    # Author-year matching against deduplicated library
+    # Author-year matching & Layer 2 semantic verification against deduplicated library + excerpts
     author_year_checks: list[dict[str, Any]] = []
     for occ in author_year_occurrences:
         m = re.match(r"([A-Z][A-Za-z\-']+).*?((?:19|20)\d{2})", occ["marker"])
@@ -906,24 +1352,121 @@ def sync_and_verify_manuscript(
             r for r in dedup_records
             if r.get("year") == yr and any(a["family"].lower() == fam for a in r.get("authors", []))
         ]
+        ay_meta = "verified_in_library" if len(matches) == 1 else ("ambiguous_multiple_matches" if len(matches) > 1 else "missing_from_library")
+        ay_support = "unverifiable_source_missing"
+        ay_note = "No matching record in bibliography."
+        ay_diag: dict[str, Any] = {}
+        if matches:
+            src_txt = ""
+            for mr in matches:
+                src_txt = excerpt_corpus_by_key.get(mr["id"].lower(), "") or excerpt_corpus_by_key.get(mr.get("doi", "").lower(), "")
+                if src_txt and len(src_txt) >= 40:
+                    break
+            if not src_txt:
+                src_txt = excerpt_corpus_by_key.get(f"{fam}{yr}", "") or excerpt_corpus_by_key.get(f"{fam}_{yr}", "")
+            if src_txt and len(src_txt) >= 40:
+                ay_support, ay_note, ay_diag = _evaluate_claim_support_semantic(occ["sentence"], src_txt)
+            else:
+                ay_support = "unverified_fulltext_not_supplied"
+                ay_note = "Metadata exists in library, but full text/abstract excerpt was not supplied locally."
         author_year_checks.append({
             "marker": occ["marker"],
             "line": occ["line"],
             "in_caption": occ["is_caption"],
             "matched_record_ids": [r["id"] for r in matches],
-            "metadata_existence_status": "verified_in_library" if len(matches) == 1 else ("ambiguous_multiple_matches" if len(matches) > 1 else "missing_from_library"),
-            "claim_support_status": "unverified_fulltext_not_supplied" if matches else "unverifiable_source_missing",
+            "metadata_existence_status": ay_meta,
+            "claim_support_status": ay_support,
+            "semantic_diagnostics": ay_diag,
+            "support_note": ay_note,
         })
+
+    # Strictly separate CITED bibliography records (ordered 1..K matching in-text markers)
+    # from UNCITED library records (e.g., Crossref SI components or unused library entries).
+    rec_by_id = {r["id"]: r for r in dedup_records}
+    cited_bibliography_records: list[dict[str, Any]] = []
+    cited_record_ids_set: set[str] = set()
+
+    if cited_nums_order:
+        for chk in two_layer_checks:
+            m_id = chk.get("matched_record_id")
+            if m_id and m_id in rec_by_id:
+                rec_copy = dict(rec_by_id[m_id])
+                rec_copy["cited_index"] = int(chk["renumbered_marker"].strip("[]"))
+                cited_bibliography_records.append(rec_copy)
+                cited_record_ids_set.add(m_id)
+            else:
+                old_num = int(chk["original_marker"].strip("[]"))
+                raw_entry = bib_by_num.get(old_num, [""])[0]
+                cited_bibliography_records.append({
+                    "id": f"in_text_ref_{chk['renumbered_marker'].strip('[]')}",
+                    "cited_index": int(chk["renumbered_marker"].strip("[]")),
+                    "source_format": "manuscript_fallback",
+                    "source_file": "manuscript",
+                    "entry_type": "article",
+                    "authors": [],
+                    "year": "",
+                    "title": raw_entry or f"[DANGLING_CITATION: old_id={old_num}]",
+                    "alt_title": "",
+                    "venue": "",
+                    "volume": "",
+                    "issue": "",
+                    "pages": "",
+                    "publisher": "",
+                    "doi": chk.get("doi") or "",
+                    "url": "",
+                    "note": "fallback_from_manuscript_reference_entry",
+                    "abstract": "",
+                    "is_preprint": False,
+                })
+    elif author_year_checks:
+        for ay in author_year_checks:
+            for mid in ay.get("matched_record_ids", []):
+                if mid in rec_by_id and mid not in cited_record_ids_set:
+                    cited_bibliography_records.append(dict(rec_by_id[mid]))
+                    cited_record_ids_set.add(mid)
+    else:
+        # Library-only mode (no in-text citations): exclude Crossref SI components from main bibliography
+        for r in dedup_records:
+            if r.get("crossref_type") == "component":
+                continue
+            cited_bibliography_records.append(dict(r))
+            cited_record_ids_set.add(r["id"])
+
+    uncited_library_records: list[dict[str, Any]] = []
+    for r in dedup_records:
+        if r["id"] not in cited_record_ids_set:
+            excl_reason = (
+                "uncited_crossref_supplemental_component"
+                if r.get("crossref_type") == "component"
+                else "present_in_library_but_not_cited_in_manuscript_body"
+            )
+            uncited_library_records.append({
+                "id": r["id"],
+                "doi": r.get("doi", ""),
+                "crossref_type": r.get("crossref_type", r.get("entry_type", "")),
+                "parent_doi": r.get("parent_doi", ""),
+                "title": r.get("title", ""),
+                "source_file": r.get("source_file", ""),
+                "exclusion_reason": excl_reason,
+            })
+
+    cited_bib_alignment_ok = (not cited_nums_order) or (len(cited_bibliography_records) == len(cited_nums_order))
 
     closure_ok = (
         len(dangling_numbers) == 0
         and len(duplicate_bib_numbers) == 0
+        and cited_bib_alignment_ok
         and not collapse_audit["marker_to_source_collapse_detected"]
         and not any(c["metadata_existence_status"] == "retracted_or_eoc" for c in two_layer_checks)
     )
 
     return {
         "closure_ok": closure_ok,
+        "cited_bib_alignment_ok": cited_bib_alignment_ok,
+        "cited_records_count": len(cited_bibliography_records),
+        "uncited_library_records_count": len(uncited_library_records),
+        "cited_bibliography_records": cited_bibliography_records,
+        "uncited_library_records": uncited_library_records,
         "cited_numbers_original_order": cited_nums_order,
         "renumbering_map": {str(k): v for k, v in old_to_new.items()},
         "non_sequential_order_detected": non_sequential_order,
@@ -942,7 +1485,9 @@ def render_audit_markdown(report: dict[str, Any]) -> str:
     if report.get("docx_live_field_audit"):
         d = report["docx_live_field_audit"]
         lines.extend([
-            "## 1. OOXML Live Citation Field Audit (Word / Google Docs Round-Trip)",
+            "## 1. 静态 OOXML 域结构检查（未运行 Word/Zotero 动态 Refresh）",
+            f"- **Verification Scope**: `{d.get('verification_scope', 'static_ooxml_field_inspection_only')}` | **Dynamic Word/Zotero Refresh Verified**: `{d.get('word_zotero_dynamic_refresh_verified', False)}`",
+            f"- **Disclaimer**: {d.get('scope_disclaimer', '静态 OOXML 域结构检查（未运行 Word/Zotero 动态 Refresh）。')}",
             f"- **Document**: `{d.get('path')}`",
             f"- **Live Field Status**: `{d.get('live_field_status')}`",
             f"- **Live Citation Fields**: `{d.get('live_citation_field_count', 0)}` | **Live Bibliography Fields**: `{d.get('live_bibliography_field_count', 0)}`",
@@ -987,10 +1532,12 @@ def render_audit_markdown(report: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Offline citation lifecycle manager (OOXML, sync, dedup, GB/T 7714, APA 7, 2-layer verify).")
-    parser.add_argument("--manuscript", default="", help="Manuscript file (.md/.txt/.tex/.docx).")
+    parser = argparse.ArgumentParser(description="Offline citation lifecycle manager (OOXML, Crossref/JATS/MD/Bib/RIS/CSL dedup, sync, GB/T 7714, APA 7, 2-layer verify).")
+    parser.add_argument("--manuscript", default="", help="Manuscript file (.md/.txt/.tex/.docx/.xml/.pdf).")
     parser.add_argument("--docx", default="", help="Optional .docx file specifically for OOXML live-field inspection.")
-    parser.add_argument("--bib", action="append", default=[], help="Bibliography file(s) (.bib/.ris/.json); repeatable.")
+    parser.add_argument("--input-dir", default="", help="Optional /input directory containing case.json and task.md for dynamic output_contract & citation_style binding.")
+    parser.add_argument("--bib", action="append", default=[], help="Bibliography file(s) or directory (.bib/.ris/.json/Crossref/.xml/.md); repeatable.")
+    parser.add_argument("--include-manuscript-refs", action="store_true", help="Also parse the manuscript's own References section into the deduplication library.")
     parser.add_argument("--excerpts-dir", default="", help="Optional directory containing source paper excerpts for Layer 2 verification.")
     parser.add_argument("--source-mapping", default="", help="Optional JSON of structured citation source objects (checks NotebookLM #2416 collapse).")
     parser.add_argument("--out-dir", required=True, help="Output directory for audit reports, formatted refs, and cleaned BibTeX.")
@@ -1000,6 +1547,10 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    in_dir = Path(args.input_dir) if args.input_dir else (Path(args.manuscript).parent if args.manuscript else None)
+    case_contract = load_case_contract(in_dir if in_dir and in_dir.is_dir() else None)
+    effective_case_id = case_contract.get("case_id") or args.case_id
 
     docx_audit: dict[str, Any] | None = None
     manuscript_text = ""
@@ -1017,12 +1568,15 @@ def main(argv: list[str] | None = None) -> int:
         doc = read_document_text(mp)
         if doc["ok"]:
             manuscript_text = doc["text"]
-            source_files.append({"file": mp.name, "role": "manuscript"})
+            source_files.append({"file": mp.name, "role": "manuscript", "extractor": doc.get("meta", {}).get("extractor", doc.get("format"))})
 
-    bib_paths = [Path(b) for b in args.bib if Path(b).is_file()]
+    bib_paths = [Path(b) for b in args.bib if Path(b).exists()]
     for bp in bib_paths:
         source_files.append({"file": bp.name, "role": "bibliography_source"})
     raw_records = load_library_files(bib_paths)
+    if args.include_manuscript_refs and manuscript_text:
+        ms_name = Path(args.manuscript).name if args.manuscript else "manuscript"
+        raw_records.extend(parse_markdown_references(manuscript_text, ms_name))
     dedup = deduplicate_records(raw_records)
 
     sync_rep = sync_and_verify_manuscript(
@@ -1032,28 +1586,86 @@ def main(argv: list[str] | None = None) -> int:
         source_mapping_json=Path(args.source_mapping) if args.source_mapping else None,
     )
 
-    gbt_list = [format_gbt7714(r, idx) for idx, r in enumerate(dedup["records"], start=1)]
-    apa_list = [format_apa7(r) for r in dedup["records"]]
+    cited_records = sync_rep["cited_bibliography_records"]
+    uncited_records = sync_rep["uncited_library_records"]
 
-    # Write formatted artifacts
+    # Format ONLY cited bibliography records (strictly 1-to-1 with in-text markers; uncited library/component records excluded)
+    gbt_list = [format_gbt7714(r, r.get("cited_index", idx)) for idx, r in enumerate(cited_records, start=1)]
+    apa_list = [format_apa7(r) for r in cited_records]
+
     clean_bib_path = out_dir / "cleaned_references.bib"
     clean_bib_path.write_text(export_clean_bibtex(dedup["records"]), encoding="utf-8")
 
     gbt_path = out_dir / "formatted_references_gbt7714.md"
-    gbt_path.write_text("# References (GB/T 7714-2015)\n\n" + "\n".join(x["formatted"] for x in gbt_list) + "\n", encoding="utf-8")
+    gbt_path.write_text("# References (GB/T 7714-2015 — Cited Bibliography Only)\n\n" + "\n".join(x["formatted"] for x in gbt_list) + "\n", encoding="utf-8")
 
     apa_path = out_dir / "formatted_references_apa7.md"
-    apa_path.write_text("# References (APA 7th Edition)\n\n" + "\n".join(x["formatted"] for x in apa_list) + "\n", encoding="utf-8")
+    apa_path.write_text("# References (APA 7th Edition — Cited Bibliography Only)\n\n" + "\n".join(x["formatted"] for x in apa_list) + "\n", encoding="utf-8")
 
     renum_path = out_dir / "renumbered_manuscript.md"
     if manuscript_text:
         renum_path.write_text(sync_rep["renumbered_manuscript_text"], encoding="utf-8")
 
+    # Unified gaps aggregation covering BOTH numeric two_layer_verification AND author_year_verification
+    gaps: list[dict[str, Any]] = []
+    if docx_audit and docx_audit.get("live_field_status") in ("flattened_plain_text", "mixed"):
+        gaps.append({"code": "DOCX_FLATTENED_LIVE_FIELDS", "status": docx_audit["live_field_status"]})
+    if sync_rep["dangling_citations"]:
+        gaps.append({"code": "DANGLING_CITATIONS", "items": sync_rep["dangling_citations"]})
+    if sync_rep["duplicate_bib_numbers"]:
+        gaps.append({"code": "DUPLICATE_BIB_NUMBERS", "items": sync_rep["duplicate_bib_numbers"]})
+    if not sync_rep["cited_bib_alignment_ok"]:
+        gaps.append({"code": "CITED_BIBLIOGRAPHY_NUMBERING_MISMATCH", "cited_count": len(cited_records), "in_text_count": len(sync_rep["cited_numbers_original_order"])})
+    if sync_rep["notebooklm_collapse_audit"]["marker_to_source_collapse_detected"]:
+        gaps.append({"code": "MULTI_MARKER_SINGLE_SOURCE_COLLAPSE", "detail": sync_rep["notebooklm_collapse_audit"].get("detail", "")})
+
+    # Merge numeric + author-year Layer 1 & Layer 2 findings into unified gap lists
+    ay_missing = [c["marker"] for c in sync_rep["author_year_verification"] if c["metadata_existence_status"] == "missing_from_library"]
+    if ay_missing:
+        gaps.append({"code": "AUTHOR_YEAR_MISSING_FROM_LIBRARY", "markers": ay_missing})
+    ay_ambiguous = [c["marker"] for c in sync_rep["author_year_verification"] if c["metadata_existence_status"] == "ambiguous_multiple_matches"]
+    if ay_ambiguous:
+        gaps.append({"code": "AUTHOR_YEAR_AMBIGUOUS_MATCHES", "markers": ay_ambiguous})
+
+    unverified_l2 = [c["original_marker"] for c in sync_rep["two_layer_verification"] if c["claim_support_status"] == "unverified_fulltext_not_supplied"] + [
+        c["marker"] for c in sync_rep["author_year_verification"] if c["claim_support_status"] == "unverified_fulltext_not_supplied"
+    ]
+    if unverified_l2:
+        gaps.append({"code": "FULLTEXT_NOT_SUPPLIED_FOR_CLAIM_SUPPORT", "markers": unverified_l2})
+    contradicted_l2 = [c["original_marker"] for c in sync_rep["two_layer_verification"] if c["claim_support_status"] == "contradicted_by_supplied_excerpt"] + [
+        c["marker"] for c in sync_rep["author_year_verification"] if c["claim_support_status"] == "contradicted_by_supplied_excerpt"
+    ]
+    if contradicted_l2:
+        gaps.append({"code": "CLAIM_POLARITY_CONTRADICTED_BY_SOURCE", "markers": contradicted_l2})
+    mismatch_l2 = [c["original_marker"] for c in sync_rep["two_layer_verification"] if c["claim_support_status"] == "mismatch_or_unsupported"] + [
+        c["marker"] for c in sync_rep["author_year_verification"] if c["claim_support_status"] == "mismatch_or_unsupported"
+    ]
+    if mismatch_l2:
+        gaps.append({"code": "CLAIM_MISMATCH_OR_UNSUPPORTED", "markers": mismatch_l2})
+
+    gap_summary = {
+        "total_gap_categories": len(gaps),
+        "numeric_checked_count": len(sync_rep["two_layer_verification"]),
+        "author_year_checked_count": len(sync_rep["author_year_verification"]),
+        "unverified_fulltext_count": len(unverified_l2),
+        "contradicted_count": len(contradicted_l2),
+        "mismatch_count": len(mismatch_l2),
+        "author_year_missing_count": len(ay_missing),
+        "author_year_ambiguous_count": len(ay_ambiguous),
+        "uncited_library_records_excluded_count": len(uncited_records),
+    }
+
     full_report = {
         "passed": sync_rep["closure_ok"] and (not docx_audit or docx_audit.get("live_field_status") not in ("flattened_plain_text", "mixed")),
+        "case_constraints_applied": case_contract.get("task_constraints", {}),
         "docx_live_field_audit": {k: v for k, v in docx_audit.items() if k != "full_text"} if docx_audit else None,
         "deduplication": dedup,
-        "sync_and_verification": {k: v for k, v in sync_rep.items() if k != "renumbered_manuscript_text"},
+        "sync_and_verification": {k: v for k, v in sync_rep.items() if k not in ("renumbered_manuscript_text", "cited_bibliography_records")},
+        "cited_bibliography_count": len(cited_records),
+        "uncited_library_records_count": len(uncited_records),
+        "uncited_library_records": uncited_records,
+        "gap_summary": gap_summary,
+        "gaps": gaps,
         "formatted_gbt7714": gbt_list,
         "formatted_apa7": apa_list,
     }
@@ -1064,21 +1676,8 @@ def main(argv: list[str] | None = None) -> int:
     audit_md_path = out_dir / "citation_audit_report.md"
     audit_md_path.write_text(render_audit_markdown(full_report), encoding="utf-8")
 
-    gaps: list[dict[str, Any]] = []
-    if docx_audit and docx_audit.get("live_field_status") in ("flattened_plain_text", "mixed"):
-        gaps.append({"code": "DOCX_FLATTENED_LIVE_FIELDS", "status": docx_audit["live_field_status"]})
-    if sync_rep["dangling_citations"]:
-        gaps.append({"code": "DANGLING_CITATIONS", "items": sync_rep["dangling_citations"]})
-    if sync_rep["duplicate_bib_numbers"]:
-        gaps.append({"code": "DUPLICATE_BIB_NUMBERS", "items": sync_rep["duplicate_bib_numbers"]})
-    if sync_rep["notebooklm_collapse_audit"]["marker_to_source_collapse_detected"]:
-        gaps.append({"code": "MULTI_MARKER_SINGLE_SOURCE_COLLAPSE", "detail": sync_rep["notebooklm_collapse_audit"].get("detail", "")})
-    unverified_l2 = [c["original_marker"] for c in sync_rep["two_layer_verification"] if c["claim_support_status"] == "unverified_fulltext_not_supplied"]
-    if unverified_l2:
-        gaps.append({"code": "FULLTEXT_NOT_SUPPLIED_FOR_CLAIM_SUPPORT", "markers": unverified_l2})
-
     res = build_writing_result(
-        case_id=args.case_id,
+        case_id=effective_case_id,
         task_id="academic-citation-management",
         deliverable={
             "audit_report_md": audit_md_path.name,
@@ -1087,14 +1686,20 @@ def main(argv: list[str] | None = None) -> int:
             "gbt7714_md": gbt_path.name,
             "apa7_md": apa_path.name,
             "renumbered_manuscript": renum_path.name if manuscript_text else None,
+            "cited_bibliography_count": len(cited_records),
+            "uncited_library_records_count": len(uncited_records),
         },
         preserved_facts={
             "deduplicated_records_count": dedup["deduplicated_count"],
+            "cited_records_count": len(cited_records),
+            "uncited_library_records_count": len(uncited_records),
             "protected_homonymous_pairs_count": len(dedup["protected_homonymous_pairs"]),
+            "related_component_groups_count": len(dedup.get("related_component_groups", {})),
             "live_field_status": docx_audit.get("live_field_status") if docx_audit else "not_applicable_non_docx",
+            "docx_verification_scope": "static_ooxml_field_inspection_only" if docx_audit else "not_applicable",
             "renumbering_map": sync_rep["renumbering_map"],
         },
-        evidence_map=sync_rep["two_layer_verification"],
+        evidence_map=sync_rep["two_layer_verification"] + sync_rep["author_year_verification"],
         change_log=[
             {"action": "deduplicate", "criterion": m["criterion"], "items": m["kept_or_candidate"], "rationale": m["rationale"]}
             for m in dedup["merge_decisions"]
@@ -1106,16 +1711,18 @@ def main(argv: list[str] | None = None) -> int:
         sources=source_files,
         gaps=gaps,
         limitations=[
-            "Offline environment cannot query CrossRef/PubMed live APIs; metadata existence is verified strictly against supplied libraries and full-text claim support is reported separately.",
+            "Offline environment cannot query live CrossRef/PubMed APIs; metadata existence is verified strictly against supplied libraries (.bib/.ris/CSL-JSON/Crossref JSON/JATS XML/Markdown) and Layer-2 semantic polarity/condition claim support is reported independently.",
         ],
         verification={
             "closure_ok": sync_rep["closure_ok"],
             "live_field_status": docx_audit.get("live_field_status") if docx_audit else None,
             "merged_duplicates": dedup["merged_duplicates_count"],
             "protected_homonymous_pairs": len(dedup["protected_homonymous_pairs"]),
+            "related_component_groups": len(dedup.get("related_component_groups", {})),
             "collapse_detected": sync_rep["notebooklm_collapse_audit"]["marker_to_source_collapse_detected"],
         },
         status="ok" if full_report["passed"] and not gaps else "partial_with_gaps",
+        case_contract=case_contract,
     )
     (out_dir / "result.json").write_text(json.dumps(res, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -1126,6 +1733,7 @@ def main(argv: list[str] | None = None) -> int:
         "deduplicated_records": dedup["deduplicated_count"],
         "merged_duplicates": dedup["merged_duplicates_count"],
         "protected_homonymous_pairs": len(dedup["protected_homonymous_pairs"]),
+        "related_component_groups": len(dedup.get("related_component_groups", {})),
         "dangling_citations": len(sync_rep["dangling_citations"]),
         "orphan_bib_entries": len(sync_rep["orphan_bib_entries"]),
         "collapse_detected": sync_rep["notebooklm_collapse_audit"]["marker_to_source_collapse_detected"],

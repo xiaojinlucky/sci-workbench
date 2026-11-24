@@ -31,7 +31,9 @@ import writing_io_and_invariants as wio  # noqa: E402
 
 MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 TEX_HEADING_RE = re.compile(r"^\\((?:sub)*section)\*?\{(.+?)\}")
-NUM_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+([A-Z\u4e00-\u9fff][^\n]{1,80})$")
+NUM_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+([A-Z\u4e00-\u9fff][^\n]{1,80})$")
+ZH_HEADING_RE = re.compile(r"^([一二三四五六七八九十]+)[、.．]\s*([^\n]{2,40})$")
+UPPER_HEADING_RE = re.compile(r"^([A-Z][A-Z0-9\s,&/\-]{2,45})$")
 SENT_SPLIT_RE = re.compile(
     r"(?<!\bal\.)(?<!\bFig\.)(?<!\bFigs\.)(?<!\bEq\.)(?<!\bTab\.)(?<!\bTbl\.)(?<!\bvs\.)(?<!\be\.g\.)(?<!\bi\.e\.)(?<!\bNo\.)(?<!\bDr\.)(?<!\bRef\.)(?<!\bSec\.)(?<=[。！？.!?])\s+",
     re.I,
@@ -77,29 +79,95 @@ SYNTHESIS_CONNECTOR_RE = re.compile(
     re.I,
 )
 
-# Same-metric extraction for contradiction detection
+# Cross-disciplinary same-metric extraction for condition-aware contradiction clustering
 METRIC_VALUE_RE = re.compile(
-    r"\b(accuracy|AUC|AUROC|F1(?:-score)?|precision|recall|sensitivity|specificity|RMSE|MAE|R2|R\^2|"
-    r"survival\s+rate|response\s+rate|efficiency|selectivity|yield|conversion|mortality|reduction|improvement|error\s+rate|"
-    r"准确率|精度|召回率|灵敏度|特异度|效率|选择性|转化率|产率|存活率|有效率|降幅|提升幅度|相关性|相关系数)\b"
-    r"[^.;。\n]{0,45}?"
+    r"\b(accuracy|AUC|AUROC|AUPRC|F1(?:-score)?|BLEU(?:-\d)?|ROUGE(?:-[L12])?|METEOR|Dice(?:\s+score)?|IoU|mAP|"
+    r"C-index|concordance\s+index|RMSE|MSE|MAE|R2|R\^2|R²|IC50|EC50|overpotential|Tafel\s+slope|"
+    r"Faradaic\s+efficiency|current\s+density|hazard\s+ratio|odds\s+ratio|perplexity|"
+    r"precision|recall|sensitivity|specificity|survival\s+rate|response\s+rate|efficiency|selectivity|"
+    r"yield|conversion|mortality|reduction|improvement|error\s+rate|"
+    r"准确率|精度|召回率|灵敏度|特异度|效率|选择性|转化率|产率|存活率|有效率|降幅|提升幅度|相关性|相关系数|过电位|法拉第效率|均方根误差|决定系数)\b"
+    r"[^.;。\n]{0,48}?"
     r"(?:(increas(?:ed|es|ing)|improv(?:ed|es|ing)|higher|outperform(?:ed|s)?|positive|elevat(?:ed|es)|gained|提升|提高|增加|正相关|优于|上升)"
     r"|(decreas(?:ed|es|ing)|reduc(?:ed|es|ing)|lower|declin(?:ed|es)|degrad(?:ed|es)|negative|drop(?:ped|s)?|failed\s+to\s+improve|no\s+significant|下降|降低|减少|负相关|劣于|未显著|无明显变化))?"
-    r"[^.;。\n]{0,25}?([+-]?\d+(?:\.\d+)?)\s*(%|pp|percentage\s+points?|fold|ms|s|K|°C)?",
+    r"[^.;。\n]{0,28}?([+-]?\d+(?:\.\d+)?)\s*(%|pp|percentage\s+points?|mV/dec|mV|V|mA/cm2|mA\s*cm-2|mA|MPa|kPa|µM|uM|nM|mg/kg|fold|ms|s|K|°C)?",
     re.I,
 )
 POS_DIR_RE = re.compile(r"\b(?:increas|improv|higher|outperform|positive|elevat|gain|better|superior|enhanc)\w*\b|提升|提高|增加|正相关|优于|上升|显著高于", re.I)
 NEG_DIR_RE = re.compile(r"\b(?:decreas|reduc|lower|declin|degrad|negative|drop|worse|inferior|failed\s+to|no\s+significant|null|ineffective)\w*\b|下降|降低|减少|负相关|劣于|未显著|无明显|未能改善", re.I)
+CONCESSION_RE = re.compile(
+    r"\b(?:whereas|however|although|though|while|in\s+contrast|unlike|depending\s+on|under\s+different|when\s+tested\s+at|"
+    r"compared\s+with|at\s+higher|at\s+lower|on\s+the\s+other\s+hand|nevertheless|yet)\b"
+    r"|相比之下|然而|尽管|虽然|取决于|在不同条件下|而在.{1,15}(?:条件|组|温度|剂量)下",
+    re.I,
+)
+EXPLANATION_RE = re.compile(
+    r"\b(?:attributed\s+to|explained\s+by|because\s+of|due\s+to\s+(?:differences?|variations?|changes?|different|lower|higher)|"
+    r"stemming\s+from|accounted\s+for\s+by|driven\s+by\s+(?:differences?|different)|reflects?\s+(?:differences?|variations?)|"
+    r"reconciled\s+by|can\s+be\s+explained|this\s+(?:discrepancy|difference|divergence)\s+(?:arises?|results?|stems?|is\s+due))\b"
+    r"|归因于|原因在于|这是因为|差异(?:主要)?源于|可由.{1,18}解释|受.{1,15}差异影响|解释了(?:该|上述)?差异",
+    re.I,
+)
 
-# Research Question & Contribution extractors
+# Condition context extractors (temperature, current density/potential, dose, time window, cohort/group, dataset, p-value)
+COND_TEMP_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*(?:°C|℃|\bK\b)", re.I)
+COND_CURR_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:mA(?:/cm2|\s*cm-2)?|A/cm2|mV|V\s+vs\.?\s*(?:RHE|SHE|Ag/AgCl))", re.I)
+COND_DOSE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:mg/kg|mg/mL|µg/mL|ug/mL|ng/mL|mM|µM|uM|nM|wt%|mol%)", re.I)
+COND_TIME_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hours?|min|days?|weeks?|months?)\b", re.I)
+COND_PH_RE = re.compile(r"\bpH\s*[:=]?\s*(\d+(?:\.\d+)?)", re.I)
+COND_GROUP_RE = re.compile(
+    r"\b(high-dose|low-dose|placebo|control\s+group|treatment\s+group|intervention|subgroup|"
+    r"pediatric|adult|elderly|male|female|in\s+vitro|in\s+vivo|ex\s+vivo|mouse|murine|human|"
+    r"training\s+set|validation\s+set|test\s+set|external\s+cohort|internal\s+cohort|baseline|ablation|"
+    r"alkaline|acidic|neutral|ambient|elevated\s+temperature|low\s+temperature|high\s+temperature|"
+    r"acute|chronic|early-stage|late-stage|zero-shot|few-shot|fine-tuned|noisy|clean)\b"
+    r"|(高剂量组?|低剂量组?|对照组|干预组|实验组|儿童组?|成人组?|老年组?|训练集|验证集|测试集|外部队列|内部队列|体外|体内|碱性|酸性|中性|低温|高温|急性|慢性)",
+    re.I,
+)
+COND_DATASET_RE = re.compile(
+    r"\b(?:on|in|for|across|using)\s+(?:the\s+)?([A-Z][A-Za-z0-9\-_]{2,24}(?:\s+(?:dataset|benchmark|cohort|corpus|split))?)\b"
+)
+COND_SIG_RE = re.compile(r"(?:\bp\s*[<=>≤≥]\s*0?\.\d+(?:e-?\d+)?|\b95%\s*CI\b|\bn\s*=\s*\d+)", re.I)
+
+# Research Question & Contribution extractors (explicit commitment vs background/literature comparison)
 RQ_PATTERNS = [
-    re.compile(r"(?:research\s+question|we\s+(?:investigate|ask|examine|address|test)\s+whether|whether\s+[^.?!]{15,180}\?|how\s+[^.?!]{15,180}\?)", re.I),
-    re.compile(r"(?:研究问题|本文(?:旨在|试图|探究|验证|回答)|核心问题(?:在于|是))[^。！？\n]{8,160}[。！？?]?"),
+    re.compile(r"(?:research\s+question|we\s+(?:investigate|ask|examine|address|test|aim\s+to|aimed\s+to|seek\s+to|explore)\s+(?:whether|how|why|the)|whether\s+[^.?!]{15,180}\?|how\s+[^.?!]{15,180}\?)", re.I),
+    re.compile(r"(?:this\s+(?:study|paper|work|review|meta-analysis)\s+(?:aims?\s+to|aimed\s+to|investigates?|examines?|evaluates?|addresses?)|our\s+(?:primary\s+)?(?:objective|goal|aim)\s+is\s+to)\s+[^.?!]{12,200}", re.I),
+    re.compile(r"(?:研究问题|本文(?:旨在|试图|探究|验证|回答|探讨)|本研究(?:旨在|聚焦|考察)|核心问题(?:在于|是))[^。！？\n]{8,180}[。！？?]?"),
 ]
 CONTRIB_PATTERNS = [
-    re.compile(r"(?:our\s+(?:main\s+|key\s+)?contributions?\s+(?:are|include)|we\s+(?:propose|introduce|present|develop|demonstrate|design|construct|validate)\s+[^.?!\n]{15,200})", re.I),
-    re.compile(r"(?:本文(?:的)?(?:主要)?贡献|我们(?:提出|构建|设计|开发|验证)了)[^。！？\n]{10,180}"),
+    re.compile(r"(?:our\s+(?:main\s+|key\s+|primary\s+)?contributions?\s+(?:are|include|can\s+be\s+summarized)|in\s+this\s+(?:work|study|paper),?\s+we\s+(?:propose|introduce|present|develop|demonstrate|design|construct|validate|establish|evaluate)|here,?\s+we\s+(?:propose|present|develop|demonstrate|show|report)\s+[^.?!\n]{12,200}|we\s+(?:propose|introduce|present|develop|demonstrate|design|construct|validate)\s+[^.?!\n]{15,200})", re.I),
+    re.compile(r"(?:本文(?:的)?(?:主要)?(?:贡献|创新点)(?:如下|包括|在于|有)?|我们(?:提出|构建|设计|开发|验证|建立)了)[^。！？\n]{8,200}"),
 ]
+EXPLICIT_COMMITMENT_RE = re.compile(
+    r"(?:\b(?:this\s+(?:study|paper|work|review|meta-analysis)\s+(?:aims?\s+to|aimed\s+to|investigates?|examines?|evaluates?|addresses?|proposes?|introduces?|presents?|develops?|assesses?|explores?)|"
+    r"our\s+(?:main\s+|key\s+|primary\s+)?(?:contributions?|objective|goal|aim)\b|"
+    r"in\s+this\s+(?:work|study|paper),?\s+we\b|"
+    r"here,?\s+we\s+(?:propose|present|develop|demonstrate|evaluate|investigate|assess|examine)\b|"
+    r"we\s+(?:propose|introduce|develop|construct|design|validate|establish|aim(?:ed)?\s+to|investigate\s+whether|conducted\s+this\s+(?:study|meta-analysis)))\b"
+    r"|本文(?:旨在|提出|构建|设计|开发|的?(?:主要)?(?:贡献|创新点))|本研究(?:旨在|聚焦|提出|验证|评估)|我们(?:提出|构建|设计|开发|验证|建立)了)",
+    re.I,
+)
+BACKGROUND_LIT_COMPARISON_RE = re.compile(
+    r"(?:\b(?:previous\s+(?:stud(?:y|ies)|work|research|reports?)|prior\s+(?:stud(?:y|ies)|work|research|literature)|"
+    r"existing\s+(?:methods?|approaches?|literature|biomarkers?|markers?)|currently,?|conventionally,?|traditional(?:ly)?|"
+    r"in\s+the\s+literature|has\s+been\s+(?:widely\s+)?(?:used|reported|shown|studied)|have\s+been\s+(?:widely\s+)?(?:used|reported|shown)|"
+    r"are\s+(?:commonly|widely|typically)\s+used|et\s+al\.|compared\s+(?:with|to)\s+(?:conventional|traditional|standard|existing))\b"
+    r"|\[\d+(?:\s*[-–,]\s*\d+)*\]|既往研究|先前研究|已有研究|现有方法|传统(?:方法|指标)?|目前(?:常用|主要))",
+    re.I,
+)
+CONTRIB_INTRO_CUE_RE = re.compile(
+    r"(?:contributions?\s+(?:are|include|as\s+follows)|summarized\s+as\s+follows|key\s+findings\s+(?:are|include)|"
+    r"本文(?:的)?(?:主要)?(?:贡献|创新点)(?:如下|包括|主要体现在)|具体如下)",
+    re.I,
+)
+LIST_ITEM_RE = re.compile(
+    r"^\s*(?:[-*•]\s+|\d+[.)、]\s*|\(\d+\)\s*|（\d+）\s*|\([ivxIVX]+\)\s*|[一二三四五六七八九十]+[、.．]\s*|第[一二三四五六七八九十]+[，,、：:]\s*)(.+)$"
+)
+INLINE_ENUM_SPLIT_RE = re.compile(
+    r"(?:(?:^|\s)(?:\(\d+\)|（\d+）|\([ivx]+\)|first(?:ly)?,|second(?:ly)?,|third(?:ly)?,|finally,|首先[，,]?|其次[，,]?|最后[，,]?|第一[，,、]?|第二[，,、]?|第三[，,、]?))",
+    re.I,
+)
 
 # Inference leap & evidence anchors
 LEAP_MARKER_RE = re.compile(
@@ -160,13 +228,45 @@ TRIAL_ERROR_LOG_RE = re.compile(
 
 def _classify_role(title: str) -> str:
     low = title.lower().strip()
+    if any(k in low for k in ("supplemental", "supplementary", "acknowledgment", "declaration", "footnote", "associated data")):
+        return "other"
     for role, kws in CANONICAL_ROLES:
         if any(k in low for k in kws):
             return role
     return "other"
 
 
-def _tokenize(text: str) -> list[str]:
+SYNONYM_MAP = {
+    "propose": "introduce", "proposed": "introduce", "present": "introduce", "presented": "introduce",
+    "develop": "build", "developed": "build", "construct": "build", "constructed": "build", "design": "build", "designed": "build",
+    "evaluate": "assess", "evaluated": "assess", "validate": "assess", "validated": "assess", "benchmark": "assess", "test": "assess", "tested": "assess",
+    "improve": "enhance", "improved": "enhance", "boost": "enhance", "outperform": "enhance", "outperformed": "enhance",
+    "predict": "estimate", "predicted": "estimate", "forecast": "estimate",
+    "accuracy": "performance", "auroc": "auc", "f1-score": "f1",
+    "catalyst": "catalytic", "electrocatalyst": "catalytic", "overpotential": "catalytic",
+    "microbiome": "microbiota", "gut": "intestinal",
+    "提出": "构建", "设计": "构建", "开发": "构建", "验证": "评估", "测试": "评估", "提高": "提升", "改善": "提升",
+}
+
+
+def _canonicalize_token(tok: str) -> str:
+    if tok in SYNONYM_MAP:
+        return SYNONYM_MAP[tok]
+    if tok.isascii() and len(tok) > 5:
+        for suf in ("ation", "ition", "ment", "ness", "ity", "ing", "ed", "es"):
+            if tok.endswith(suf) and len(tok) - len(suf) >= 4:
+                stem = tok[: -len(suf)]
+                return SYNONYM_MAP.get(stem, stem)
+        if tok.endswith("ies") and len(tok) > 5:
+            stem = tok[:-3] + "y"
+            return SYNONYM_MAP.get(stem, stem)
+        if tok.endswith("s") and not tok.endswith("ss") and len(tok) > 4:
+            stem = tok[:-1]
+            return SYNONYM_MAP.get(stem, stem)
+    return tok
+
+
+def _tokenize(text: str, *, canonical: bool = False) -> list[str]:
     en = re.findall(r"[a-z][a-z0-9\-]{2,}", text.lower())
     zh_chunks = re.findall(r"[\u4e00-\u9fff]{2,}", text)
     zh_bigrams: list[str] = []
@@ -183,7 +283,10 @@ def _tokenize(text: str) -> list[str]:
         "using", "used", "study", "paper", "results", "method", "methods", "data",
         "我们", "本文", "研究", "结果", "方法", "表明", "显示", "进行", "通过", "以及",
     }
-    return [t for t in en + zh_bigrams if t not in stop]
+    raw = [t for t in en + zh_bigrams if t not in stop]
+    if canonical:
+        return [_canonicalize_token(t) for t in raw]
+    return raw
 
 
 def _word_ngrams(tokens: list[str], n: int = 3) -> set[tuple[str, ...]]:
@@ -193,7 +296,13 @@ def _word_ngrams(tokens: list[str], n: int = 3) -> set[tuple[str, ...]]:
 
 
 def _parse_manuscript(text: str) -> list[dict[str, Any]]:
-    """Parse manuscript into structured sections and indexed paragraphs with line ranges."""
+    """Parse manuscript into a parent-child section tree with indexed paragraphs and line ranges.
+
+    Handles both true nested heading levels (`## Methods` -> `### 2.1 Study Design`) AND
+    flattened PMC/PDF-converted canonical containers (`## Methods` with 0 direct lines followed by
+    `## Search strategy`, `## Statistical analysis` before `## Results`). Parent sections aggregate
+    descendant paragraphs and character counts so container parents are never falsely flagged as empty.
+    """
     lines = text.splitlines()
     sections: list[dict[str, Any]] = []
     cur_title = "(Preamble)"
@@ -209,6 +318,7 @@ def _parse_manuscript(text: str) -> list[dict[str, Any]]:
             return
         sec_counter += 1
         sec_id = f"S{sec_counter}"
+        raw_role = _classify_role(cur_title)
         paras: list[dict[str, Any]] = []
         p_buf: list[tuple[int, str]] = []
         p_idx = 0
@@ -223,11 +333,12 @@ def _parse_manuscript(text: str) -> list[dict[str, Any]]:
                 "paragraph_id": f"{sec_id}.P{p_idx}",
                 "section_id": sec_id,
                 "section": cur_title,
-                "role": _classify_role(cur_title),
+                "role": raw_role,
                 "start_line": p_buf[0][0],
                 "end_line": p_buf[-1][0],
                 "line_range": f"L{p_buf[0][0]}-L{p_buf[-1][0]}",
                 "text": joined,
+                "raw_lines": [s for _, s in p_buf],
                 "char_len": len(joined),
             })
 
@@ -240,15 +351,24 @@ def _parse_manuscript(text: str) -> list[dict[str, Any]]:
                 p_buf.append((lno, st))
         flush_para()
 
+        direct_chars = sum(p["char_len"] for p in paras)
         sections.append({
             "section_id": sec_id,
             "title": cur_title,
             "level": cur_level,
-            "role": _classify_role(cur_title),
+            "raw_role": raw_role,
+            "role": raw_role,
             "start_line": cur_start,
             "end_line": max(cur_start, end_line),
+            "parent_section_id": None,
+            "children_section_ids": [],
+            "descendant_section_ids": [],
+            "is_container_parent": False,
+            "direct_paragraph_count": len(paras),
+            "direct_char_len": direct_chars,
             "paragraph_count": len(paras),
-            "char_len": sum(p["char_len"] for p in paras),
+            "char_len": direct_chars,
+            "has_content": len(paras) > 0,
             "paragraphs": paras,
         })
 
@@ -257,6 +377,8 @@ def _parse_manuscript(text: str) -> list[dict[str, Any]]:
         m_md = MD_HEADING_RE.match(st)
         m_tex = TEX_HEADING_RE.match(st)
         m_num = NUM_HEADING_RE.match(st) if not m_md and not m_tex and len(st) < 75 and not st.endswith((".", "。")) else None
+        m_zh = ZH_HEADING_RE.match(st) if not m_md and not m_tex and not m_num and len(st) < 42 and not st.endswith(("。", ".", "；", ";")) else None
+        m_up = UPPER_HEADING_RE.match(st) if not m_md and not m_tex and not m_num and not m_zh and len(st) < 45 else None
         if m_md:
             flush(lineno - 1)
             cur_level = len(m_md.group(1))
@@ -270,15 +392,92 @@ def _parse_manuscript(text: str) -> list[dict[str, Any]]:
             cur_title = m_tex.group(2).strip()
             cur_start = lineno
             buf = []
-        elif m_num and _classify_role(m_num.group(2)) != "other":
+        elif m_num and (_classify_role(m_num.group(2)) != "other" or "." in m_num.group(1)):
             flush(lineno - 1)
             cur_level = 1 + m_num.group(1).count(".")
             cur_title = f"{m_num.group(1)} {m_num.group(2).strip()}"
             cur_start = lineno
             buf = []
+        elif m_zh and _classify_role(m_zh.group(2)) != "other":
+            flush(lineno - 1)
+            cur_level = 1
+            cur_title = f"{m_zh.group(1)}、{m_zh.group(2).strip()}"
+            cur_start = lineno
+            buf = []
+        elif m_up and _classify_role(m_up.group(1)) != "other":
+            flush(lineno - 1)
+            cur_level = 1
+            cur_title = m_up.group(1).strip().title()
+            cur_start = lineno
+            buf = []
         else:
             buf.append((lineno, raw))
     flush(len(lines))
+
+    # Build parent-child section tree
+    by_id = {s["section_id"]: s for s in sections}
+    stack: list[dict[str, Any]] = []
+    # Treat single top-level H1 manuscript title (level 1 with 0 direct paragraphs) as document root, not a section container
+    for sec in sections:
+        lvl = sec["level"]
+        if lvl <= 0:
+            continue
+        if lvl == 1 and sec["raw_role"] == "other" and sec["direct_paragraph_count"] == 0 and sec["section_id"] == "S1":
+            continue
+
+        # Pop ancestors that cannot be parents of `sec`
+        while stack:
+            top = stack[-1]
+            # Standard hierarchical nesting (e.g., ## Methods -> ### 2.1 Study Design)
+            if top["level"] < lvl:
+                break
+            # Flattened PMC/PDF canonical container: empty canonical parent (`## Methods`, `## Results`)
+            # followed by same-level subsections (`## Search strategy`, `## Characteristics of the results...`)
+            if (
+                top["level"] == lvl
+                and top["direct_paragraph_count"] == 0
+                and top["raw_role"] != "other"
+                and (
+                    sec["raw_role"] == "other"
+                    or (sec["raw_role"] == top["raw_role"] and len(sec["title"]) > len(top["title"]) + 4)
+                )
+            ):
+                break
+            stack.pop()
+
+        if stack:
+            parent = stack[-1]
+            sec["parent_section_id"] = parent["section_id"]
+            parent["children_section_ids"].append(sec["section_id"])
+            parent["is_container_parent"] = True
+            # Propagate canonical role from parent to non-canonical subsections
+            if sec["role"] == "other" and parent["role"] != "other":
+                sec["role"] = parent["role"]
+                for p in sec["paragraphs"]:
+                    p["role"] = sec["role"]
+
+        # Only push onto stack if `sec` could itself be a parent
+        stack.append(sec)
+
+    # Bottom-up aggregation of descendant paragraphs, char_len, and end_line
+    for sec in reversed(sections):
+        desc_ids: list[str] = []
+        agg_paras = sec["direct_paragraph_count"]
+        agg_chars = sec["direct_char_len"]
+        agg_end = sec["end_line"]
+        for cid in sec["children_section_ids"]:
+            child = by_id[cid]
+            desc_ids.append(cid)
+            desc_ids.extend(child["descendant_section_ids"])
+            agg_paras += child["paragraph_count"]
+            agg_chars += child["char_len"]
+            agg_end = max(agg_end, child["end_line"])
+        sec["descendant_section_ids"] = desc_ids
+        sec["paragraph_count"] = agg_paras
+        sec["char_len"] = agg_chars
+        sec["end_line"] = agg_end
+        sec["has_content"] = agg_paras > 0
+
     return sections
 
 
@@ -325,13 +524,79 @@ def _extract_sentences(text: str) -> list[str]:
     return parts or ([text.strip()] if text.strip() else [])
 
 
-def _detect_same_metric_conflicts(all_paras: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Find paragraphs reporting conflicting directions or widely divergent values for the same metric."""
+def _extract_condition_context(sent: str) -> dict[str, Any]:
+    """Extract experimental condition dimensions & statistical significance markers around a metric value."""
+    dims: dict[str, set[str]] = {}
+    for key, pat in (
+        ("temperature", COND_TEMP_RE),
+        ("electrochem", COND_CURR_RE),
+        ("dose", COND_DOSE_RE),
+        ("time_window", COND_TIME_RE),
+        ("ph", COND_PH_RE),
+    ):
+        hits = {m.group(0).strip().lower() for m in pat.finditer(sent)}
+        if hits:
+            dims[key] = hits
+    grp_hits = {(m.group(1) or m.group(2)).strip().lower() for m in COND_GROUP_RE.finditer(sent)}
+    if grp_hits:
+        dims["group"] = grp_hits
+    ds_stop = {"the", "this", "our", "all", "table", "fig", "figure", "section", "results", "methods"}
+    ds_hits = {
+        m.group(1).strip().lower()
+        for m in COND_DATASET_RE.finditer(sent)
+        if m.group(1).strip().lower() not in ds_stop
+    }
+    if ds_hits:
+        dims["dataset"] = ds_hits
+    sigs = [m.group(0).strip() for m in COND_SIG_RE.finditer(sent)]
+    has_concession = bool(CONCESSION_RE.search(sent))
+    flat_labels = sorted(f"{k}={v}" for k, vs in dims.items() for v in sorted(vs))
+    return {
+        "dimensions": {k: sorted(v) for k, v in dims.items()},
+        "labels": flat_labels,
+        "significance": sigs[:4],
+        "has_concession": has_concession,
+    }
+
+
+def _compare_conditions(ca: dict[str, Any], cb: dict[str, Any]) -> str:
+    """Classify condition comparability: 'distinct_conditions' | 'comparable_conditions' | 'unspecified_context'."""
+    da, db = ca.get("dimensions", {}), cb.get("dimensions", {})
+    if not da or not db:
+        return "unspecified_context"
+    shared_dims = set(da) & set(db)
+    if not shared_dims:
+        return "unspecified_context"
+    for dim in shared_dims:
+        sa, sb = set(da[dim]), set(db[dim])
+        if sa and sb and sa.isdisjoint(sb):
+            return "distinct_conditions"
+    return "comparable_conditions"
+
+
+def _detect_same_metric_conflicts(all_paras: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Condition-aware, deduplicated 4-class detector for cross-paragraph same-metric comparisons.
+
+    Explicitly classifies every divergent same-metric pair into 4 exact categories:
+      1) distinct_conditions_justified  — distinct experimental/cohort conditions on a shared dimension (not a contradiction)
+      2) explained_in_text              — divergence explicitly reconciled/explained in manuscript prose (not an unresolved contradiction)
+      3) unexplained_true_contradiction — comparable conditions without explanation (blocking DEFER_TO_AUTHOR)
+      4) missing_comparison_dimension   — unspecified/non-overlapping condition context without explanation (major DEFER_TO_AUTHOR)
+
+    Returns (unresolved_clusters, full_comparison_audit).
+    """
     metric_mentions: dict[str, list[dict[str, Any]]] = {}
+    seen_mention_keys: set[tuple[str, str, str, str]] = set()
     for p in all_paras:
         if p["role"] in ("references",):
             continue
         for sent in _extract_sentences(p["text"]):
+            cond = _extract_condition_context(sent)
+            has_reconcile = (
+                bool(SYNTHESIS_CONNECTOR_RE.search(p["text"]))
+                or bool(EXPLANATION_RE.search(p["text"]))
+                or cond["has_concession"]
+            )
             for m in METRIC_VALUE_RE.finditer(sent):
                 metric_raw = m.group(1).lower().strip()
                 metric_norm = re.sub(r"\s+", " ", metric_raw)
@@ -348,11 +613,14 @@ def _detect_same_metric_conflicts(all_paras: list[dict[str, Any]]) -> list[dict[
                     direction = "positive"
                 elif m.group(3):
                     direction = "negative"
+                mkey = (metric_norm, p["paragraph_id"], val_str, direction)
+                if mkey in seen_mention_keys:
+                    continue
+                seen_mention_keys.add(mkey)
                 try:
                     val_num = float(val_str)
                 except ValueError:
                     val_num = None
-                has_reconcile = bool(SYNTHESIS_CONNECTOR_RE.search(p["text"]))
                 metric_mentions.setdefault(metric_norm, []).append({
                     "metric": metric_norm,
                     "value": val_str,
@@ -363,21 +631,26 @@ def _detect_same_metric_conflicts(all_paras: list[dict[str, Any]]) -> list[dict[
                     "paragraph_id": p["paragraph_id"],
                     "line_range": p["line_range"],
                     "sentence": sent[:180],
+                    "conditions": cond,
                     "has_reconcile": has_reconcile,
                 })
 
-    conflicts: list[dict[str, Any]] = []
-    seen_pairs: set[tuple[str, str, str]] = set()
-    for metric, items in metric_mentions.items():
+    clusters: list[dict[str, Any]] = []
+    comparison_audit: list[dict[str, Any]] = []
+    for metric, items in sorted(metric_mentions.items()):
         if len(items) < 2:
             continue
+        comparable_entries: dict[str, dict[str, Any]] = {}
+        unspecified_entries: dict[str, dict[str, Any]] = {}
+        distinct_skipped = 0
+        explained_skipped = 0
+        conflict_types: set[str] = set()
+        any_reconciled = False
+
         for i in range(len(items)):
             for j in range(i + 1, len(items)):
                 a, b = items[i], items[j]
                 if a["paragraph_id"] == b["paragraph_id"]:
-                    continue
-                pair_key = (metric, a["paragraph_id"], b["paragraph_id"])
-                if pair_key in seen_pairs:
                     continue
                 opposite_dir = (
                     a["direction"] in ("positive", "negative")
@@ -391,16 +664,161 @@ def _detect_same_metric_conflicts(all_paras: list[dict[str, Any]]) -> list[dict[
                     and b["val_num"] is not None
                     and abs(a["val_num"] - b["val_num"]) >= 15.0
                 )
-                if opposite_dir or large_pct_gap:
-                    seen_pairs.add(pair_key)
-                    conflicts.append({
+                if not (opposite_dir or large_pct_gap):
+                    continue
+                comp = _compare_conditions(a["conditions"], b["conditions"])
+                ctype = "opposite_direction" if opposite_dir else "large_magnitude_divergence"
+                if comp == "distinct_conditions":
+                    distinct_skipped += 1
+                    comparison_audit.append({
                         "metric": metric,
-                        "conflict_type": "opposite_direction" if opposite_dir else "large_magnitude_divergence",
-                        "reconciled_in_text": a["has_reconcile"] or b["has_reconcile"],
-                        "entry_a": {k: a[k] for k in ("section", "paragraph_id", "line_range", "value", "unit", "direction", "sentence")},
-                        "entry_b": {k: b[k] for k in ("section", "paragraph_id", "line_range", "value", "unit", "direction", "sentence")},
+                        "conflict_type": ctype,
+                        "classification": "distinct_conditions_justified",
+                        "condition_comparability": comp,
+                        "reconciled_in_text": bool(a["has_reconcile"] or b["has_reconcile"]),
+                        "para_a": a["paragraph_id"],
+                        "para_b": b["paragraph_id"],
+                        "conditions_a": a["conditions"]["labels"],
+                        "conditions_b": b["conditions"]["labels"],
                     })
-    return conflicts
+                    continue
+                if a["has_reconcile"] or b["has_reconcile"]:
+                    any_reconciled = True
+                    explained_skipped += 1
+                    comparison_audit.append({
+                        "metric": metric,
+                        "conflict_type": ctype,
+                        "classification": "explained_in_text",
+                        "condition_comparability": comp,
+                        "reconciled_in_text": True,
+                        "para_a": a["paragraph_id"],
+                        "para_b": b["paragraph_id"],
+                        "conditions_a": a["conditions"]["labels"],
+                        "conditions_b": b["conditions"]["labels"],
+                    })
+                    continue
+                conflict_types.add(ctype)
+                cls_label = (
+                    "unexplained_true_contradiction"
+                    if comp == "comparable_conditions"
+                    else "missing_comparison_dimension"
+                )
+                comparison_audit.append({
+                    "metric": metric,
+                    "conflict_type": ctype,
+                    "classification": cls_label,
+                    "condition_comparability": comp,
+                    "reconciled_in_text": False,
+                    "para_a": a["paragraph_id"],
+                    "para_b": b["paragraph_id"],
+                    "conditions_a": a["conditions"]["labels"],
+                    "conditions_b": b["conditions"]["labels"],
+                })
+                bucket = comparable_entries if comp == "comparable_conditions" else unspecified_entries
+                for entry in (a, b):
+                    ek = f"{entry['paragraph_id']}:{entry['value']}{entry['unit']}"
+                    bucket[ek] = {
+                        "section": entry["section"],
+                        "paragraph_id": entry["paragraph_id"],
+                        "line_range": entry["line_range"],
+                        "value": entry["value"],
+                        "unit": entry["unit"],
+                        "direction": entry["direction"],
+                        "condition_labels": entry["conditions"]["labels"],
+                        "significance": entry["conditions"]["significance"],
+                        "sentence": entry["sentence"],
+                    }
+
+        chosen_entries = list(comparable_entries.values()) or list(unspecified_entries.values())
+        if len(chosen_entries) < 2:
+            continue
+        chosen_entries.sort(key=lambda e: (e["paragraph_id"], e["value"]))
+        comp_status = "comparable_conditions" if comparable_entries else "unspecified_context"
+        classification = (
+            "unexplained_true_contradiction"
+            if comp_status == "comparable_conditions"
+            else "missing_comparison_dimension"
+        )
+        clusters.append({
+            "cluster_id": f"MCLUSTER-{len(clusters) + 1:02d}",
+            "metric": metric,
+            "conflict_type": "opposite_direction" if "opposite_direction" in conflict_types else "large_magnitude_divergence",
+            "classification": classification,
+            "condition_comparability": comp_status,
+            "distinct_condition_pairs_filtered": distinct_skipped,
+            "explained_in_text_pairs_filtered": explained_skipped,
+            "reconciled_in_text": any_reconciled,
+            "entries": chosen_entries[:6],
+            "entry_a": chosen_entries[0],
+            "entry_b": chosen_entries[-1],
+        })
+    return clusters, comparison_audit
+
+
+def _classify_commitment_type(txt: str, kind: str) -> str:
+    """Distinguish explicit study commitments from background/prior-literature comparison statements."""
+    if kind in ("itemized_contribution", "inline_enumerated_contribution"):
+        return "explicit_study_commitment"
+    has_explicit = bool(EXPLICIT_COMMITMENT_RE.search(txt))
+    has_bg = bool(BACKGROUND_LIT_COMPARISON_RE.search(txt))
+    if has_bg and not has_explicit:
+        return "background_or_literature_comparison"
+    if has_explicit:
+        return "explicit_study_commitment"
+    if has_bg:
+        return "background_or_literature_comparison"
+    return "background_or_literature_comparison"
+
+
+def _extract_rq_and_contributions(intro_secs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Extract explicit study commitments vs background/literature comparison statements."""
+    rq_claims: list[dict[str, Any]] = []
+    contrib_claims: list[dict[str, Any]] = []
+    seen_texts: set[str] = set()
+
+    def _add(target: list[dict[str, Any]], p: dict[str, Any], txt: str, kind: str) -> None:
+        clean = re.sub(r"\s+", " ", txt).strip()
+        if len(clean) < 12 or clean.lower() in seen_texts:
+            return
+        seen_texts.add(clean.lower())
+        target.append({
+            "paragraph_id": p["paragraph_id"],
+            "section": p["section"],
+            "line_range": p["line_range"],
+            "kind": kind,
+            "commitment_type": _classify_commitment_type(clean, kind),
+            "text": clean,
+        })
+
+    for sec in intro_secs:
+        in_contrib_list = False
+        for p in sec["paragraphs"]:
+            raw_lines = p.get("raw_lines") or [p["text"]]
+            if CONTRIB_INTRO_CUE_RE.search(p["text"]):
+                in_contrib_list = True
+            # 1) Line-level Markdown / Chinese list items following a contribution cue
+            matched_list_lines = False
+            for rl in raw_lines:
+                ml = LIST_ITEM_RE.match(rl)
+                if ml and (in_contrib_list or CONTRIB_INTRO_CUE_RE.search(p["text"])):
+                    _add(contrib_claims, p, ml.group(1), "itemized_contribution")
+                    matched_list_lines = True
+            if matched_list_lines:
+                continue
+            # 2) Inline enumerated contributions like "(1) ... (2) ..." or "首先...其次..."
+            if CONTRIB_INTRO_CUE_RE.search(p["text"]):
+                parts = [seg.strip(" ;；:：") for seg in INLINE_ENUM_SPLIT_RE.split(p["text"]) if seg and len(seg.strip()) >= 15]
+                if len(parts) >= 2:
+                    for seg in parts[1:]:
+                        _add(contrib_claims, p, seg, "inline_enumerated_contribution")
+                    continue
+            # 3) Sentence-level explicit / implicit RQ & contribution extraction
+            for sent in _extract_sentences(p["text"]):
+                if any(pat.search(sent) for pat in RQ_PATTERNS):
+                    _add(rq_claims, p, sent, "research_question")
+                if any(pat.search(sent) for pat in CONTRIB_PATTERNS):
+                    _add(contrib_claims, p, sent, "contribution_statement")
+    return rq_claims, contrib_claims
 
 
 def diagnose_manuscript(
@@ -408,12 +826,14 @@ def diagnose_manuscript(
     *,
     case_id: str = "case-01",
     task_id: str = "paper-structure-optimization",
+    case_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run full six-dimension source-grounded structural diagnosis."""
     read_res = wio.read_document_text(manuscript_path)
     if not read_res["ok"]:
         raise RuntimeError(f"Failed to read manuscript {manuscript_path}: {read_res.get('meta')}")
     raw_text = read_res["text"]
+    read_meta = read_res.get("meta") or {}
     lines = raw_text.splitlines()
     sections = _parse_manuscript(raw_text)
     all_paras = [p for s in sections for p in s["paragraphs"]]
@@ -425,6 +845,12 @@ def diagnose_manuscript(
     cards: list[dict[str, Any]] = []
     evidence_map: list[dict[str, Any]] = []
     gaps: list[dict[str, Any]] = []
+    if read_meta.get("degraded_mode"):
+        gaps.append({
+            "code": "PDF_STDLIB_FALLBACK_EXTRACTION",
+            "severity": "minor",
+            "detail": f"Document extracted via fallback method ({read_meta.get('method')}); verify line wraps and equation symbols.",
+        })
 
     def add_card(**kwargs: Any) -> dict[str, Any]:
         card = _make_card(card_num=len(cards) + 1, **kwargs)
@@ -448,54 +874,94 @@ def diagnose_manuscript(
     result_secs = by_role.get("results", [])
     concl_secs = by_role.get("conclusion", []) + by_role.get("discussion", [])
 
-    rq_claims: list[dict[str, Any]] = []
-    contrib_claims: list[dict[str, Any]] = []
-    for sec in intro_secs:
-        for p in sec["paragraphs"]:
-            for sent in _extract_sentences(p["text"]):
-                if any(pat.search(sent) for pat in RQ_PATTERNS):
-                    rq_claims.append({"paragraph_id": p["paragraph_id"], "section": p["section"], "line_range": p["line_range"], "text": sent})
-                if any(pat.search(sent) for pat in CONTRIB_PATTERNS):
-                    contrib_claims.append({"paragraph_id": p["paragraph_id"], "section": p["section"], "line_range": p["line_range"], "text": sent})
+    rq_claims, contrib_claims = _extract_rq_and_contributions(intro_secs)
 
-    downstream_text = " ".join(p["text"] for s in (method_secs + result_secs + concl_secs) for p in s["paragraphs"])
-    downstream_toks = set(_tokenize(downstream_text))
+    methods_toks = set(_tokenize(" ".join(p["text"] for s in method_secs for p in s["paragraphs"]), canonical=True))
+    results_toks = set(_tokenize(" ".join(p["text"] for s in result_secs for p in s["paragraphs"]), canonical=True))
+    concl_toks_all = set(_tokenize(" ".join(p["text"] for s in concl_secs for p in s["paragraphs"]), canonical=True))
+    heading_toks = set(_tokenize(" ".join(s["title"] for s in (method_secs + result_secs + concl_secs)), canonical=True))
+    downstream_toks = methods_toks | results_toks | concl_toks_all
     rq_alignment_trace: list[dict[str, Any]] = []
 
     for claim in contrib_claims + rq_claims:
-        ctoks = set(_tokenize(claim["text"]))
+        ctoks = set(_tokenize(claim["text"], canonical=True))
         if len(ctoks) < 3 or not downstream_toks:
             continue
-        overlap_ratio = len(ctoks & downstream_toks) / max(1, len(ctoks))
-        fulfilled = overlap_ratio >= 0.25
+        overall_cov = len(ctoks & downstream_toks) / max(1, len(ctoks))
+        m_cov = len(ctoks & methods_toks) / max(1, len(ctoks)) if methods_toks else 0.0
+        r_cov = len(ctoks & results_toks) / max(1, len(ctoks)) if results_toks else 0.0
+        c_cov = len(ctoks & concl_toks_all) / max(1, len(ctoks)) if concl_toks_all else 0.0
+        heading_hit = len(ctoks & heading_toks) >= 1
+
+        if overall_cov >= 0.32 or (heading_hit and r_cov >= 0.15):
+            tier = "fulfilled"
+        elif overall_cov < 0.14 and not heading_hit:
+            tier = "blocking"
+        elif overall_cov < 0.25 and (m_cov < 0.10 or r_cov < 0.10):
+            tier = "major"
+        elif concl_toks_all and c_cov < 0.08:
+            tier = "minor"
+        else:
+            tier = "fulfilled"
+
+        commitment_type = claim.get("commitment_type", "explicit_study_commitment")
         rq_alignment_trace.append({
             "paragraph_id": claim["paragraph_id"],
             "section": claim["section"],
             "line_range": claim["line_range"],
+            "kind": claim["kind"],
+            "commitment_type": commitment_type,
             "claim_excerpt": claim["text"][:150],
-            "downstream_token_coverage": round(overlap_ratio, 3),
-            "fulfilled": fulfilled,
+            "downstream_concept_coverage": round(overall_cov, 3),
+            "methods_coverage": round(m_cov, 3),
+            "results_coverage": round(r_cov, 3),
+            "conclusion_coverage": round(c_cov, 3),
+            "section_heading_hit": heading_hit,
+            "confidence_tier": tier,
+            "fulfilled": tier == "fulfilled",
         })
-        if not fulfilled:
-            add_card(
-                dimension="D1_rq_contribution_alignment",
-                severity="blocking",
-                action_verb="NARROW_CLAIM",
-                section=claim["section"],
-                paragraph_id=claim["paragraph_id"],
-                line_range=claim["line_range"],
-                quote_excerpt=claim["text"],
-                diagnosis=(
-                    f"Contribution or research question promised in {claim['section']} has low downstream fulfillment "
-                    f"(token coverage={overlap_ratio:.2f} across Methods/Results/Conclusion)."
-                ),
-                evidence_basis="Cross-chapter lexical/concept closure check between Introduction promises and Methods/Results/Conclusion body.",
-                executable_instruction=(
-                    "Either add the missing empirical verification in Methods/Results or narrow this contribution/RQ "
-                    "statement in Introduction so every promised deliverable maps 1:1 to presented evidence."
-                ),
-                author_decision_required=True,
-            )
+        if tier != "fulfilled":
+            if commitment_type == "background_or_literature_comparison":
+                add_card(
+                    dimension="D1_rq_contribution_alignment",
+                    severity="minor",
+                    action_verb="DEFER_TO_AUTHOR",
+                    section=claim["section"],
+                    paragraph_id=claim["paragraph_id"],
+                    line_range=claim["line_range"],
+                    quote_excerpt=claim["text"],
+                    diagnosis=(
+                        f"Background/literature comparison statement in {claim['section']} has low downstream empirical overlap "
+                        f"(coverage={overall_cov:.2f}); treated as contextual framing rather than an unfulfilled study commitment."
+                    ),
+                    evidence_basis="Commitment classifier distinguished background/literature comparison from explicit study promise.",
+                    executable_instruction=(
+                        "DEFER_TO_AUTHOR: confirm this sentence is contextual background only (no new experiment needed), "
+                        "or explicitly declare it as a study objective if empirical evaluation was intended."
+                    ),
+                    author_decision_required=True,
+                )
+            else:
+                verb = "NARROW_CLAIM" if tier == "blocking" else "ADD_BRIDGE"
+                add_card(
+                    dimension="D1_rq_contribution_alignment",
+                    severity=tier,
+                    action_verb=verb,
+                    section=claim["section"],
+                    paragraph_id=claim["paragraph_id"],
+                    line_range=claim["line_range"],
+                    quote_excerpt=claim["text"],
+                    diagnosis=(
+                        f"Explicit study commitment ({claim['kind']}) in {claim['section']} shows {tier}-level downstream closure gap "
+                        f"(normalized concept coverage={overall_cov:.2f}: Methods={m_cov:.2f}, Results={r_cov:.2f}, Conclusion={c_cov:.2f})."
+                    ),
+                    evidence_basis="Canonicalized cross-chapter explicit RQ/Contribution -> Methods/Results/Conclusion mapping table.",
+                    executable_instruction=(
+                        "Either add the missing empirical verification/bridge in Methods & Results or narrow this explicit contribution/RQ "
+                        "statement in Introduction so every promised deliverable maps 1:1 to presented evidence."
+                    ),
+                    author_decision_required=True,
+                )
 
     if by_role.get("introduction") and not rq_claims and not contrib_claims:
         s0 = by_role["introduction"][0]
@@ -701,27 +1167,34 @@ def diagnose_manuscript(
     # =========================================================================
     # Dimension 3: Argument Chain (Claim -> Evidence -> Warrant) & Conflicts
     # =========================================================================
-    same_metric_conflicts = _detect_same_metric_conflicts(all_paras)
+    same_metric_conflicts, same_metric_comparison_audit = _detect_same_metric_conflicts(all_paras)
     for cf in same_metric_conflicts:
         if not cf["reconciled_in_text"]:
             ea, eb = cf["entry_a"], cf["entry_b"]
+            is_comparable = cf["condition_comparability"] == "comparable_conditions"
+            cond_summary = "; ".join(
+                f"{e['paragraph_id']}: {e['value']}{e['unit']} [{e['direction']}, cond={','.join(e['condition_labels']) or 'unspecified'}]"
+                for e in cf["entries"]
+            )
             add_card(
                 dimension="D3_argument_evidence_chain",
-                severity="blocking",
+                severity="blocking" if is_comparable else "major",
                 action_verb="DEFER_TO_AUTHOR",
                 section=f"{ea['section']} <-> {eb['section']}",
-                paragraph_id=f"{ea['paragraph_id']},{eb['paragraph_id']}",
+                paragraph_id=",".join(dict.fromkeys(e["paragraph_id"] for e in cf["entries"])),
                 line_range=f"{ea['line_range']} & {eb['line_range']}",
                 quote_excerpt=f"{ea['sentence'][:75]} || {eb['sentence'][:75]}",
                 diagnosis=(
-                    f"Unreconciled same-metric contradiction on '{cf['metric']}' ({cf['conflict_type']}): "
-                    f"{ea['paragraph_id']} reports {ea['value']}{ea['unit']} ({ea['direction']}) whereas "
+                    f"Clustered same-metric {cf['classification']} "
+                    f"({cf['cluster_id']}) on '{cf['metric']}' ({cf['conflict_type']}, {len(cf['entries'])} unique entries; "
+                    f"{cf['distinct_condition_pairs_filtered']} distinct-condition and {cf.get('explained_in_text_pairs_filtered', 0)} explained pair(s) filtered): "
+                    f"{ea['paragraph_id']} reports {ea['value']}{ea['unit']} ({ea['direction']}) vs "
                     f"{eb['paragraph_id']} reports {eb['value']}{eb['unit']} ({eb['direction']})."
                 ),
-                evidence_basis="Cross-paragraph metric-direction/magnitude audit found contradictory outcomes without comparative reconciliation.",
+                evidence_basis=f"Condition-bound cluster comparison [{cf['condition_comparability']} / {cf['classification']}]: {cond_summary}",
                 executable_instruction=(
-                    "Insert an explicit warrant paragraph comparing experimental conditions, cohort definitions, or measurement "
-                    "protocols that explain why the two reports diverge; author must confirm which condition governs the study claim."
+                    "Insert an explicit condition-comparison warrant stating whether these divergent values arise from "
+                    "different experimental conditions/cohorts/datasets or represent an unreconciled discrepancy; author confirms governing condition."
                 ),
                 author_decision_required=True,
             )
@@ -766,14 +1239,71 @@ def diagnose_manuscript(
                     executable_instruction=f"Attach exact source metric, sample size, statistical test, or citation to {p['paragraph_id']}, or remove unsubstantiated superlative wording.",
                     author_decision_required=True,
                 )
+            # 3c. Circular reasoning detector (premise restates conclusion with high canonical overlap and zero external anchor)
+            for st in sents:
+                cm = re.search(r"\b(because|since|therefore|thus|hence)\b|(?:因为|由于|因此|所以)", st, re.I)
+                if cm and not EVIDENCE_ANCHOR_RE.search(st):
+                    lhs, rhs = st[: cm.start()].strip(), st[cm.end() :].strip()
+                    ltoks = set(_tokenize(lhs, canonical=True))
+                    rtoks = set(_tokenize(rhs, canonical=True))
+                    if len(ltoks) >= 3 and len(rtoks) >= 3:
+                        circ_ov = len(ltoks & rtoks) / max(1, min(len(ltoks), len(rtoks)))
+                        if circ_ov >= 0.65:
+                            add_card(
+                                dimension="D3_argument_evidence_chain",
+                                severity="major",
+                                action_verb="ADD_BRIDGE",
+                                section=sec["title"],
+                                paragraph_id=p["paragraph_id"],
+                                line_range=p["line_range"],
+                                quote_excerpt=st,
+                                diagnosis=f"Potential circular reasoning (premise-conclusion canonical concept overlap={circ_ov:.2f}) without independent external evidence anchor.",
+                                evidence_basis=f"Clause split at '{cm.group(0)}' shares {sorted(ltoks & rtoks)[:6]} with 0 numeric/citation/figure anchors.",
+                                executable_instruction=f"ADD_BRIDGE in {p['paragraph_id']}: replace tautological restatement with an independent empirical mechanism, statistical test, or cited control.",
+                                author_decision_required=True,
+                            )
+                            break
+            # 3d. Treatment vs control/baseline condition mismatch detector
+            for st in sents:
+                if re.search(r"\b(?:baseline|control\s+group|compared\s+(?:with|to)|versus|vs\.?)\b|对照组|基线|相比", st, re.I):
+                    clauses = re.split(
+                        r"\b(?:compared\s+(?:with|to)|versus|vs\.?|whereas|while|outperform(?:s|ed)?|surpass(?:es|ed)?|better\s+than)\b|相比|优于|而对照组|而基线",
+                        st,
+                        maxsplit=1,
+                        flags=re.I,
+                    )
+                    if len(clauses) == 2:
+                        ca = _extract_condition_context(clauses[0])
+                        cb = _extract_condition_context(clauses[1])
+                        if _compare_conditions(ca, cb) == "distinct_conditions" and QUANT_CLAIM_RE.search(st):
+                            add_card(
+                                dimension="D3_argument_evidence_chain",
+                                severity="blocking",
+                                action_verb="DEFER_TO_AUTHOR",
+                                section=sec["title"],
+                                paragraph_id=p["paragraph_id"],
+                                line_range=p["line_range"],
+                                quote_excerpt=st,
+                                diagnosis="Treatment vs control/baseline comparison asserts superiority across mismatched experimental conditions.",
+                                evidence_basis=f"Condition mismatch between compared arms: LHS={ca['labels']} vs RHS={cb['labels']}.",
+                                executable_instruction=f"DEFER_TO_AUTHOR at {p['paragraph_id']}: verify matched-condition baseline evaluation or narrow the comparative claim to acknowledge condition asymmetry.",
+                                author_decision_required=True,
+                            )
+                            break
 
     # =========================================================================
     # Dimension 4: Paragraph Relations & Cross-Section Redundancy
     # =========================================================================
     redundancy_pairs: list[dict[str, Any]] = []
-    candidate_paras = [p for p in all_paras if p["role"] != "references" and p["char_len"] >= 70]
-    para_tok_cache = [(p, set(_tokenize(p["text"])), _word_ngrams(_tokenize(p["text"]), 3)) for p in candidate_paras]
-
+    candidate_paras = [
+        p for p in all_paras
+        if p["role"] != "references" and p["char_len"] >= 70 and not p["text"].lstrip().startswith("|")
+    ]
+    para_tok_cache = [
+        (p, set(_tokenize(p["text"], canonical=True)), _word_ngrams(_tokenize(p["text"], canonical=True), 3))
+        for p in candidate_paras
+    ]
+    raw_red_hits: list[tuple[float, dict[str, Any], dict[str, Any], float, float, bool]] = []
     for i in range(len(para_tok_cache)):
         pa, ta, nga = para_tok_cache[i]
         if len(ta) < 6:
@@ -785,48 +1315,57 @@ def diagnose_manuscript(
             jacc = len(ta & tb) / max(1, len(ta | tb))
             ng_jacc = len(nga & ngb) / max(1, len(nga | ngb)) if (nga and ngb) else 0.0
             if jacc >= 0.48 or ng_jacc >= 0.30:
-                # Distinguish legitimate Abstract summary restatement vs true cross-section duplication
                 is_legit_summary = (
                     (pa["role"] == "abstract" and pb["role"] in ("results", "conclusion", "introduction"))
                     or (pb["role"] == "abstract" and pa["role"] in ("results", "conclusion", "introduction"))
                 ) and jacc < 0.80
-                pair_info = {
-                    "para_a": f"{pa['section']} ({pa['paragraph_id']}, {pa['line_range']})",
-                    "para_b": f"{pb['section']} ({pb['paragraph_id']}, {pb['line_range']})",
-                    "token_jaccard": round(jacc, 3),
-                    "trigram_jaccard": round(ng_jacc, 3),
-                    "legitimate_abstract_restatement": is_legit_summary,
-                }
-                redundancy_pairs.append(pair_info)
-                if not is_legit_summary:
-                    sev = "major" if jacc >= 0.60 or ng_jacc >= 0.40 else "minor"
-                    add_card(
-                        dimension="D4_paragraph_relations_redundancy",
-                        severity=sev,
-                        action_verb="MERGE",
-                        section=pb["section"],
-                        paragraph_id=f"{pa['paragraph_id']} <-> {pb['paragraph_id']}",
-                        line_range=f"{pa['line_range']} & {pb['line_range']}",
-                        quote_excerpt=pb["text"],
-                        diagnosis=(
-                            f"Cross-paragraph/cross-section synonymous duplication between {pa['section']} ({pa['paragraph_id']}) "
-                            f"and {pb['section']} ({pb['paragraph_id']}) (token Jaccard={jacc:.2f}, 3-gram Jaccard={ng_jacc:.2f})."
-                        ),
-                        evidence_basis=f"Lexical overlap exceeds redundancy threshold and is not a high-level Abstract restatement.",
-                        executable_instruction=(
-                            f"MERGE or deduplicate: retain the primary detailed statement in {pa['section']} ({pa['paragraph_id']}) "
-                            f"and condense {pb['paragraph_id']} into a single interpretive cross-reference."
-                        ),
-                        target_location=f"{pa['section']} ({pa['paragraph_id']})",
-                    )
+                raw_red_hits.append((max(jacc, ng_jacc), pa, pb, jacc, ng_jacc, is_legit_summary))
 
-    # Flag overly long monolithic paragraphs (>= 900 chars or >= 7 sentences mixing multiple ideas)
+    raw_red_hits.sort(key=lambda x: x[0], reverse=True)
+    emitted_red_cards = 0
+    for _, pa, pb, jacc, ng_jacc, is_legit_summary in raw_red_hits:
+        pair_info = {
+            "para_a": f"{pa['section']} ({pa['paragraph_id']}, {pa['line_range']})",
+            "para_b": f"{pb['section']} ({pb['paragraph_id']}, {pb['line_range']})",
+            "token_jaccard": round(jacc, 3),
+            "trigram_jaccard": round(ng_jacc, 3),
+            "legitimate_abstract_restatement": is_legit_summary,
+        }
+        redundancy_pairs.append(pair_info)
+        if not is_legit_summary and emitted_red_cards < 8:
+            emitted_red_cards += 1
+            sev = "major" if jacc >= 0.60 or ng_jacc >= 0.40 else "minor"
+            add_card(
+                dimension="D4_paragraph_relations_redundancy",
+                severity=sev,
+                action_verb="MERGE",
+                section=pb["section"],
+                paragraph_id=f"{pa['paragraph_id']} <-> {pb['paragraph_id']}",
+                line_range=f"{pa['line_range']} & {pb['line_range']}",
+                quote_excerpt=pb["text"],
+                diagnosis=(
+                    f"Cross-paragraph/cross-section near-duplicate content between {pa['section']} ({pa['paragraph_id']}) "
+                    f"and {pb['section']} ({pb['paragraph_id']}) (canonical Jaccard={jacc:.2f}, 3-gram Jaccard={ng_jacc:.2f})."
+                ),
+                evidence_basis="Canonicalized lexical/3-gram overlap exceeds redundancy threshold and is not a legitimate Abstract restatement.",
+                executable_instruction=(
+                    f"MERGE or deduplicate: retain the primary quantitative/methodological statement in {pa['section']} ({pa['paragraph_id']}) "
+                    f"and condense {pb['paragraph_id']} into a concise interpretive cross-reference."
+                ),
+                target_location=f"{pa['section']} ({pa['paragraph_id']})",
+            )
+
+    # Flag genuinely overloaded monolithic paragraphs (>= 1800 chars or >= 11 sentences)
+    split_cards_emitted = 0
     for sec in sections:
         if sec["role"] in ("abstract", "references"):
             continue
         for p in sec["paragraphs"]:
+            if p["text"].lstrip().startswith("|"):
+                continue
             sents = _extract_sentences(p["text"])
-            if p["char_len"] >= 900 or len(sents) >= 8:
+            if (p["char_len"] >= 1800 or len(sents) >= 11) and split_cards_emitted < 5:
+                split_cards_emitted += 1
                 add_card(
                     dimension="D4_paragraph_relations_redundancy",
                     severity="minor",
@@ -836,7 +1375,7 @@ def diagnose_manuscript(
                     line_range=p["line_range"],
                     quote_excerpt=p["text"],
                     diagnosis=f"Overloaded paragraph ({p['char_len']} chars, {len(sents)} sentences) bundles multiple argumentative units without structural separation.",
-                    evidence_basis="Paragraph length/sentence-count exceeds single-claim readability threshold.",
+                    evidence_basis="Paragraph length/sentence-count exceeds single-claim readability threshold (>=1800 chars or >=11 sentences).",
                     executable_instruction=f"SPLIT {p['paragraph_id']} at the topic pivot so each paragraph carries one claim + evidence + transition.",
                 )
 
@@ -924,6 +1463,34 @@ def diagnose_manuscript(
             author_decision_required=True,
         )
 
+    # Check genuinely empty leaf canonical sections (container parents with non-empty subsections are NEVER empty)
+    empty_leaf_sections: list[str] = []
+    for s in sections:
+        if (
+            s["role"] in ("introduction", "methods", "results", "discussion", "conclusion")
+            and not s["is_container_parent"]
+            and s["paragraph_count"] == 0
+        ):
+            empty_leaf_sections.append(f"{s['section_id']}:{s['title']}")
+            gaps.append({
+                "code": f"EMPTY_LEAF_SECTION_{s['role'].upper()}",
+                "severity": "major",
+                "detail": f"Leaf section '{s['title']}' ({s['section_id']}) has 0 paragraphs and 0 child subsections.",
+            })
+            add_card(
+                dimension="D6_structural_integrity_anomalies",
+                severity="major",
+                action_verb="DEFER_TO_AUTHOR",
+                section=s["title"],
+                paragraph_id=f"{s['section_id']}.P0",
+                line_range=f"L{s['start_line']}-L{s['end_line']}",
+                quote_excerpt=f"[EMPTY LEAF SECTION: {s['title']}]",
+                diagnosis=f"Leaf canonical section '{s['title']}' contains neither direct text nor child subsections.",
+                evidence_basis=f"Section tree verified direct_paragraphs=0 and children=0 for {s['section_id']}.",
+                executable_instruction=f"Supply missing body content for '{s['title']}' or confirm intentional omission.",
+                author_decision_required=True,
+            )
+
     # Check inline citations vs References section
     invariants = wio.extract_invariants(raw_text)
     total_inline_cites = (
@@ -946,6 +1513,60 @@ def diagnose_manuscript(
             executable_instruction="Attach the complete References section or bibliography file so citation coverage and claim-source grounding can be verified.",
             author_decision_required=True,
         )
+
+    # Check headingless / disordered formatting & missing figure/table/equation definitions
+    if len(sections) == 1 and sections[0]["title"] == "(Preamble)" and len(all_paras) >= 3:
+        gaps.append({
+            "code": "MISSING_SECTION_HEADINGS",
+            "severity": "major",
+            "detail": f"Manuscript contains {len(all_paras)} paragraphs with zero recognizable section headings.",
+        })
+        add_card(
+            dimension="D6_structural_integrity_anomalies",
+            severity="major",
+            action_verb="SPLIT",
+            section="(Preamble)",
+            paragraph_id=all_paras[0]["paragraph_id"],
+            line_range=f"L1-L{len(lines)}",
+            quote_excerpt=all_paras[0]["text"],
+            diagnosis=f"Manuscript lacks explicit section headings across {len(all_paras)} paragraphs, obscuring IMRaD hierarchy.",
+            evidence_basis="Heading parser detected 0 Markdown/LaTeX/numbered/Chinese/uppercase canonical section titles.",
+            executable_instruction="Insert explicit IMRaD section headings (Introduction, Methods, Results, Discussion/Conclusion) at each argumentative phase boundary.",
+            author_decision_required=True,
+        )
+
+    referenced_figs = {
+        re.sub(r"\s+", " ", f).strip()
+        for f in invariants.get("figure_table_refs", [])
+        if re.match(r"^(?:Fig|Table|Eq|图|表)", f, re.I)
+    }
+    has_fig_caption = bool(re.search(r"(?:^|\n)\s*(?:\*{0,2}(?:Figure|Fig\.|Table|图|表)\s*S?\d+\s*[:.：]|!\[|\|[^|\n]+\|)", raw_text, re.I))
+    has_eq_block = bool(re.search(r"\$\$|\\begin\{(?:equation|align)\}|(?:^|\n)\s*(?:Eq\.?|Equation)\s*\(?\d+\)?\s*[:=]", raw_text, re.I))
+    if referenced_figs and not has_fig_caption and any(re.match(r"^(?:Fig|Table|图|表)", f, re.I) for f in referenced_figs):
+        gaps.append({
+            "code": "MISSING_FIGURE_OR_TABLE_CAPTIONS",
+            "severity": "minor",
+            "detail": f"Body references {sorted(referenced_figs)[:6]} but no embedded Figure/Table captions or Markdown tables were detected in text.",
+        })
+        add_card(
+            dimension="D6_structural_integrity_anomalies",
+            severity="minor",
+            action_verb="DEFER_TO_AUTHOR",
+            section="[MISSING_MEDIA]",
+            paragraph_id="MISSING_FIG_TABLE",
+            line_range="L0-L0",
+            quote_excerpt=f"Referenced visual anchors without captions: {', '.join(sorted(referenced_figs)[:6])}",
+            diagnosis=f"Manuscript references {len(referenced_figs)} figure/table anchor(s) without corresponding embedded captions or table blocks.",
+            evidence_basis="Cross-check of inline Fig/Table references against caption/table definitions in received text.",
+            executable_instruction="Confirm whether figures/tables are supplied in separate files; attach captions/values before final claim-evidence alignment.",
+            author_decision_required=True,
+        )
+    if any(re.match(r"^(?:Eq|Equation)", f, re.I) for f in referenced_figs) and not has_eq_block:
+        gaps.append({
+            "code": "MISSING_EQUATION_DEFINITIONS",
+            "severity": "minor",
+            "detail": "Body references numbered equations but no equation blocks were found in text.",
+        })
 
     # Check truncation / abrupt ending
     stripped_tail = raw_text.rstrip()
@@ -1024,6 +1645,9 @@ def diagnose_manuscript(
         "case_id": case_id,
         "task_id": task_id,
         "manuscript": manuscript_path.name,
+        "read_method": read_meta.get("method", "plain_text"),
+        "degraded_mode": bool(read_meta.get("degraded_mode", False)),
+        "task_constraints_applied": (case_contract or {}).get("task_constraints", {}),
         "line_count": len(lines),
         "section_count": len(sections),
         "paragraph_count": len(all_paras),
@@ -1031,17 +1655,25 @@ def diagnose_manuscript(
             {
                 "section_id": s["section_id"],
                 "title": s["title"],
+                "level": s["level"],
                 "role": s["role"],
+                "parent_section_id": s["parent_section_id"],
+                "children_section_ids": s["children_section_ids"],
+                "is_container_parent": s["is_container_parent"],
                 "lines": f"L{s['start_line']}-L{s['end_line']}",
+                "direct_paragraphs": s["direct_paragraph_count"],
                 "paragraphs": s["paragraph_count"],
                 "chars": s["char_len"],
+                "has_content": s["has_content"],
             }
             for s in sections
         ],
+        "empty_leaf_sections": empty_leaf_sections,
         "six_dimension_counts": dim_counts,
         "rq_and_contribution_trace": rq_alignment_trace,
         "chronological_laundry_lists": chronological_clusters,
         "same_metric_conflicts": same_metric_conflicts,
+        "same_metric_comparison_audit": same_metric_comparison_audit,
         "redundancy_pairs": redundancy_pairs,
         "prose_audit_summary": {
             "clean": prose_audit["clean"],
@@ -1114,20 +1746,26 @@ def render_editing_action_plan_md(diag: dict[str, Any]) -> str:
                 "",
             ])
 
+    if diag.get("task_constraints_applied"):
+        tc_str = ", ".join(f"{k}={v}" for k, v in diag["task_constraints_applied"].items())
+        lines.insert(4, f"- **Task Constraints Consumed (`/input/task.md` & `case.json`)**: {tc_str}")
+
     if diag["same_metric_conflicts"]:
         lines.extend([
-            "## 3. Detected Same-Metric Contradictions Requiring Reconciliation",
+            "## 3. Clustered Same-Metric Contradictions & Condition Comparison",
             "",
-            "| Metric | Conflict Type | Entry A | Entry B | Reconciled in Text? |",
-            "| --- | --- | --- | --- | --- |",
+            "| Cluster | Metric | Conflict Type | Condition Comparability | Entries (Paragraph, Value, Conditions) | Distinct-Cond Filtered |",
+            "| --- | --- | --- | --- | --- | ---: |",
         ])
         for cf in diag["same_metric_conflicts"]:
-            ea, eb = cf["entry_a"], cf["entry_b"]
+            entry_str = " ; ".join(
+                f"{e['paragraph_id']} ({e['line_range']}): {e['value']}{e['unit']} [{e['direction']}, cond={','.join(e['condition_labels']) or 'unspecified'}]"
+                for e in cf.get("entries", [cf["entry_a"], cf["entry_b"]])
+            )
             lines.append(
-                f"| {cf['metric']} | {cf['conflict_type']} | "
-                f"{ea['paragraph_id']} ({ea['line_range']}): {ea['value']}{ea['unit']} [{ea['direction']}] | "
-                f"{eb['paragraph_id']} ({eb['line_range']}): {eb['value']}{eb['unit']} [{eb['direction']}] | "
-                f"{'Yes' if cf['reconciled_in_text'] else 'No'} |"
+                f"| {cf.get('cluster_id', 'MCLUSTER')} | {cf['metric']} | {cf['conflict_type']} | "
+                f"{cf.get('condition_comparability', 'unspecified_context')} | {entry_str} | "
+                f"{cf.get('distinct_condition_pairs_filtered', 0)} |"
             )
         lines.append("")
 
@@ -1154,14 +1792,30 @@ def render_editing_action_plan_md(diag: dict[str, Any]) -> str:
 
 def _discover_manuscript(input_dir: Path) -> tuple[Path, str]:
     case_id = "case-01"
+    declared_file: Path | None = None
     case_json = input_dir / "case.json"
     if case_json.is_file():
         try:
             cobj = json.loads(case_json.read_text(encoding="utf-8"))
             case_id = str(cobj.get("case_id") or case_id)
+            for key in ("manuscript", "primary_manuscript", "manuscript_file", "draft", "input_file"):
+                val = cobj.get(key)
+                if isinstance(val, str) and val.strip():
+                    cand = input_dir / val.strip()
+                    if cand.is_file():
+                        declared_file = cand
+                        break
+            if declared_file is None and isinstance(cobj.get("files"), list):
+                for item in cobj["files"]:
+                    fn = item.get("path") if isinstance(item, dict) else (item if isinstance(item, str) else "")
+                    if fn and (input_dir / fn).is_file():
+                        declared_file = input_dir / fn
+                        break
         except Exception:
             pass
-    exts = (".md", ".tex", ".docx", ".txt", ".pdf")
+    if declared_file is not None:
+        return declared_file, case_id
+    exts = (".md", ".tex", ".docx", ".txt", ".pdf", ".xml", ".html", ".htm")
     candidates = [
         p for p in sorted(input_dir.rglob("*"))
         if p.is_file()
@@ -1170,32 +1824,42 @@ def _discover_manuscript(input_dir: Path) -> tuple[Path, str]:
     ]
     if not candidates:
         raise FileNotFoundError(f"No manuscript file found under {input_dir}")
-    # Prefer largest manuscript text file
-    candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+    # Prefer files explicitly named manuscript/paper/draft over supplements, then largest size
+    candidates.sort(
+        key=lambda p: (
+            0 if any(k in p.name.lower() for k in ("manuscript", "paper", "draft", "article")) else (2 if "supp" in p.name.lower() else 1),
+            -p.stat().st_size,
+        )
+    )
     return candidates[0], case_id
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Six-dimension source-grounded structural logic diagnosis engine.")
-    parser.add_argument("--manuscript", default="", help="Path to manuscript (.md/.tex/.txt/.docx/.pdf).")
-    parser.add_argument("--input-dir", default="", help="Alternative input directory containing case.json and manuscript.")
+    parser.add_argument("--manuscript", default="", help="Path to manuscript (.md/.tex/.txt/.docx/.pdf/.xml/.html).")
+    parser.add_argument("--input-dir", default="", help="Alternative input directory containing case.json, task.md, and manuscript.")
     parser.add_argument("--out-dir", required=True, help="Output directory for structural_diagnosis.json, editing_action_plan.md, and result.json.")
     parser.add_argument("--case-id", default="", help="Override case_id.")
     args = parser.parse_args(argv)
 
+    input_dir_path: Path | None = Path(args.input_dir) if args.input_dir else None
     if args.manuscript:
         ms_path = Path(args.manuscript)
-        case_id = args.case_id or ms_path.stem
-    elif args.input_dir:
-        ms_path, detected_cid = _discover_manuscript(Path(args.input_dir))
-        case_id = args.case_id or detected_cid
+        if input_dir_path is None:
+            input_dir_path = ms_path.parent
+        case_contract = wio.load_case_contract(input_dir_path)
+        case_id = args.case_id or case_contract.get("case_id") or ms_path.stem
+    elif input_dir_path:
+        ms_path, detected_cid = _discover_manuscript(input_dir_path)
+        case_contract = wio.load_case_contract(input_dir_path)
+        case_id = args.case_id or case_contract.get("case_id") or detected_cid
     else:
         parser.error("Provide either --manuscript or --input-dir.")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    res = diagnose_manuscript(ms_path, case_id=case_id)
+    res = diagnose_manuscript(ms_path, case_id=case_id, case_contract=case_contract)
     diag = res["diagnosis"]
     plan_md = render_editing_action_plan_md(diag)
 
@@ -1217,9 +1881,11 @@ def main(argv: list[str] | None = None) -> int:
         for c in diag["edit_action_cards"]
     ]
     limitations = [
-        "Automated structural diagnostics rely on explicit textual markers, section headers, and lexical/metric patterns; nuanced domain-specific logical warrants require human scholar confirmation.",
+        "Automated structural diagnostics rely on explicit textual markers, section headers, and condition-bound metric patterns; nuanced domain-specific logical warrants require human scholar confirmation.",
         "No unsolicited full manuscript rewrite is produced; author retains authority to Accept, Partially Accept, or Reject each action card.",
     ]
+    if diag.get("degraded_mode"):
+        limitations.append(f"Document text was extracted via degraded fallback ({diag.get('read_method')}); inspect PDF layout and formula spans manually.")
     result_payload = wio.build_writing_result(
         case_id=case_id,
         task_id="paper-structure-optimization",
@@ -1242,7 +1908,7 @@ def main(argv: list[str] | None = None) -> int:
         evidence_map=res["evidence_map"],
         change_log=change_log,
         artifacts=["result.json", "structural_diagnosis.json", "editing_action_plan.md"],
-        sources=[{"file": ms_path.name, "role": "primary_manuscript", "lines": diag["line_count"]}],
+        sources=[{"file": ms_path.name, "role": "primary_manuscript", "lines": diag["line_count"], "read_method": diag.get("read_method")}],
         gaps=res["gaps"],
         limitations=limitations,
         verification={
@@ -1250,9 +1916,11 @@ def main(argv: list[str] | None = None) -> int:
             "firewall": diag["firewall_verification"],
             "blocking_cards": sum(1 for c in diag["edit_action_cards"] if c["severity"] == "blocking"),
             "chronological_laundry_lists_found": len(diag["chronological_laundry_lists"]),
-            "same_metric_conflicts_found": len(diag["same_metric_conflicts"]),
+            "same_metric_conflict_clusters_found": len(diag["same_metric_conflicts"]),
             "cross_section_redundancy_pairs": sum(1 for r in diag["redundancy_pairs"] if not r["legitimate_abstract_restatement"]),
+            "task_constraints_consumed": bool(case_contract.get("task_constraints")),
         },
+        case_contract=case_contract,
     )
     result_path.write_text(json.dumps(result_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 

@@ -1,6 +1,6 @@
 ---
 name: methods-experiments-repro-architect
-description: Multi-source Methods and Experimental Setup drafting and reproducibility auditing Skill . Recursively extracts parameters from YAML/JSON/INI/TOML/Python/Shell/Logs, separates Planned Config vs Actual Executed values, detects config-key miscopies and ungrounded parameter fabrications, marks missing lab/run parameters explicitly as [UNRECORDED: AUTHOR_CONFIRM_REQUIRED], purifies backend script tokens from scientific prose, and outputs editable CSV/JSON/Markdown deliverables.
+description: Multi-source Methods and Experimental Setup drafting, zero-hallucination six-element chapter scaffold generation (methods_scaffold.md), and reproducibility auditing Skill. Recursively extracts parameters, dataset profiles, pipeline steps, imports, and commands from YAML/JSON/INI/TOML/Python/Shell/CSV/Logs/DOCX/PDF/XML/HTML, consumes /input/task.md and case.json output_contract dynamically, separates Planned Config vs Actual Executed values, detects config-key miscopies and ungrounded parameter fabrications, marks missing items as [UNRECORDED: AUTHOR_CONFIRM_REQUIRED], purifies backend tokens, and outputs editable CSV/JSON/Markdown deliverables.
 ---
 
 # Methods & Experimental Setup Drafting and Reproducibility Audit (`methods-experiments-writing`)
@@ -33,24 +33,26 @@ python3 /skills/weekly-skill/scripts/result_guard.py --init --case-id "<CASE_ID>
 python3 /skills/weekly-skill/scripts/block_indexer.py --scan /input --out /app/work/input_blocks.json
 ```
 
-### Step 2: Extract multi-source parameters & audit existing draft (if supplied)
+### Step 2: Pre-classify inputs, extract parameters & generate complete editable `methods_and_experiments.md`
 ```bash
 python3 /skills/weekly-skill/scripts/methods_repro_extractor.py \
   --input-dir /input \
-  --out-dir /app/output
+  --out-dir /app/output \
+  --emit-scaffold
 ```
-(If auditing a newly drafted `/app/output/methods_and_experiments.md`, pass `--draft /app/output/methods_and_experiments.md --input-dir /input --out-dir /app/output`.)
+(Pre-classifies every `/input` file into `experimental_config_or_code_or_log` vs `background_literature_or_reference` so reference papers are contextualized separately without polluting experimental provenance; directly writes complete publication-ready `/app/output/methods_and_experiments.md` and registers it in `result.json` `deliverable` and `artifacts`, alongside `methods_scaffold.md`, `experimental_parameters.csv`, `reproducibility_checklist.json`, and `methods_audit.json`. If auditing a revised `/app/output/methods_and_experiments.md`, pass `--draft /app/output/methods_and_experiments.md --input-dir /input --out-dir /app/output`.)
 
-### Step 3: Draft / Revise clean Methods & Experiments chapter
+### Step 3: Refine & cross-audit complete `methods_and_experiments.md`
 1. Read `references/methods_reproducibility_protocol.md`, `references/academic_writing_standards.md`, and `references/output_contract_spec.md`.
-2. Inspect `/app/output/experimental_parameters.csv`, `/app/output/reproducibility_checklist.json`, and `/app/output/methods_audit.json`.
-3. Write `/app/output/methods_and_experiments.md` covering all six elements, distinguishing Planned vs Actual values, preserving every verified step/value, marking unrecorded items `[UNRECORDED: AUTHOR_CONFIRM_REQUIRED]`, and using clean frontend scientific terminology.
+2. Inspect `/app/output/methods_and_experiments.md`, `/app/output/experimental_parameters.csv`, `/app/output/reproducibility_checklist.json`, and `/app/output/methods_audit.json`.
+3. Refine `/app/output/methods_and_experiments.md` as needed to keep all six elements publication-ready, preserve Planned-vs-Actual disclosures, keep background literature boundaries explicit, retain `[UNRECORDED: AUTHOR_CONFIRM_REQUIRED]` for missing primary details, and use clean frontend scientific terminology.
 4. Re-run `methods_repro_extractor.py --input-dir /input --draft /app/output/methods_and_experiments.md --out-dir /app/output` until all fixable blocking defects (`CONFIG_KEY_MISCOPY`, `PLANNED_REPORTED_AS_ACTUAL`, `UNGROUNDED_FABRICATED_PARAMETER`, `FRONTEND_BACKEND_TOKEN_LEAK`) are resolved.
 
 ### Step 4: Grounding gate & final Harbor audit
 ```bash
 python3 /skills/weekly-skill/scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
 python3 /skills/weekly-skill/scripts/final_audit.py --dir /app/output \
+  --require methods_and_experiments.md \
   --require experimental_parameters.csv \
   --require reproducibility_checklist.json \
   --require methods_audit.json

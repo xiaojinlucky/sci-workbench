@@ -122,6 +122,194 @@ CONTRIB_HEADER_RE = re.compile(r"\b(?:our\s+(?:main\s+|key\s+|primary\s+)?contri
 
 POS_OUTCOME_RE = re.compile(r"\b(?:improv|increas|higher|positive|effective|outperform|gain|beneficial|reduces?\s+error)\w*\b|提升|提高|正相关|有效|优于|显著改善", re.I)
 NEG_OUTCOME_RE = re.compile(r"\b(?:degrad|decreas|lower|negative|ineffective|no\s+significant|fail(?:s|ed)?|harmful|worse|null)\w*\b|下降|降低|负相关|无效|无显著|劣于|未能改善", re.I)
+NARROW_SCOPE_CUE_RE = re.compile(
+    r"\b(?:in\s+vitro|mouse|murine|rat\s+model|animal\s+model|cell\s+line|single-center|small\s+cohort|pilot\s+study|"
+    r"pediatric|healthy\s+adults?|alkaline|acidic|limited\s+to|restricted\s+to|only\s+evaluated|only\s+tested|retrospective)\b"
+    r"|体外|小鼠|动物模型|单中心|小样本|儿童|健康成人|碱性|酸性|仅在|受限于|回顾性",
+    re.I,
+)
+OVERGEN_PARAPHRASE_RE = re.compile(
+    r"\b(?:universally|in\s+all\s+(?:patients|populations|conditions|settings|regimes|domains)|across\s+all\s+(?:patients|populations|settings|tasks)|"
+    r"clinically\s+proven|definitively\s+establishes?|generalizes?\s+to\s+all|broadly\s+effective\s+in\s+all)\b"
+    r"|适用于所有|普遍有效|在一切条件下|临床已证实|全面适用",
+    re.I,
+)
+CONTRAST_CLAUSE_RE = re.compile(r"\b(?:unlike|contrary\s+to|in\s+contrast\s+to|whereas|however|rather\s+than)\b|不同于|与.{1,15}相反|相比之下", re.I)
+
+# Publication-ready manuscript cleanliness detectors (strip process commentary, script paths, audit jargon)
+META_COMMENTARY_LINE_RE = re.compile(
+    r"^\s*(?:[-*•>\s]*)"
+    r"(?:(?:我会先|我先|接下来我|下面我|首先我|本步骤|根据离线脚本|脚本输出显示|经核对工作区|核对工作区|"
+    r"注[:：]\s*以上|说明[:：]\s*以上|以下为重构|以下是改写|审计结论如下|本回复基于)|"
+    r"(?:I\s+will\s+first|Let\s+me\s+first|First,\s+I\s+will|Based\s+on\s+the\s+(?:offline\s+)?script|"
+    r"According\s+to\s+the\s+(?:auditor|script)|Note:\s+the\s+above|Here\s+is\s+the\s+revised|Step\s+\d+\s*[:：]))",
+    re.I,
+)
+SCRIPT_PATH_LEAK_RE = re.compile(
+    r"(?:/skills/[^\s`'\"]+|/app/(?:output|work|input)/[^\s`'\"]+|\bscripts/[a-z0-9_]+\.py\b|"
+    r"\bpython3?\s+(?:-B\s+)?[^\n]*\.py\b|\brelated_work_taxonomy\.(?:json|md)\b|\bgap_contribution_alignment\.md\b|"
+    r"\bresult\.json\b|\bSKILL\.md\b|\breal_case_(?:input|out)\b)",
+    re.I,
+)
+AUDIT_JARGON_LEAK_RE = re.compile(
+    r"\b(?:IRW-\d{3}|blocking_count|four_beat_complete|MANUSCRIPT_META_POLLUTION|"
+    r"UNSUBSTANTIATED_GAP_CLAIM|OVERCLAIMED_CONTRIBUTION|CHRONOLOGICAL_SUMMARY_STITCHING|"
+    r"UNRECONCILED_PRIOR_WORK_DIVERGENCE|Condition\s+[AB]\s*[（(])\b",
+)
+
+BODY_SECTION_START_RE = re.compile(
+    r"^(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:abstract|introduction|background|methods?|materials?|results?|discussion|conclusion|references|摘要|引言|绪论|方法|结果|讨论|结论|参考文献)\b",
+    re.I,
+)
+
+
+def _extract_publication_year(raw: str) -> tuple[str, str]:
+    """Strictly extract publication year from JATS XML, BibTeX, or top-25-line header metadata only.
+
+    NEVER grabs the first 4-digit year from body prose or references; returns ('unknown', 'unknown') when absent.
+    """
+    # 1) JATS XML <pub-date> / <article-meta>
+    jats_pub = re.search(r"<pub-date\b[^>]*>[\s\S]{0,400}?<year>\s*((?:19|20)\d{2})\s*</year>", raw[:12000], re.I)
+    if jats_pub:
+        y = int(jats_pub.group(1))
+        if 1950 <= y <= 2027:
+            return str(y), "jats_pub_date"
+    jats_meta = re.search(r"<article-meta\b[^>]*>[\s\S]{0,2500}?<year>\s*((?:19|20)\d{2})\s*</year>", raw[:12000], re.I)
+    if jats_meta:
+        y = int(jats_meta.group(1))
+        if 1950 <= y <= 2027:
+            return str(y), "jats_article_meta"
+
+    # 2) BibTeX year field
+    bib_y = re.search(r"(?:^|\n)\s*year\s*=\s*[\{\"']?((?:19|20)\d{2})[\}\"']?", raw[:4000], re.I)
+    if bib_y:
+        y = int(bib_y.group(1))
+        if 1950 <= y <= 2027:
+            return str(y), "bibtex_year"
+
+    # 3) Header metadata zone ONLY (first 25 non-empty lines, strictly BEFORE Abstract/Introduction body)
+    header_lines: list[str] = []
+    for ln in raw.splitlines():
+        st = ln.strip()
+        if not st:
+            continue
+        if len(header_lines) >= 1 and BODY_SECTION_START_RE.match(st):
+            break
+        header_lines.append(st)
+        if len(header_lines) >= 25:
+            break
+
+    header_text = "\n".join(header_lines)
+    explicit_lbl = re.search(
+        r"(?i)(?:^|\n)\s*(?:year|pub(?:lished|lication)?\s*(?:date|year)?|date|发表年份|出版年份)\s*[:：]\s*[^\n]{0,40}?\b((?:19|20)\d{2})\b",
+        header_text,
+    )
+    if explicit_lbl:
+        y = int(explicit_lbl.group(1))
+        if 1950 <= y <= 2027:
+            return str(y), "header_metadata_label"
+
+    copy_m = re.search(r"(?:©|copyright)\s*(?:\(c\)\s*)?((?:19|20)\d{2})\b", header_text, re.I)
+    if copy_m:
+        y = int(copy_m.group(1))
+        if 1950 <= y <= 2027:
+            return str(y), "header_copyright"
+
+    jcit_m = re.search(r"\b((?:19|20)\d{2})\s*;\s*\d+\s*(?:\([^)]+\))?\s*:\s*\d+", header_text)
+    if jcit_m:
+        y = int(jcit_m.group(1))
+        if 1950 <= y <= 2027:
+            return str(y), "header_journal_citation"
+
+    doi_m = DOI_RE.search(header_text)
+    if doi_m:
+        doi_str = doi_m.group(1)
+        doi_yr = re.search(r"[./_-]((?:19|20)\d{2})[./_-]", doi_str)
+        if doi_yr:
+            y = int(doi_yr.group(1))
+            if 1950 <= y <= 2027:
+                return str(y), "header_doi_year_segment"
+
+    return "unknown", "unknown"
+
+
+def _extract_conclusion_direction(raw: str, route: str) -> tuple[str, str]:
+    """Conservatively determine conclusion_direction; never infer polarity from generic body prose.
+
+    Reviews/editorials or full-text papers without an explicit, unambiguous Conclusion direction
+    honestly return ('unknown', 'unknown') rather than fabricating positive/negative conflicts.
+    """
+    if "review" in route.lower():
+        return "unknown", "review_or_synthesis_no_single_polarity"
+    concl_m = re.search(
+        r"(?:^|\n)(?:#{1,3}\s*Conclusions?\b|\bConclusions?\s*[:：])\s*\n?([\s\S]{30,900}?)(?:\n#{1,3}\s|\n\n|$)",
+        raw,
+        re.I,
+    )
+    if not concl_m:
+        return "unknown", "no_explicit_conclusion_block"
+    concl_txt = re.sub(r"\s+", " ", concl_m.group(1)).strip()
+    has_pos = bool(re.search(r"\b(?:significantly\s+(?:improv|increas|enhanc|reduc(?:ed|es)\s+(?:risk|mortality|error))|beneficial\s+effect|positively\s+associated|protective\s+effect)\b", concl_txt, re.I))
+    has_neg = bool(re.search(r"\b(?:no\s+significant\s+(?:effect|association|difference|benefit)|failed\s+to\s+improve|ineffective|adverse\s+effect|negatively\s+associated|harmful|null\s+effect)\b", concl_txt, re.I))
+    if has_pos and not has_neg:
+        return "positive", "explicit_conclusion_block"
+    if has_neg and not has_pos:
+        return "negative", "explicit_conclusion_block"
+    return "unknown", "ambiguous_or_multidirectional_conclusion"
+
+
+def check_and_clean_manuscript(draft_text: str) -> dict[str, Any]:
+    """Manuscript cleanliness gate: detect and strip meta-commentary, script paths, and audit jargon."""
+    flagged: list[dict[str, Any]] = []
+    clean_lines: list[str] = []
+    meta_n = 0
+    path_n = 0
+    jargon_n = 0
+
+    for lineno, raw_line in enumerate(draft_text.splitlines(), 1):
+        st = raw_line.strip()
+        is_meta = bool(META_COMMENTARY_LINE_RE.search(st))
+        is_path = bool(SCRIPT_PATH_LEAK_RE.search(st))
+        is_jargon = bool(AUDIT_JARGON_LEAK_RE.search(st))
+
+        if is_meta or is_path or is_jargon:
+            cats: list[str] = []
+            if is_meta:
+                meta_n += 1
+                cats.append("process_meta_commentary")
+            if is_path:
+                path_n += 1
+                cats.append("script_or_workspace_path_leak")
+            if is_jargon:
+                jargon_n += 1
+                cats.append("audit_jargon_leak")
+            flagged.append({
+                "line": lineno,
+                "categories": cats,
+                "excerpt": st[:160],
+            })
+            # Drop pure meta-commentary lines; sanitize inline path/jargon leaks if substantive prose remains
+            if is_meta:
+                continue
+            sanitized = SCRIPT_PATH_LEAK_RE.sub("", raw_line)
+            sanitized = AUDIT_JARGON_LEAK_RE.sub("", sanitized)
+            sanitized = re.sub(r"\s{2,}", " ", sanitized).strip()
+            if len(sanitized) >= 20 and not re.match(r"^[-*•:：,，;；()\s]+$", sanitized):
+                clean_lines.append(sanitized)
+        else:
+            clean_lines.append(raw_line)
+
+    cleaned = "\n".join(clean_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip() + "\n"
+    return {
+        "clean": len(flagged) == 0,
+        "flagged_count": len(flagged),
+        "meta_commentary_lines_found": meta_n,
+        "script_path_leaks_found": path_n,
+        "audit_jargon_leaks_found": jargon_n,
+        "flagged_lines": flagged[:30],
+        "cleaned_text": cleaned,
+    }
 
 
 def _tokenize(text: str) -> set[str]:
@@ -164,9 +352,93 @@ def _extract_cites(text: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _load_literature_entries(bib_path: Path | None, corpus_dir: Path | None) -> list[dict[str, Any]]:
-    """Load structured literature cards from JSON/CSV/BIB/MD files."""
+def _parse_fulltext_article_card(raw: str, fp: Path, read_method: str) -> dict[str, Any]:
+    """Extract one structured literature card from a full-text paper (.md/.xml/.html/.pdf/.docx).
+
+    Never guesses publication year from body/references text or conclusion_direction from raw word polarity;
+    explicitly outputs 'unknown' and metadata_gaps whenever header/JATS/BibTeX metadata is absent.
+    """
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    title = ""
+    for ln in lines[:12]:
+        m = re.match(r"^#{1,3}\s+(.+)$", ln)
+        if m:
+            title = m.group(1).strip()
+            break
+    if not title and lines:
+        title = lines[0][:140]
+    doi_m = DOI_RE.search(raw[:4000])
+    doi = doi_m.group(1).rstrip(".,;)").lower() if doi_m else ""
+    year, year_source = _extract_publication_year(raw)
+    # Extract author only from top-25-line header metadata
+    header_zone = "\n".join(lines[:25])
+    auth_m = re.search(r"(?:^|\n)(?:authors?|by)\s*[:：]\s*([^\n]{3,120})", header_zone, re.I)
+    author = auth_m.group(1).strip() if auth_m else "unknown"
+    # Extract abstract/results/limitations snippets
+    abs_m = re.search(r"(?:#{1,3}\s*Abstract|\bAbstract\b)[:\s]*\n([\s\S]{80,1500}?)(?:\n#{1,3}\s|\n\n[A-Z])", raw, re.I)
+    finding = re.sub(r"\s+", " ", abs_m.group(1)).strip()[:420] if abs_m else re.sub(r"\s+", " ", " ".join(lines[1:12]))[:420]
+    lim_m = re.search(r"([^.\n]{0,180}(?:limitation|caveat|restricted\s+to|small\s+sample|single-center|future\s+work|in\s+vitro|mouse\s+model)[^.\n]{0,180}\.?)", raw, re.I)
+    limitation = re.sub(r"\s+", " ", lim_m.group(1)).strip()[:240] if lim_m else ""
+    scope_hits = list(dict.fromkeys(m.group(0).strip() for m in NARROW_SCOPE_CUE_RE.finditer(raw[:12000])))
+    scope_cond = "; ".join(scope_hits[:5]) if scope_hits else "see_fulltext_methods"
+    # Infer coarse thematic/method route from title + abstract
+    blob = f"{title} {finding}".lower()
+    if any(k in blob for k in ("meta-analysis", "systematic review", "narrative review", "review", "survey")):
+        route = "Review / Synthesis"
+    elif any(k in blob for k in ("clinical", "patient", "cohort", "randomized", "trial", "pediatric", "nhanes")):
+        route = "Clinical / Cohort Study"
+    elif any(k in blob for k in ("mouse", "murine", "in vivo", "microbiome", "scfa", "gut", "metabol")):
+        route = "Mechanistic / Biomedical"
+    elif any(k in blob for k in ("graph", "neural", "transformer", "learning", "algorithm", "model")):
+        route = "Computational / ML Modeling"
+    elif any(k in blob for k in ("catalyst", "oer", "overpotential", "electro", "material", "dft")):
+        route = "Materials / Experimental"
+    else:
+        route = f"Full-Text Study ({read_method})"
+
+    conclusion_dir, dir_source = _extract_conclusion_direction(raw, route)
+    metadata_gaps: list[str] = []
+    if year == "unknown":
+        metadata_gaps.append("year_missing_in_header_or_jats_or_bibtex")
+    if conclusion_dir == "unknown":
+        metadata_gaps.append(f"conclusion_direction_unknown:{dir_source}")
+    if author == "unknown":
+        metadata_gaps.append("author_missing_in_header_metadata")
+
+    key = fp.stem
+    if auth_m and year != "unknown":
+        first_sur = re.split(r"[\s,;]+", author)[0]
+        if first_sur:
+            key = f"{first_sur}, {year}"
+    return {
+        "cite_key": key,
+        "author": author[:80],
+        "year": year,
+        "year_source": year_source,
+        "doi": doi,
+        "title": title[:160],
+        "method_route": route,
+        "scope_condition": scope_cond,
+        "finding": finding,
+        "source_full_excerpt": raw[:16000],
+        "direction": conclusion_dir,
+        "conclusion_direction": conclusion_dir,
+        "direction_source": dir_source,
+        "metadata_gaps": metadata_gaps,
+        "limitation": limitation,
+        "source_file": fp.name,
+    }
+
+
+def _load_literature_entries(
+    bib_path: Path | None,
+    corpus_dir: Path | None,
+    *,
+    draft_path: Path | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load structured literature cards from JSON/CSV/BIB/MD/XML/HTML/DOCX/PDF files."""
     entries: list[dict[str, Any]] = []
+    degraded_notes: list[dict[str, Any]] = []
     files_to_read: list[Path] = []
     if bib_path and bib_path.is_file():
         files_to_read.append(bib_path)
@@ -174,20 +446,32 @@ def _load_literature_entries(bib_path: Path | None, corpus_dir: Path | None) -> 
         for fp in sorted(corpus_dir.rglob("*")):
             if not fp.is_file():
                 continue
+            if draft_path and fp.resolve() == draft_path.resolve():
+                continue
             low = fp.name.lower()
-            if low in {"case.json", "task.md"}:
+            if low in {"case.json", "task.md", "readme.md"}:
+                continue
+            if any(k in low for k in ("methods_results", "own_results", "author_evidence")) and not any(k in low for k in ("bib", "ref", "lit", "prior")):
                 continue
             if (
-                any(k in low for k in ("bib", "ref", "lit", "paper", "prior", "source"))
-                or fp.suffix.lower() in {".bib", ".pdf", ".docx"}
+                any(k in low for k in ("bib", "ref", "lit", "paper", "prior", "source", "pmc", "scfa", "oer", "gnn", "work_", "scielo"))
+                or fp.suffix.lower() in {".bib", ".pdf", ".docx", ".xml", ".html", ".htm"}
             ):
                 if fp not in files_to_read:
                     files_to_read.append(fp)
 
     for fp in files_to_read:
         suf = fp.suffix.lower()
-        if suf in {".docx", ".pdf"}:
+        read_method = "plain_text"
+        if suf in {".docx", ".pdf", ".xml", ".html", ".htm"}:
             doc = wio.read_document_text(fp)
+            read_method = str(doc.get("meta", {}).get("method", suf.lstrip(".")))
+            if doc.get("meta", {}).get("degraded_mode"):
+                degraded_notes.append({
+                    "code": "SOURCE_DEGRADED_EXTRACTION",
+                    "severity": "minor",
+                    "detail": f"{fp.name} extracted via degraded fallback ({read_method}).",
+                })
             if not doc.get("ok"):
                 entries.append({
                     "cite_key": fp.stem,
@@ -198,6 +482,7 @@ def _load_literature_entries(bib_path: Path | None, corpus_dir: Path | None) -> 
                     "method_route": "unreadable_degraded",
                     "scope_condition": "degraded_extractor_unavailable",
                     "finding": f"UNREADABLE_{suf.lstrip('.').upper()}: {doc.get('meta', {}).get('error', 'extractor unavailable')}",
+                    "source_full_excerpt": "",
                     "direction": "neutral",
                     "limitation": "Extractor unavailable in offline container",
                     "source_file": fp.name,
@@ -211,7 +496,18 @@ def _load_literature_entries(bib_path: Path | None, corpus_dir: Path | None) -> 
                 obj = json.loads(raw)
             except Exception:
                 continue
-            items = obj if isinstance(obj, list) else obj.get("references", obj.get("papers", obj.get("literature", [])))
+            if isinstance(obj, dict) and "DOI" in obj and ("title" in obj or "author" in obj):
+                # Crossref single-work JSON record
+                items = [{
+                    "author": (obj.get("author", [{}])[0].get("family") or fp.stem) if isinstance(obj.get("author"), list) and obj.get("author") else fp.stem,
+                    "year": str((obj.get("issued", {}).get("date-parts", [[""]])[0][0]) or ""),
+                    "doi": obj.get("DOI", ""),
+                    "title": (obj.get("title", [""])[0] if isinstance(obj.get("title"), list) else str(obj.get("title") or "")),
+                    "finding": str(obj.get("abstract") or obj.get("title", [""])[0] if isinstance(obj.get("title"), list) else ""),
+                    "method_route": "Crossref Metadata Record",
+                }]
+            else:
+                items = obj if isinstance(obj, list) else obj.get("references", obj.get("papers", obj.get("literature", [])))
             if isinstance(items, list):
                 for idx, it in enumerate(items, 1):
                     if not isinstance(it, dict):
@@ -235,6 +531,7 @@ def _load_literature_entries(bib_path: Path | None, corpus_dir: Path | None) -> 
                         "method_route": route,
                         "scope_condition": scope,
                         "finding": finding,
+                        "source_full_excerpt": f"{finding} {scope} {lim}",
                         "direction": direction,
                         "limitation": lim,
                         "source_file": fp.name,
@@ -255,7 +552,8 @@ def _load_literature_entries(bib_path: Path | None, corpus_dir: Path | None) -> 
                 entries.append({
                     "cite_key": key, "author": author, "year": year, "doi": (r.get("doi") or "").strip().lower(),
                     "title": (r.get("title") or "").strip(), "method_route": route, "scope_condition": scope,
-                    "finding": finding, "direction": direction, "limitation": lim, "source_file": fp.name,
+                    "finding": finding, "source_full_excerpt": f"{finding} {scope} {lim}",
+                    "direction": direction, "limitation": lim, "source_file": fp.name,
                 })
         elif suf == ".bib":
             for m in re.finditer(r"@\w+\{([^,\s]+),([\s\S]*?)\n\}", raw):
@@ -263,31 +561,43 @@ def _load_literature_entries(bib_path: Path | None, corpus_dir: Path | None) -> 
                 def _f(name: str) -> str:
                     fm = re.search(rf"{name}\s*=\s*[\{{\"]([^}}\"]+)[\}}\"]", body, re.I)
                     return fm.group(1).strip() if fm else ""
+                fnd = _f("abstract") or _f("note")
                 entries.append({
                     "cite_key": key, "author": _f("author"), "year": _f("year"), "doi": _f("doi").lower(),
                     "title": _f("title"), "method_route": "from_bibtex", "scope_condition": "unspecified",
-                    "finding": _f("abstract") or _f("note"), "direction": "neutral", "limitation": "", "source_file": fp.name,
+                    "finding": fnd, "source_full_excerpt": fnd, "direction": "neutral", "limitation": "", "source_file": fp.name,
                 })
-        elif suf in {".md", ".txt", ".docx", ".pdf"}:
-            # Parse structured bullet/section literature notes or extracted DOCX/PDF full text
-            for idx, ln in enumerate(raw.splitlines(), 1):
-                st = ln.strip()
-                if not st or st.startswith("#"):
-                    continue
-                cites = _extract_cites(st)
-                ym = re.search(r"\b((?:19|20)\d{2})\b", st)
-                if cites or ym or suf in {".docx", ".pdf"} and DOI_RE.search(st):
-                    key = cites[0] if cites else f"{fp.stem}:L{idx}"
-                    direction = "positive" if (POS_OUTCOME_RE.search(st) and not NEG_OUTCOME_RE.search(st)) else (
-                        "negative" if NEG_OUTCOME_RE.search(st) else "neutral"
-                    )
-                    entries.append({
-                        "cite_key": key, "author": key.split(",")[0], "year": ym.group(1) if ym else "",
-                        "doi": (DOI_RE.search(st).group(1).lower() if DOI_RE.search(st) else ""),
-                        "title": "", "method_route": f"extracted_{suf.lstrip('.')}", "scope_condition": "see_excerpt",
-                        "finding": st[:220], "direction": direction, "limitation": "", "source_file": f"{fp.name}:L{idx}",
+        elif suf in {".md", ".txt", ".docx", ".pdf", ".xml", ".html", ".htm"}:
+            # Distinguish full-text scientific articles (>2500 chars) from short literature note lists
+            if len(raw) >= 2500:
+                card = _parse_fulltext_article_card(raw, fp, read_method)
+                entries.append(card)
+                if card.get("metadata_gaps"):
+                    degraded_notes.append({
+                        "code": "LITERATURE_METADATA_UNKNOWN",
+                        "severity": "minor",
+                        "detail": f"{fp.name}: {', '.join(card['metadata_gaps'])} (year={card['year']}, conclusion_direction={card['conclusion_direction']}).",
                     })
-    return entries
+            else:
+                for idx, ln in enumerate(raw.splitlines(), 1):
+                    st = ln.strip()
+                    if not st or st.startswith("#"):
+                        continue
+                    cites = _extract_cites(st)
+                    ym = re.search(r"\b((?:19|20)\d{2})\b", st)
+                    if cites or ym or (suf in {".docx", ".pdf", ".xml", ".html"} and DOI_RE.search(st)):
+                        key = cites[0] if cites else f"{fp.stem}:L{idx}"
+                        direction = "positive" if (POS_OUTCOME_RE.search(st) and not NEG_OUTCOME_RE.search(st)) else (
+                            "negative" if NEG_OUTCOME_RE.search(st) else "unknown"
+                        )
+                        entries.append({
+                            "cite_key": key, "author": key.split(",")[0], "year": ym.group(1) if ym else "unknown",
+                            "doi": (DOI_RE.search(st).group(1).lower() if DOI_RE.search(st) else ""),
+                            "title": "", "method_route": f"extracted_{suf.lstrip('.')}", "scope_condition": "see_excerpt",
+                            "finding": st[:220], "source_full_excerpt": raw[:4000],
+                            "direction": direction, "conclusion_direction": direction, "limitation": "", "source_file": f"{fp.name}:L{idx}",
+                        })
+    return entries, degraded_notes
 
 
 def _load_own_evidence(evidence_dir: Path | None, draft_path: Path) -> dict[str, Any]:
@@ -312,7 +622,7 @@ def _load_own_evidence(evidence_dir: Path | None, draft_path: Path) -> dict[str,
                 figure_table_ids.add(f"{kind}_{fm.group(2)}")
             suf = fp.suffix.lower()
             txt = ""
-            if suf in {".docx", ".pdf"}:
+            if suf in {".docx", ".pdf", ".xml", ".html", ".htm"}:
                 doc = wio.read_document_text(fp)
                 if doc.get("ok"):
                     txt = doc.get("text", "")
@@ -373,6 +683,105 @@ def _entry_is_cited(entry: dict[str, Any], draft_text: str, draft_cites: list[st
     return False
 
 
+def _match_cited_entries(sent: str, lit_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return supplied literature entries explicitly referenced inside a draft sentence."""
+    low = sent.lower()
+    sent_cites = _extract_cites(sent)
+    matched: list[dict[str, Any]] = []
+    for e in lit_entries:
+        hit = False
+        if e.get("doi") and e["doi"] in low:
+            hit = True
+        elif e.get("cite_key") and (e["cite_key"].lower() in low or any(e["cite_key"].lower() in c.lower() for c in sent_cites)):
+            hit = True
+        else:
+            sur = re.split(r"[\s,;]+", (e.get("author") or "").strip())[0].lower()
+            yr = (e.get("year") or "").strip()
+            if sur and len(sur) >= 3 and yr and sur in low and yr in low:
+                hit = True
+        if hit:
+            matched.append(e)
+    return matched
+
+
+def _audit_citation_paraphrase_fidelity(
+    all_lines: list[tuple[int, str, str]],
+    lit_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compare numerical values, outcome direction, and scope conditions of cited paraphrases against supplied source texts."""
+    items: list[dict[str, Any]] = []
+    distorted = 0
+    if not lit_entries:
+        return {"audited_pairs": 0, "faithful_count": 0, "distorted_count": 0, "items": []}
+
+    for ln, txt, sec in all_lines:
+        for sent in [s.strip() for s in SENT_SPLIT_RE.split(txt) if s.strip()]:
+            matched_entries = _match_cited_entries(sent, lit_entries)
+            if not matched_entries:
+                continue
+            sent_pos = bool(POS_OUTCOME_RE.search(sent))
+            sent_neg = bool(NEG_OUTCOME_RE.search(sent))
+            sent_dir = "positive" if (sent_pos and not sent_neg) else ("negative" if (sent_neg and not sent_pos) else "neutral")
+            has_contrast = bool(CONTRAST_CLAUSE_RE.search(sent))
+            sent_inv = wio.extract_invariants(sent)
+            sent_nums = {
+                n["value"] for n in sent_inv.get("numbers_with_units", [])
+                if n.get("unit") in {"%", "fold", "mV", "ms", "mg/kg", "mM", "uM", "µM", "nM"}
+            }
+            sent_overgen = bool(OVERGEN_PARAPHRASE_RE.search(sent))
+
+            for e in matched_entries:
+                src_blob = f"{e.get('finding', '')} {e.get('scope_condition', '')} {e.get('limitation', '')} {e.get('source_full_excerpt', '')}"
+                issues: list[dict[str, str]] = []
+                # 1) Direction reversal check
+                src_dir = e.get("direction", "neutral")
+                if not has_contrast and src_dir in ("positive", "negative") and sent_dir in ("positive", "negative") and src_dir != sent_dir:
+                    issues.append({
+                        "code": "PARAPHRASE_DIRECTION_REVERSAL",
+                        "detail": f"Draft attributes '{sent_dir}' conclusion to {e['cite_key']}, contradicting source '{src_dir}' finding.",
+                    })
+                # 2) Quantitative drift check (only when both draft sentence and source carry quantitative metrics)
+                if sent_nums:
+                    src_inv = wio.extract_invariants(src_blob)
+                    src_all_nums = set(src_inv.get("bare_numbers", []))
+                    if src_all_nums:
+                        drifted = sorted(sent_nums - src_all_nums)
+                        if drifted:
+                            issues.append({
+                                "code": "PARAPHRASE_NUMERIC_DISTORTION",
+                                "detail": f"Numeric value(s) {drifted} attributed to {e['cite_key']} do not appear in supplied source excerpt ({e['source_file']}).",
+                            })
+                # 3) Applicability scope overgeneralization check
+                src_has_narrow_scope = bool(NARROW_SCOPE_CUE_RE.search(f"{e.get('scope_condition', '')} {e.get('finding', '')} {e.get('limitation', '')}"))
+                if sent_overgen and src_has_narrow_scope:
+                    issues.append({
+                        "code": "PARAPHRASE_SCOPE_OVERGENERALIZATION",
+                        "detail": f"Draft overgeneralizes {e['cite_key']} universally, stripping source scope boundary ('{e.get('scope_condition', '')[:80]}').",
+                    })
+
+                status = "DISTORTED" if issues else "FAITHFUL"
+                if issues:
+                    distorted += 1
+                items.append({
+                    "cite_key": e["cite_key"],
+                    "source_file": e["source_file"],
+                    "section": sec,
+                    "line": ln,
+                    "draft_sentence": sent[:180],
+                    "source_direction": src_dir,
+                    "draft_direction": sent_dir,
+                    "source_scope": e.get("scope_condition", "")[:100],
+                    "fidelity_status": status,
+                    "issues": issues,
+                })
+    return {
+        "audited_pairs": len(items),
+        "faithful_count": len(items) - distorted,
+        "distorted_count": distorted,
+        "items": items[:40],
+    }
+
+
 def audit_intro_and_related_work(
     draft_path: Path,
     *,
@@ -381,23 +790,31 @@ def audit_intro_and_related_work(
     evidence_dir: Path | None = None,
     case_id: str = "case-01",
     task_id: str = "introduction-related-work-writing",
+    case_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     read_res = wio.read_document_text(draft_path)
     if not read_res["ok"]:
         raise RuntimeError(f"Failed to read draft {draft_path}: {read_res.get('meta')}")
     draft_text = read_res["text"]
+    read_meta = read_res.get("meta") or {}
     sec_lines = _split_draft_sections(draft_text)
     intro_text = "\n".join(t for _, t in sec_lines["introduction"])
     rw_text = "\n".join(t for _, t in sec_lines["related_work"])
     all_lines = [(ln, t, sec) for sec, items in sec_lines.items() for ln, t in items]
 
-    lit_entries = _load_literature_entries(bib_path, corpus_dir)
+    lit_entries, lit_degraded = _load_literature_entries(bib_path, corpus_dir, draft_path=draft_path)
     own_ev = _load_own_evidence(evidence_dir or corpus_dir, draft_path)
     draft_cites = _extract_cites(draft_text)
 
     findings: list[dict[str, Any]] = []
     evidence_map: list[dict[str, Any]] = []
-    gaps: list[dict[str, Any]] = []
+    gaps: list[dict[str, Any]] = list(lit_degraded)
+    if read_meta.get("degraded_mode"):
+        gaps.append({
+            "code": "DRAFT_DEGRADED_EXTRACTION",
+            "severity": "minor",
+            "detail": f"Draft {draft_path.name} extracted via fallback ({read_meta.get('method')}).",
+        })
 
     def add_finding(code: str, severity: str, section: str, line: int, quote: str, message: str, remediation: str) -> None:
         fid = f"IRW-{len(findings) + 1:03d}"
@@ -690,18 +1107,54 @@ def audit_intro_and_related_work(
                 remediation="Remove fabricated/unverified citations or attach exact verified bibliography records from supplied sources.",
             )
 
+    # =========================================================================
+    # 6. Citation Paraphrase Semantic Fidelity Audit
+    # =========================================================================
+    paraphrase_fidelity = _audit_citation_paraphrase_fidelity(all_lines, lit_entries)
+    for pf in paraphrase_fidelity["items"]:
+        for iss in pf["issues"]:
+            add_finding(
+                code=iss["code"],
+                severity="blocking",
+                section=pf["section"],
+                line=pf["line"],
+                quote=pf["draft_sentence"],
+                message=iss["detail"],
+                remediation=(
+                    f"Revise the paraphrase of {pf['cite_key']} to match the exact direction, quantitative value, "
+                    f"and scope condition ({pf['source_scope'] or 'stated in source'}) in {pf['source_file']}."
+                ),
+            )
+
     if not lit_entries:
         gaps.append({"code": "NO_BIBLIOGRAPHY_CORPUS_SUPPLIED", "severity": "major", "detail": "No structured bibliography/literature files found; citation grounding could not be verified externally."})
     if not own_ev["files"]:
         gaps.append({"code": "NO_AUTHOR_EVIDENCE_FILES_SUPPLIED", "severity": "major", "detail": "No author Methods/Results/Figure/Table files supplied for 1:1 contribution verification."})
 
-    prose_audit = wio.audit_academic_prose(draft_text)
+    # =========================================================================
+    # 7. Manuscript Cleanliness Gate (strip meta-commentary, script paths, audit jargon)
+    # =========================================================================
+    cleanliness = check_and_clean_manuscript(draft_text)
+    for fl in cleanliness["flagged_lines"]:
+        add_finding(
+            code="MANUSCRIPT_META_POLLUTION",
+            severity="blocking",
+            section="manuscript_cleanliness",
+            line=fl["line"],
+            quote=fl["excerpt"],
+            message=f"Submission-facing manuscript contains non-manuscript artifact ({', '.join(fl['categories'])}).",
+            remediation="Use the cleaned submission-ready prose (introduction_and_related_work_clean.md) with all process commentary, script paths, and audit jargon stripped.",
+        )
+
+    prose_audit = wio.audit_academic_prose(cleanliness["cleaned_text"])
     blocking_n = sum(1 for f in findings if f["severity"] == "blocking")
 
     taxonomy_payload = {
         "case_id": case_id,
         "task_id": task_id,
         "draft_file": draft_path.name,
+        "read_method": read_meta.get("method", "plain_text"),
+        "task_constraints_applied": (case_contract or {}).get("task_constraints", {}),
         "four_beat_opening": four_beats,
         "four_beat_complete": all(four_beats.values()),
         "chronological_stitching_detected": chronological_stitching,
@@ -712,6 +1165,15 @@ def audit_intro_and_related_work(
         "unsubstantiated_gap_claims_count": unsubstantiated_gap_count,
         "contribution_alignment": contribution_alignment,
         "overclaimed_contributions_count": overclaimed_count,
+        "citation_paraphrase_fidelity": paraphrase_fidelity,
+        "manuscript_cleanliness": {
+            "clean": cleanliness["clean"],
+            "flagged_count": cleanliness["flagged_count"],
+            "meta_commentary_lines_found": cleanliness["meta_commentary_lines_found"],
+            "script_path_leaks_found": cleanliness["script_path_leaks_found"],
+            "audit_jargon_leaks_found": cleanliness["audit_jargon_leaks_found"],
+            "flagged_lines": cleanliness["flagged_lines"],
+        },
         "citation_coverage": {
             "draft_citations_detected": draft_cites,
             "uncovered_supplied_references": uncovered_refs,
@@ -730,6 +1192,7 @@ def audit_intro_and_related_work(
 
     return {
         "taxonomy": taxonomy_payload,
+        "cleaned_manuscript_text": cleanliness["cleaned_text"],
         "invariants": wio.extract_invariants(draft_text),
         "evidence_map": evidence_map,
         "gaps": gaps,
@@ -800,18 +1263,88 @@ def render_alignment_md(tax: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_related_work_taxonomy_md(tax: dict[str, Any]) -> str:
+    """Render an embeddable Related Work comparative taxonomy & paraphrase-fidelity Markdown sheet."""
+    lines = [
+        f"# Related Work Comparative Taxonomy & Paraphrase Fidelity ({tax['case_id']})",
+        "",
+        "Ready-to-embed dimension-grouped comparison matrix derived strictly from supplied literature files.",
+        "",
+    ]
+    if tax.get("task_constraints_applied"):
+        tc = ", ".join(f"{k}={v}" for k, v in tax["task_constraints_applied"].items())
+        lines.append(f"- **Task Constraints Consumed**: {tc}")
+    lines.extend([
+        f"- **Press-Release Four-Beat Status**: Problem=`{tax['four_beat_opening']['problem']}` | Gap=`{tax['four_beat_opening']['gap']}` | Approach=`{tax['four_beat_opening']['approach']}` | Key Finding=`{tax['four_beat_opening']['key_finding']}`",
+        f"- **Supplied Literature**: `{tax['supplied_literature_count']}` entries across `{len(tax['taxonomy_by_method_route'])}` method/theme axes",
+        f"- **Paraphrase Semantic Fidelity**: `{tax['citation_paraphrase_fidelity']['faithful_count']}/{tax['citation_paraphrase_fidelity']['audited_pairs']}` faithful (`{tax['citation_paraphrase_fidelity']['distorted_count']}` distortion(s) intercepted)",
+        "",
+        "## Table 1. Dimension-Grouped Related Work Comparison (Embeddable)",
+        "",
+        "| Method / Theme Route | Reference | Year | Applicability Scope / Regime | Reported Finding (Direction) | Documented Limitation | Cited? |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ])
+    if not tax["taxonomy_by_method_route"]:
+        lines.append("| (none) | - | - | No structured literature supplied | - | - | - |")
+    else:
+        for route, items in tax["taxonomy_by_method_route"].items():
+            for it in items:
+                fnd = it["finding_excerpt"].replace("|", "/").replace("\n", " ")[:95]
+                lim = it["limitation"].replace("|", "/").replace("\n", " ")[:70]
+                scp = it["scope_condition"].replace("|", "/").replace("\n", " ")[:60]
+                lines.append(
+                    f"| {route} | {it['cite_key']} | {it['year'] or '-'} | {scp} | {fnd} ({it['direction']}) | {lim} | {'Yes' if it['cited_in_draft'] else 'NO'} |"
+                )
+
+    lines.extend([
+        "",
+        "## Table 2. Citation Paraphrase Semantic Fidelity Audit",
+        "",
+        "| Cite Key | Draft Line | Status | Source Direction vs Draft | Source Scope Boundary | Diagnostic |",
+        "| --- | ---: | --- | --- | --- | --- |",
+    ])
+    pf_items = tax["citation_paraphrase_fidelity"]["items"]
+    if not pf_items:
+        lines.append("| - | - | N/A | - | - | No matched citation-source pairs found to audit |")
+    else:
+        for it in pf_items:
+            diag = "; ".join(x["code"] + ": " + x["detail"] for x in it["issues"]) if it["issues"] else "Consistent in direction, value, and scope"
+            lines.append(
+                f"| {it['cite_key']} | L{it['line']} | `{it['fidelity_status']}` | {it['source_direction']} vs {it['draft_direction']} | "
+                f"{(it['source_scope'] or 'unspecified').replace('|', '/')[:55]} | {diag.replace('|', '/')[:120]} |"
+            )
+
+    lines.extend([
+        "",
+        "## Bounded Research Gap Synthesis Template",
+        "- **Divergence / Shared Bottleneck**: " + (
+            "Supplied literature exhibits conflicting outcomes across narrow experimental scopes; explicitly reconcile scope boundaries before stating the gap."
+            if tax["supplied_literature_conflict_detected"]
+            else "Derive the gap strictly from the shared limitations tabulated in Column 6 above, avoiding absolute 'first ever / no prior work' claims."
+        ),
+        "- **Four-Beat Opening Checklist**: Ensure Introduction opens with concrete Problem -> Cited Gap -> Proposed Approach -> Quantitative Key Finding.",
+        "",
+    ])
+    return "\n".join(lines)
+
+
 def _discover_inputs(input_dir: Path) -> tuple[Path, str]:
     case_id = "case-01"
     cj = input_dir / "case.json"
     if cj.is_file():
         try:
-            case_id = str(json.loads(cj.read_text(encoding="utf-8")).get("case_id") or case_id)
+            cobj = json.loads(cj.read_text(encoding="utf-8"))
+            case_id = str(cobj.get("case_id") or case_id)
+            for key in ("draft", "manuscript", "primary_manuscript", "input_file"):
+                val = cobj.get(key)
+                if isinstance(val, str) and (input_dir / val.strip()).is_file():
+                    return input_dir / val.strip(), case_id
         except Exception:
             pass
     cands = [
         p for p in sorted(input_dir.rglob("*"))
         if p.is_file()
-        and p.suffix.lower() in {".md", ".txt", ".tex", ".docx"}
+        and p.suffix.lower() in {".md", ".txt", ".tex", ".docx", ".pdf", ".xml", ".html", ".htm"}
         and p.name.lower() not in {"task.md", "readme.md"}
         and not any(k in p.name.lower() for k in ("bib", "ref", "lit"))
     ]
@@ -823,27 +1356,30 @@ def _discover_inputs(input_dir: Path) -> tuple[Path, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Introduction & Related Work four-beat, taxonomy, gap, and contribution auditor.")
-    parser.add_argument("--draft", default="", help="Introduction/Related Work draft path (.md/.tex/.txt/.docx).")
-    parser.add_argument("--bib", default="", help="Optional structured literature/bibliography file (.json/.csv/.bib/.md).")
+    parser = argparse.ArgumentParser(description="Introduction & Related Work four-beat, taxonomy, gap, paraphrase-fidelity, and contribution auditor.")
+    parser.add_argument("--draft", default="", help="Introduction/Related Work draft path (.md/.tex/.txt/.docx/.pdf/.xml/.html).")
+    parser.add_argument("--bib", default="", help="Optional structured literature/bibliography file (.json/.csv/.bib/.md/.xml/.html/.pdf).")
     parser.add_argument("--corpus-dir", default="", help="Directory containing literature sources and/or author evidence files.")
     parser.add_argument("--evidence-dir", default="", help="Directory containing author Methods/Results/Figure/Table files.")
     parser.add_argument("--input-dir", default="", help="Auto-discover draft, literature, and evidence under /input.")
-    parser.add_argument("--out-dir", required=True, help="Output directory for taxonomy JSON, alignment MD, and result.json.")
+    parser.add_argument("--out-dir", required=True, help="Output directory for taxonomy JSON/MD, alignment MD, and result.json.")
     parser.add_argument("--case-id", default="", help="Override case_id.")
     args = parser.parse_args(argv)
 
-    if args.input_dir:
-        in_dir = Path(args.input_dir)
+    in_dir: Path | None = Path(args.input_dir) if args.input_dir else None
+    if in_dir:
         draft_p, det_cid = _discover_inputs(in_dir)
-        case_id = args.case_id or det_cid
+        case_contract = wio.load_case_contract(in_dir)
+        case_id = args.case_id or case_contract.get("case_id") or det_cid
         corpus_p = Path(args.corpus_dir) if args.corpus_dir else in_dir
         ev_p = Path(args.evidence_dir) if args.evidence_dir else in_dir
     elif args.draft:
         draft_p = Path(args.draft)
-        case_id = args.case_id or draft_p.stem
         corpus_p = Path(args.corpus_dir) if args.corpus_dir else None
         ev_p = Path(args.evidence_dir) if args.evidence_dir else corpus_p
+        contract_dir = corpus_p if (corpus_p and ((corpus_p / "case.json").is_file() or (corpus_p / "task.md").is_file())) else draft_p.parent
+        case_contract = wio.load_case_contract(contract_dir)
+        case_id = args.case_id or case_contract.get("case_id") or draft_p.stem
     else:
         parser.error("Provide --draft or --input-dir.")
 
@@ -857,27 +1393,43 @@ def main(argv: list[str] | None = None) -> int:
         corpus_dir=corpus_p,
         evidence_dir=ev_p,
         case_id=case_id,
+        case_contract=case_contract,
     )
     tax = res["taxonomy"]
     align_md = render_alignment_md(tax)
+    tax_md = render_related_work_taxonomy_md(tax)
 
     (out_dir / "related_work_taxonomy.json").write_text(json.dumps(tax, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (out_dir / "related_work_taxonomy.md").write_text(tax_md, encoding="utf-8")
     (out_dir / "gap_contribution_alignment.md").write_text(align_md, encoding="utf-8")
+    clean_ms_name = "introduction_and_related_work_clean.md"
+    (out_dir / clean_ms_name).write_text(res["cleaned_manuscript_text"], encoding="utf-8")
 
-    sources_list = [{"file": draft_p.name, "role": "draft_manuscript"}]
+    sources_list = [{"file": draft_p.name, "role": "draft_manuscript", "read_method": tax.get("read_method")}]
     for s in res["lit_sources"]:
         sources_list.append({"file": s, "role": "supplied_literature"})
     for s in res["own_evidence_files"]:
         sources_list.append({"file": s, "role": "author_methods_results_evidence"})
 
+    artifacts_list = [
+        "result.json",
+        clean_ms_name,
+        "related_work_taxonomy.json",
+        "related_work_taxonomy.md",
+        "gap_contribution_alignment.md",
+    ]
     result_payload = wio.build_writing_result(
         case_id=case_id,
         task_id="introduction-related-work-writing",
         deliverable={
             "type": "introduction_related_work_taxonomy_and_gap_alignment",
+            "manuscript_clean_md": clean_ms_name,
+            "manuscript_cleanliness_passed": tax["manuscript_cleanliness"]["clean"],
             "taxonomy_json": "related_work_taxonomy.json",
+            "taxonomy_md": "related_work_taxonomy.md",
             "alignment_md": "gap_contribution_alignment.md",
             "four_beat_complete": tax["four_beat_complete"],
+            "paraphrase_distorted_count": tax["citation_paraphrase_fidelity"]["distorted_count"],
             "blocking_count": tax["blocking_count"],
         },
         preserved_facts={
@@ -892,11 +1444,11 @@ def main(argv: list[str] | None = None) -> int:
             {"finding_id": f["finding_id"], "code": f["code"], "line": f["line"], "status": "audit_flagged"}
             for f in tax["findings"]
         ],
-        artifacts=["result.json", "related_work_taxonomy.json", "gap_contribution_alignment.md"],
+        artifacts=artifacts_list,
         sources=sources_list,
         gaps=res["gaps"],
         limitations=[
-            "Automated checks verify lexical/structural grounding of gaps, citations, and contributions against supplied files; deep domain novelty remains bounded strictly by the supplied literature corpus.",
+            "Automated checks verify lexical/structural grounding of gaps, citations, paraphrase fidelity, and contributions against supplied files; deep domain novelty remains bounded strictly by the supplied literature corpus.",
         ],
         verification={
             "engine": "intro_related_work_auditor.py",
@@ -904,9 +1456,15 @@ def main(argv: list[str] | None = None) -> int:
             "chronological_stitching_detected": tax["chronological_stitching_detected"],
             "unsubstantiated_gap_claims_count": tax["unsubstantiated_gap_claims_count"],
             "overclaimed_contributions_count": tax["overclaimed_contributions_count"],
+            "paraphrase_audited_pairs": tax["citation_paraphrase_fidelity"]["audited_pairs"],
+            "paraphrase_distorted_count": tax["citation_paraphrase_fidelity"]["distorted_count"],
+            "manuscript_cleanliness_passed": tax["manuscript_cleanliness"]["clean"],
+            "manuscript_cleanliness_flagged_count": tax["manuscript_cleanliness"]["flagged_count"],
             "unverified_citations_count": len(tax["citation_coverage"]["unverified_citations"]),
             "blocking_count": tax["blocking_count"],
+            "task_constraints_consumed": bool(case_contract.get("task_constraints")),
         },
+        case_contract=case_contract,
     )
     (out_dir / "result.json").write_text(json.dumps(result_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -917,9 +1475,12 @@ def main(argv: list[str] | None = None) -> int:
         "chronological_stitching_detected": tax["chronological_stitching_detected"],
         "unsubstantiated_gap_claims": tax["unsubstantiated_gap_claims_count"],
         "overclaimed_contributions": tax["overclaimed_contributions_count"],
+        "paraphrase_audited_pairs": tax["citation_paraphrase_fidelity"]["audited_pairs"],
+        "paraphrase_distorted": tax["citation_paraphrase_fidelity"]["distorted_count"],
+        "manuscript_cleanliness_passed": tax["manuscript_cleanliness"]["clean"],
         "blocking_count": tax["blocking_count"],
         "findings_count": tax["findings_count"],
-        "artifacts": ["result.json", "related_work_taxonomy.json", "gap_contribution_alignment.md"],
+        "artifacts": artifacts_list,
     }, ensure_ascii=False, indent=2))
     return 0
 

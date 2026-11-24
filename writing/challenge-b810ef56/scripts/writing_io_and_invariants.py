@@ -8,6 +8,7 @@ air-gapped Linux Docker containers, with optional enhancement when `soffice`,
 from __future__ import annotations
 
 import csv
+import html
 import io
 import json
 import os
@@ -17,7 +18,9 @@ import subprocess
 import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape as xml_escape
@@ -57,12 +60,43 @@ RE_CITE_AUTHOR_YEAR = re.compile(
     r"(?:;\s*[A-Z][A-Za-z\-]+(?:\s+(?:et\s+al\.|and\s+[A-Z][A-Za-z\-]+|&\s+[A-Z][A-Za-z\-]+))?,\s*(?:19|20)\d{2}[a-z]?)*)\)"
 )
 
-HEDGED_MARKERS = [
-    r"\bmay\b", r"\bmight\b", r"\bcould\b", r"\bpossibly\b", r"\bpotentially\b",
+RE_SENT_SPLIT_INV = re.compile(r"(?<=[.!?。！？])\s+|\n+")
+
+TENTATIVE_MODAL_MARKERS = [
+    ("may_be_associated", r"\bmay\s+be\s+associated\s+with\b"),
+    ("may", r"\bmay\b"),
+    ("might", r"\bmight\b"),
+    ("could", r"\bcould\b"),
+    ("possibly", r"\bpossibly\b"),
+    ("potentially", r"\bpotentially\b"),
+    ("preliminary", r"\bpreliminar(?:y|ily)\b"),
+    ("trend_toward", r"\btrend(?:ed|ing)?\s+toward\b"),
+    ("not_stat_sig", r"\bnot\s+statistically\s+significant\b"),
+    ("zh_keneng", r"可能"),
+    ("zh_huoxu", r"或许"),
+    ("zh_qingxiang", r"倾向于"),
+    ("zh_weida", r"未达(?:到)?统计学显著"),
+]
+
+ASSOCIATIVE_INTERP_MARKERS = [
+    ("is_associated", r"\b(?:is|are|was|were)\s+associated\s+with\b"),
+    ("associated_with", r"\bassociated\s+with\b"),
+    ("correlates_with", r"\bcorrelat(?:ed|es|ion)\s+with\b"),
+    ("linked_to", r"\blinked\s+to\b"),
+    ("suggests", r"\bsuggest(?:s|ed|ing)?\b"),
+    ("indicates", r"\bindicat(?:es|ed|ing)\b"),
+    ("appears_to", r"\bappear(?:s|ed)?\s+to\b"),
+    ("tends_to", r"\btend(?:s|ed)?\s+to\b"),
+    ("demonstrates", r"\bdemonstrat(?:es|ed|ing)\b"),
+    ("zh_tishi", r"提示"),
+    ("zh_xiangguan", r"相关"),
+    ("zh_bansui", r"伴随"),
+]
+
+HEDGED_MARKERS = [p for _, p in TENTATIVE_MODAL_MARKERS] + [
     r"\bsuggest(?:s|ed|ing)?\b", r"\bappear(?:s|ed)?\s+to\b", r"\btend(?:s|ed)?\s+to\b",
     r"\bassociated\s+with\b", r"\bcorrelat(?:ed|es|ion)\s+with\b", r"\blinked\s+to\b",
-    r"\bpreliminar(?:y|ily)\b", r"\btrend(?:ed|ing)?\s+toward\b", r"\bnot\s+statistically\s+significant\b",
-    r"可能", r"提示", r"倾向于", r"相关", r"伴随", r"尚需进一步验证", r"未达(?:到)?统计学显著",
+    r"提示", r"相关", r"伴随", r"尚需进一步验证",
 ]
 STRONG_CAUSAL_MARKERS = [
     r"\bproves?\b", r"\bproven\b", r"\bcauses?\b", r"\bcaused\b", r"\bdriving\b",
@@ -78,57 +112,109 @@ NEGATION_MARKERS = [
 ]
 
 
+def _canonicalize_unit(unit: str) -> str:
+    """Case-sensitive unit canonicalization (never lowercases: preserves mM vs mm, mV vs MV, M vs m)."""
+    u = unit.strip()
+    if not u:
+        return ""
+    u = u.replace("µ", "u").replace("μ", "u").replace("℃", "°C").replace("×", "x")
+    return u
+
+
 def _normalize_num_token(raw: str) -> str:
+    """Preserve exact numeric precision via Decimal (no 6-sig-fig float :g truncation)."""
     s = raw.replace(",", "").strip()
     if "±" in s:
         parts = [p.strip() for p in s.split("±", 1)]
         return f"{_normalize_num_token(parts[0])}±{_normalize_num_token(parts[1])}"
     try:
-        val = float(s)
-        if val == int(val) and "." not in s:
-            return str(int(val))
-        return f"{val:g}"
-    except ValueError:
+        d = Decimal(s)
+        if not d.is_finite():
+            return s
+        # Format exact decimal without scientific truncation, stripping redundant trailing fractional zeros
+        sign, digits, exp = d.as_tuple()
+        if exp >= 0:
+            # Keep exact integer value without exponent
+            return f"{'-' if sign else ''}{''.join(str(x) for x in digits)}{'0' * exp}"
+        norm_str = format(d, "f")
+        if "." in norm_str:
+            norm_str = norm_str.rstrip("0").rstrip(".")
+        return norm_str or "0"
+    except (InvalidOperation, ValueError):
         return s
 
 
 def classify_epistemic_strength(text: str) -> dict[str, Any]:
-    """Classify epistemic/causal strength level of a sentence or passage."""
+    """Classify epistemic/causal strength level AND exact modal lexical inventory (tentative vs associative vs strong)."""
+    tentative_hits = [name for name, p in TENTATIVE_MODAL_MARKERS if re.search(p, text, re.I)]
+    assoc_hits = [name for name, p in ASSOCIATIVE_INTERP_MARKERS if re.search(p, text, re.I)]
     hedged_hits = [p for p in HEDGED_MARKERS if re.search(p, text, re.I)]
     strong_hits = [p for p in STRONG_CAUSAL_MARKERS if re.search(p, text, re.I)]
     neg_hits = [p for p in NEGATION_MARKERS if re.search(p, text, re.I)]
     if strong_hits and not hedged_hits:
         level = "strong_causal"
-        rank = 3
+        rank = 4
     elif strong_hits and hedged_hits:
         level = "mixed_causal_and_hedged"
+        rank = 3
+    elif assoc_hits and not tentative_hits:
+        level = "associative_or_interpretive"
         rank = 2
-    elif hedged_hits:
-        level = "hedged_or_associative"
+    elif tentative_hits:
+        level = "tentative_hedged"
         rank = 1
     else:
         level = "neutral_descriptive"
-        rank = 1
+        rank = 2
     return {
         "level": level,
         "rank": rank,
+        "tentative_modals": sorted(set(tentative_hits)),
+        "associative_modals": sorted(set(assoc_hits)),
         "hedged_count": len(hedged_hits),
         "strong_causal_count": len(strong_hits),
         "negation_count": len(neg_hits),
     }
 
 
+def _extract_sentence_bindings(text: str) -> list[dict[str, Any]]:
+    """Extract ordered per-sentence numeric/unit sequence and local entity-context tokens for swap detection."""
+    out: list[dict[str, Any]] = []
+    for sent in RE_SENT_SPLIT_INV.split(text):
+        s = sent.strip()
+        if not s:
+            continue
+        seq: list[dict[str, Any]] = []
+        for m in RE_STAT_NUM.finditer(s):
+            raw_num, unit = m.group(1), _canonicalize_unit(m.group(2) or "")
+            norm = _normalize_num_token(raw_num)
+            if not unit and re.fullmatch(r"(?:19|20)\d{2}", norm):
+                continue
+            # Local entity/group window (45 chars preceding the number, retaining 1-letter group labels like Cohort A / Group B)
+            left = s[max(0, m.start() - 45) : m.start()]
+            ent_toks = [
+                w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9_\-]*|[\u4e00-\u9fff]{2,}", left)
+                if w.lower() not in {"the", "and", "for", "with", "from", "was", "were", "are", "that", "this", "mean", "median", "value", "of", "in", "to", "by", "at", "achieved", "showed", "reached", "had", "is"}
+            ][-3:]
+            seq.append({"value": norm, "raw": raw_num.strip(), "unit": unit, "local_entities": ent_toks})
+        ep = classify_epistemic_strength(s)
+        out.append({"sentence": s, "numbers": seq, "epistemic": ep})
+    return out
+
+
 def extract_invariants(text: str) -> dict[str, Any]:
-    """Extract numbers, units, p-values, sample sizes, DOIs, citations, figure refs, and epistemic state."""
+    """Extract exact-precision numbers, case-sensitive units, p-values, sample sizes, DOIs, citations, figure refs, and epistemic state."""
     numbers_with_units: list[dict[str, str]] = []
+    ordered_numbers: list[dict[str, str]] = []
     bare_numbers: set[str] = set()
     for m in RE_STAT_NUM.finditer(text):
-        raw_num, unit = m.group(1), (m.group(2) or "").strip()
+        raw_num, unit = m.group(1), _canonicalize_unit(m.group(2) or "")
         norm = _normalize_num_token(raw_num)
         # Skip standalone 4-digit years when no unit is attached
         if not unit and re.fullmatch(r"(?:19|20)\d{2}", norm):
             continue
         bare_numbers.add(norm)
+        ordered_numbers.append({"value": norm, "raw": raw_num.strip(), "unit": unit})
         if unit:
             numbers_with_units.append({"value": norm, "unit": unit, "raw": m.group(0).strip()})
 
@@ -150,6 +236,7 @@ def extract_invariants(text: str) -> dict[str, Any]:
 
     return {
         "numbers_with_units": numbers_with_units,
+        "ordered_numbers": ordered_numbers,
         "bare_numbers": sorted(bare_numbers),
         "pvalues": pvalues,
         "sample_sizes": sorted(set(sample_sizes)),
@@ -163,7 +250,7 @@ def extract_invariants(text: str) -> dict[str, Any]:
 
 
 def diff_invariants(source_text: str, revised_text: str) -> dict[str, Any]:
-    """Compare source vs revised text to catch dropped/altered numbers, units, citations, negations, or modality drift."""
+    """Compare source vs revised text with exact precision, case-sensitive units, sentence-level order/group swap, and modal drift."""
     src = extract_invariants(source_text)
     rev = extract_invariants(revised_text)
     violations: list[dict[str, Any]] = []
@@ -177,8 +264,9 @@ def diff_invariants(source_text: str, revised_text: str) -> dict[str, Any]:
     if added_nums:
         violations.append({"code": "NUMERIC_UNGROUNDED_ADDITION", "severity": "high", "items": added_nums})
 
-    src_units = {(x["value"], x["unit"].lower()) for x in src["numbers_with_units"]}
-    rev_units = {(x["value"], x["unit"].lower()) for x in rev["numbers_with_units"]}
+    # Strictly CASE-SENSITIVE unit matching (mM != mm, mV != MV, M != m)
+    src_units = {(x["value"], x["unit"]) for x in src["numbers_with_units"]}
+    rev_units = {(x["value"], x["unit"]) for x in rev["numbers_with_units"]}
     changed_units = sorted(src_units - rev_units)
     if changed_units:
         violations.append({
@@ -187,8 +275,47 @@ def diff_invariants(source_text: str, revised_text: str) -> dict[str, Any]:
             "items": [f"{v} {u}" for v, u in changed_units],
         })
 
-    src_p = {(x["metric"].lower(), x["op"], x["value"]) for x in src["pvalues"]}
-    rev_p = {(x["metric"].lower(), x["op"], x["value"]) for x in rev["pvalues"]}
+    # Sentence-level ordered numeric & entity-group swap detection
+    src_sents = _extract_sentence_bindings(source_text)
+    rev_sents = _extract_sentence_bindings(revised_text)
+    if len(src_sents) == len(rev_sents):
+        for idx_s, (ss, rs) in enumerate(zip(src_sents, rev_sents), start=1):
+            s_vals = [x["value"] for x in ss["numbers"]]
+            r_vals = [x["value"] for x in rs["numbers"]]
+            if len(s_vals) >= 2 and sorted(s_vals) == sorted(r_vals) and s_vals != r_vals:
+                # Compare full local entity tuple (e.g., ('cohort','a') -> 12.4) so single-letter group swaps always fire
+                s_pairs = {(tuple(x["local_entities"][-2:]), x["value"]) for x in ss["numbers"] if x["local_entities"]}
+                r_pairs = {(tuple(x["local_entities"][-2:]), x["value"]) for x in rs["numbers"] if x["local_entities"]}
+                if s_pairs != r_pairs or not s_pairs:
+                    violations.append({
+                        "code": "NUMERIC_ORDER_OR_GROUP_SWAP",
+                        "severity": "high",
+                        "sentence_index": idx_s,
+                        "source_sequence": s_vals,
+                        "revised_sequence": r_vals,
+                        "detail": f"Sentence {idx_s} preserves the same numeric multiset {sorted(s_vals)} but swaps value order/group binding ({s_vals} -> {r_vals}).",
+                    })
+            # Sentence-level modal downgrade/upgrade & negation scope check
+            s_ep, r_ep = ss["epistemic"], rs["epistemic"]
+            if s_ep["tentative_modals"] and not r_ep["tentative_modals"]:
+                violations.append({
+                    "code": "EPISTEMIC_MODAL_UPGRADE_OR_HEDGE_REMOVED",
+                    "severity": "high",
+                    "sentence_index": idx_s,
+                    "dropped_modals": s_ep["tentative_modals"],
+                    "revised_modals": r_ep["associative_modals"],
+                    "detail": f"Sentence {idx_s} stripped tentative modal(s) {s_ep['tentative_modals']} (e.g., may->is/suggests).",
+                })
+            if (s_ep["negation_count"] > 0) != (r_ep["negation_count"] > 0):
+                violations.append({
+                    "code": "NEGATION_SCOPE_POLARITY_FLIP",
+                    "severity": "high",
+                    "sentence_index": idx_s,
+                    "detail": f"Sentence {idx_s} flipped negation polarity ({s_ep['negation_count']} -> {r_ep['negation_count']}).",
+                })
+
+    src_p = {(x["metric"].lower(), x["op"], _normalize_num_token(x["value"])) for x in src["pvalues"]}
+    rev_p = {(x["metric"].lower(), x["op"], _normalize_num_token(x["value"])) for x in rev["pvalues"]}
     if src_p != rev_p:
         violations.append({
             "code": "PVALUE_OR_SIGNIFICANCE_MUTATION",
@@ -212,17 +339,25 @@ def diff_invariants(source_text: str, revised_text: str) -> dict[str, Any]:
     if src_cites - rev_cites:
         violations.append({"code": "CITATION_DROPPED", "severity": "high", "items": sorted(src_cites - rev_cites)})
 
-    src_figs = {f.lower() for f in src["figure_table_refs"]}
-    rev_figs = {f.lower() for f in rev["figure_table_refs"]}
+    # Elevate dropped Figure/Table references to HIGH (blocking)
+    src_figs = {re.sub(r"\s+", " ", f.lower()) for f in src["figure_table_refs"]}
+    rev_figs = {re.sub(r"\s+", " ", f.lower()) for f in rev["figure_table_refs"]}
     if src_figs - rev_figs:
-        violations.append({"code": "FIGURE_TABLE_REF_DROPPED", "severity": "medium", "items": sorted(src_figs - rev_figs)})
+        violations.append({"code": "FIGURE_TABLE_REF_DROPPED", "severity": "high", "items": sorted(src_figs - rev_figs)})
 
-    # Epistemic/modality drift detection
+    # Document-level epistemic/modality drift detection (covers multi-sentence split/merge)
     if rev["epistemic"]["rank"] > src["epistemic"]["rank"]:
         violations.append({
             "code": "EPISTEMIC_STRENGTH_ESCALATION",
             "severity": "high",
             "detail": f"Strength escalated from {src['epistemic']['level']} to {rev['epistemic']['level']}.",
+        })
+    if src["epistemic"]["tentative_modals"] and not rev["epistemic"]["tentative_modals"] and not any(v["code"] == "EPISTEMIC_MODAL_UPGRADE_OR_HEDGE_REMOVED" for v in violations):
+        violations.append({
+            "code": "EPISTEMIC_MODAL_UPGRADE_OR_HEDGE_REMOVED",
+            "severity": "high",
+            "dropped_modals": src["epistemic"]["tentative_modals"],
+            "detail": f"All tentative hedging modals removed ({src['epistemic']['tentative_modals']} -> none).",
         })
     if src["epistemic"]["hedged_count"] > 0 and rev["epistemic"]["hedged_count"] == 0:
         violations.append({
@@ -230,7 +365,7 @@ def diff_invariants(source_text: str, revised_text: str) -> dict[str, Any]:
             "severity": "high",
             "detail": f"All hedging qualifiers removed ({src['epistemic']['hedged_count']} -> 0).",
         })
-    if src["epistemic"]["negation_count"] != rev["epistemic"]["negation_count"]:
+    if src["epistemic"]["negation_count"] != rev["epistemic"]["negation_count"] and not any(v["code"] == "NEGATION_SCOPE_POLARITY_FLIP" for v in violations):
         violations.append({
             "code": "NEGATION_COUNT_SHIFT",
             "severity": "medium",
@@ -903,27 +1038,205 @@ def render_docx_preview(docx_path: Path, out_dir: Path) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 4. General Input Corpus Reader & structured Output Contract Helper
+# 4. General Input Corpus Reader & Structured Output Contract Helper
 # ---------------------------------------------------------------------------
 
+def _extract_pdf_text_stdlib(path: Path) -> str:
+    """Pure-stdlib fallback PDF text extractor for uncompressed/FlateDecode Tj/TJ streams."""
+    raw = path.read_bytes()
+    chunks: list[str] = []
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", raw, re.S):
+        blob = m.group(1)
+        data = blob
+        try:
+            data = zlib.decompress(blob)
+        except Exception:
+            try:
+                data = zlib.decompress(blob, -zlib.MAX_WBITS)
+            except Exception:
+                pass
+        if b"Tj" not in data and b"TJ" not in data:
+            continue
+        text_stream = data.decode("latin-1", errors="ignore")
+        # Extract literal strings inside (...) before Tj or inside [...] TJ
+        for sm in re.finditer(r"\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*Tj|\[(.*?)\]\s*TJ", text_stream, re.S):
+            if sm.group(1) is not None:
+                s = sm.group(1)
+                s = s.replace(r"\(", "(").replace(r"\)", ")").replace(r"\\", "\\")
+                chunks.append(s)
+            elif sm.group(2) is not None:
+                parts = re.findall(r"\(([^()\\]*(?:\\.[^()\\]*)*)\)", sm.group(2))
+                joined = "".join(p.replace(r"\(", "(").replace(r"\)", ")").replace(r"\\", "\\") for p in parts)
+                if joined:
+                    chunks.append(joined)
+        if len(chunks) > 4000:
+            break
+    out = re.sub(r"[ \t]+", " ", "\n".join(chunks)).strip()
+    printable = sum(1 for c in out if c.isalnum() or c in " .,;:%+-()[]/")
+    if len(out) >= 40 and printable / max(1, len(out)) >= 0.55:
+        return out
+    return ""
+
+
+def _extract_jats_xml_or_html(path: Path) -> tuple[str, dict[str, Any]]:
+    """Extract structured Markdown-like full text from EuropePMC JATS XML or academic HTML."""
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    suf = path.suffix.lower()
+    if suf == ".xml":
+        try:
+            root = ET.fromstring(raw)
+            lines: list[str] = []
+            # Title & DOI
+            title_el = root.find(".//article-title")
+            if title_el is not None:
+                t = " ".join("".join(title_el.itertext()).split())
+                if t:
+                    lines.append(f"# {t}")
+            for aid in root.findall(".//article-id"):
+                if aid.attrib.get("pub-id-type") == "doi" and aid.text:
+                    lines.append(f"DOI: {aid.text.strip()}")
+            # Abstract
+            abs_el = root.find(".//abstract")
+            if abs_el is not None:
+                lines.append("\n## Abstract")
+                for p in abs_el.findall(".//p"):
+                    pt = " ".join("".join(p.itertext()).split())
+                    if pt:
+                        lines.append(pt)
+            # Body sections
+            body = root.find(".//body")
+            if body is not None:
+                for sec in body.findall(".//sec"):
+                    st = sec.find("title")
+                    if st is not None:
+                        ht = " ".join("".join(st.itertext()).split())
+                        if ht:
+                            lines.append(f"\n## {ht}")
+                    for child in list(sec):
+                        tag = child.tag.split("}")[-1]
+                        if tag == "p":
+                            pt = " ".join("".join(child.itertext()).split())
+                            if pt:
+                                lines.append(pt)
+                        elif tag in ("table-wrap", "fig"):
+                            cap = child.find(".//caption")
+                            if cap is not None:
+                                ct = " ".join("".join(cap.itertext()).split())
+                                if ct:
+                                    lines.append(ct)
+            # References
+            refs = root.findall(".//ref-list//ref")
+            if refs:
+                lines.append("\n## References")
+                for idx, ref in enumerate(refs[:80], 1):
+                    rt = " ".join("".join(ref.itertext()).split())
+                    if rt:
+                        lines.append(f"[{idx}] {rt}")
+            text = "\n".join(lines).strip()
+            if len(text) >= 60:
+                return text, {"extractor": "stdlib_jats_xml", "ref_count": len(refs)}
+        except ET.ParseError:
+            pass
+    # Fallback HTML / generic XML strip
+    cleaned = re.sub(r"<(?:script|style)[^>]*>.*?</(?:script|style)>", " ", raw, flags=re.S | re.I)
+    cleaned = re.sub(r"<(h[1-4])[^>]*>(.*?)</\1>", lambda m: f"\n## {re.sub(r'<[^>]+>', '', m.group(2)).strip()}\n", cleaned, flags=re.S | re.I)
+    cleaned = re.sub(r"</(?:p|div|li|tr|section)>", "\n", cleaned, flags=re.I)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = html.unescape(cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, {"extractor": f"stdlib_{suf.lstrip('.')}_text"}
+
+
 def read_document_text(path: Path) -> dict[str, Any]:
-    """Read text from MD/TXT/TEX/JSON/CSV/BIB/DOCX/PDF with honest degradation."""
+    """Read text from MD/TXT/TEX/JSON/CSV/BIB/DOCX/XML/HTML/PDF with stdlib fallback & honest degradation."""
     suf = path.suffix.lower()
     if suf == ".docx":
         info = inspect_docx_ooxml(path)
         return {"ok": info.get("ok", False), "format": "docx", "text": info.get("full_text", ""), "meta": info}
+    if suf in {".xml", ".html", ".htm"}:
+        try:
+            text, meta = _extract_jats_xml_or_html(path)
+            return {"ok": bool(text), "format": suf.lstrip("."), "text": text, "meta": meta}
+        except OSError as exc:
+            return {"ok": False, "format": suf.lstrip("."), "text": "", "meta": {"error": str(exc)}}
     if suf == ".pdf":
         pdftotext = shutil.which("pdftotext")
+        pdf_timeout_note = None
         if pdftotext:
-            p = subprocess.run([pdftotext, str(path), "-"], capture_output=True, text=True, timeout=60)
-            if p.returncode == 0:
-                return {"ok": True, "format": "pdf", "text": p.stdout, "meta": {"extractor": "pdftotext"}}
-        return {"ok": False, "format": "pdf", "text": "", "meta": {"error": "pdftotext unavailable; cannot extract PDF text reliably"}}
+            try:
+                p = subprocess.run([pdftotext, str(path), "-"], capture_output=True, text=True, timeout=60)
+                if p.returncode == 0 and p.stdout.strip():
+                    return {"ok": True, "format": "pdf", "text": p.stdout, "meta": {"extractor": "pdftotext"}}
+            except subprocess.TimeoutExpired:
+                pdf_timeout_note = "pdftotext_timeout_after_60s"
+        fb = _extract_pdf_text_stdlib(path)
+        if fb:
+            return {
+                "ok": True,
+                "format": "pdf",
+                "text": fb,
+                "meta": {
+                    "extractor": "stdlib_pdf_stream_fallback",
+                    "fallback_used": True,
+                    "note": pdf_timeout_note or "pdftotext unavailable; extracted uncompressed/FlateDecode PDF streams via Python stdlib",
+                },
+            }
+        return {
+            "ok": False,
+            "format": "pdf",
+            "text": "",
+            "meta": {"error": pdf_timeout_note or "pdftotext unavailable and stdlib stream fallback extracted no readable text (likely scanned/encrypted/CID-encoded PDF)"},
+        }
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
         return {"ok": True, "format": suf.lstrip(".") or "text", "text": text, "meta": {"bytes": path.stat().st_size}}
     except OSError as exc:
         return {"ok": False, "format": suf.lstrip("."), "text": "", "meta": {"error": str(exc)}}
+
+
+read_text_auto = read_document_text
+
+
+def load_case_contract(input_dir: Path | None) -> dict[str, Any]:
+    """Consume /input/case.json and /input/task.md to capture case_id, dynamic output_contract keys, and audience/format constraints."""
+    info: dict[str, Any] = {
+        "case_id": None,
+        "output_contract_keys": [],
+        "task_constraints": {},
+        "task_excerpt": "",
+    }
+    if not input_dir or not input_dir.is_dir():
+        return info
+    cj = input_dir / "case.json"
+    if cj.is_file():
+        try:
+            obj = json.loads(cj.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(obj, dict):
+                if obj.get("case_id"):
+                    info["case_id"] = str(obj["case_id"])
+                oc = obj.get("output_contract")
+                if isinstance(oc, dict):
+                    info["output_contract_keys"] = list(oc.keys())
+                for k in ("audience", "genre", "target_journal", "citation_style", "word_limit", "language", "journal_structure"):
+                    if obj.get(k) not in (None, ""):
+                        info["task_constraints"][k] = obj[k]
+        except Exception:
+            pass
+    tm = input_dir / "task.md"
+    if tm.is_file():
+        txt = tm.read_text(encoding="utf-8", errors="replace")
+        info["task_excerpt"] = txt[:600].strip()
+        for key, pat in (
+            ("target_journal", r"(?:target\s+journal|目标期刊)\s*[:：=]\s*([^\n。;]+)"),
+            ("citation_style", r"(?:citation\s+style|reference\s+style|引用格式|参考文献格式)\s*[:：=]\s*([^\n。;]+)"),
+            ("audience", r"(?:audience|受众|读者)\s*[:：=]\s*([^\n。;]+)"),
+            ("word_limit", r"(?:word\s+limit|字数(?:上限|限制|要求))\s*[:：=]\s*([^\n。;]+)"),
+        ):
+            m = re.search(pat, txt, re.I)
+            if m and key not in info["task_constraints"]:
+                info["task_constraints"][key] = m.group(1).strip()
+    return info
 
 
 def build_writing_result(
@@ -940,23 +1253,39 @@ def build_writing_result(
     limitations: list[str],
     verification: dict[str, Any],
     status: str | None = None,
+    case_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a output-contract-compliant result.json payload preserving all required output_contract keys."""
-    final_status = status or ("partial_with_gaps" if gaps else "ok")
-    return {
-        "case_id": case_id,
+    """Build a structured output-contract-compliant result.json payload preserving all required and dynamic output_contract keys."""
+    final_gaps = list(gaps)
+    payload: dict[str, Any] = {
+        "case_id": (case_contract or {}).get("case_id") or case_id,
         "task_id": task_id,
-        "status": final_status,
+        "status": status or ("partial_with_gaps" if final_gaps else "ok"),
         "deliverable": deliverable,
         "preserved_facts": preserved_facts,
         "evidence_map": evidence_map,
         "change_log": change_log,
         "artifacts": artifacts,
         "sources": sources,
-        "gaps": gaps,
+        "gaps": final_gaps,
         "limitations": limitations,
         "verification": verification,
     }
+    if case_contract:
+        if case_contract.get("task_constraints"):
+            payload["task_constraints_applied"] = case_contract["task_constraints"]
+        for k in case_contract.get("output_contract_keys", []):
+            if k not in payload:
+                # Never guess unknown contract keys by substring heuristics; record null & honest gap
+                payload[k] = None
+                final_gaps.append({
+                    "type": "unmapped_output_contract_key",
+                    "field": k,
+                    "detail": f"Dynamic output_contract key '{k}' has no verified deterministic source; left null rather than guessing.",
+                })
+        if final_gaps and not status:
+            payload["status"] = "partial_with_gaps"
+    return payload
 
 
 if __name__ == "__main__":

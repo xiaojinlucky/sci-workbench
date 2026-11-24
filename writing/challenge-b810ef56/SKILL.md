@@ -29,7 +29,8 @@ Target task: `evidence-driven-writing` (Literature-Evidence-Driven Writing). The
 1. **Stage 1 — Atomic Claims List (`claims_list.json`)**:
    - Decompose the argument into numbered atomic claim units (`C01`, `C02`, ...), each tagged with `claim_strength` (`causal` | `associative_correlational` | `conditional_scoped` | `consensus_broad` | `descriptive`), `polarity`, `conditions`, and inline `citations`.
 2. **Stage 2 — Evidence Matrix (`evidence_matrix.md` & `evidence_audit.json`)**:
-   - Scan all `/input` literature files to extract verifiable `verbatim_excerpt` snippets with exact `file#page:section:line` locators, `source_type` (`primary_research` | `review` | `guideline` | `preprint` | `abstract_only`), and `study_design` (`rct_or_intervention` | `observational_correlational` | `meta_analysis` | `in_vitro_preclinical`).
+   - Scan all `/input` literature files (`.md`, `.xml`/`.html` EuropePMC JATS, `.docx`, `.pdf` via `pdftotext` + stdlib content-stream fallback, `.txt`, `.json`) to extract verifiable `verbatim_excerpt` snippets with exact `file#page=N:section:line` locators, `source_type` (`primary_research` | `review` | `guideline` | `preprint` | `abstract_only`), and `study_design` (`rct_or_intervention` | `observational_correlational` | `meta_analysis` | `in_vitro_preclinical`).
+   - Apply **outcome-aware polarity equivalence normalization** (`reduced mortality` / `lower error` / `decreased overpotential` == `improved survival` / `higher accuracy`), **double-negation protection** (`cannot be excluded`, `not without benefit`), and **concessive-clause qualification protection** (`Although observational, ...` preserves explicit scope rather than flagging missing qualifiers or flipping main-clause polarity).
    - Grade every claim under the **Strict 5-State Rubric** (see `references/evidence_grading_and_synthesis.md`):
      - `SUPPORTED`
      - `PARTIALLY_SUPPORTED` (e.g., observational paper cited with causal verb, or narrow applicability condition generalized universally)
@@ -62,10 +63,12 @@ python3 -B /skills/weekly-skill/scripts/block_indexer.py --scan /input --out /ap
 python3 -B /skills/weekly-skill/scripts/evidence_driven_writer_guard.py \
   --draft /app/output/draft.md \
   --corpus-dir /input \
+  --input-dir /input \
   --out-dir /app/output \
   --case-id "<CASE_ID>" \
   --strict
 ```
+- Automatically consumes `/input/case.json` (`case_id`, dynamic `output_contract` fields) and `/input/task.md` constraints via `writing_io_and_invariants.load_case_contract`.
 - Inspect `/app/output/evidence_matrix.md` and `/app/output/evidence_audit.json`.
 - Resolve every `PARTIALLY_SUPPORTED`, `CONTRADICTED`, `EXISTENCE_ONLY_NOT_SUPPORTING`, and `conflict_synthesis_passed: false` finding in `/app/output/draft.md`, then re-run until clean (genuine `UNVERIFIABLE_ABSENT` items where `/input` lacks full text remain explicitly logged in `gaps` and marked `[EVIDENCE_GAP]` in prose).
 

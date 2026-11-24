@@ -49,7 +49,7 @@ Target task: `academic-language-polishing` (Academic Language Polishing). Delive
 
 All scripts run on Python 3.12+ stdlib with zero third-party packages.
 
-### Step 1: Preflight, Budget, Result Init & Pre-Polish Scan
+### Step 1: Preflight, Budget, Result Init & Pre-Polish Scan (with Auto-Glossary & Case Contract)
 ```bash
 python3 -B /skills/weekly-skill/scripts/preflight_probe.py --input /input --output /app/output --out /app/work/env.json
 python3 -B /skills/weekly-skill/scripts/budget_guard.py --state /app/work/budget.json --init
@@ -57,37 +57,45 @@ python3 -B /skills/weekly-skill/scripts/result_guard.py --path /app/output/resul
 python3 -B /skills/weekly-skill/scripts/block_indexer.py --scan /input --out /app/work/blocks.json
 python3 -B /skills/weekly-skill/scripts/polishing_invariant_engine.py \
   --source /input/<manuscript_file> \
+  --input-dir /input \
   --scan-only \
+  --auto-glossary \
+  --out-glossary-json /app/work/auto_glossary.json \
   --glossary /input/<optional_glossary> \
   --out-audit-json /app/work/pre_polish_scan.json
 ```
+- Supports `.md`, `.txt`, `.docx` (OOXML), `.xml`/`.html` (EuropePMC JATS), and `.pdf` (`pdftotext` + stdlib content-stream fallback).
+- Automatically consumes `/input/case.json` (`case_id`, `output_contract`) and `/input/task.md` (`target_journal`, `audience`, `word_limit`, `genre`) via `writing_io_and_invariants.load_case_contract`.
 
 ### Step 2: Execute Sentence-Level Minimal-Edit Polishing
 1. Read `/input/case.json`, `/input/task.md`, `references/academic_writing_standards.md`, and `references/polishing_playbook.md`.
-2. Inspect `/app/work/pre_polish_scan.json` for glossary drift, abbreviation issues, AI/translationese hits, and protected clauses (`valid_concessive_clause`, `valid_methods_passive_voice`).
-3. Draft `/app/output/manuscript_polished.md` applying minimal, targeted edits. If the task explicitly requests `.docx`, generate it via `writing_io_and_invariants.build_docx_from_markdown` and render preview via `render_docx_preview` (recording honest degradation if `soffice` is absent).
+2. Inspect `/app/work/pre_polish_scan.json` and `/app/work/auto_glossary.json` for cross-section compound hyphenation/spelling drift, abbreviation definition errors, English academic grammar/collocation/nominalization hits, AI/translationese hits, and protected clauses (`valid_concessive_clause`, `valid_methods_passive_voice`).
+3. Draft `/app/output/polished_manuscript.md` (optionally seeding mechanical fixes via `--auto-polish --out-polished-md /app/output/polished_manuscript.md`, then applying scholarly minimal edits). If the task explicitly requests `.docx`, generate it via `writing_io_and_invariants.build_docx_from_markdown` and render preview via `render_docx_preview` (recording honest degradation if `soffice` is absent).
 4. Record structured edit rationales in `/app/work/edits.json` (keyed by `sentence_id`, including any dismissed false-positive grammar alerts).
 
 ### Step 3: Independent Channel-2 Invariant & Redline Verification
 ```bash
 python3 -B /skills/weekly-skill/scripts/polishing_invariant_engine.py \
   --source /input/<manuscript_file> \
-  --revised /app/output/manuscript_polished.md \
+  --revised /app/output/polished_manuscript.md \
+  --input-dir /input \
+  --auto-glossary \
   --glossary /input/<optional_glossary> \
   --edits-json /app/work/edits.json \
-  --register <journal_article|thesis|grant_proposal|rebuttal|abstract> \
+  --register auto \
   --out-audit-json /app/output/polishing_audit.json \
   --out-redline-md /app/output/polishing_redline_diff.md \
   --out-result-json /app/output/result.json \
   --case-id "<CASE_ID>" \
   --strict
 ```
-- If exit code is non-zero (`blocked_invariant_violation` or unresolved glossary drift), fix the offending sentences in `/app/output/manuscript_polished.md` and re-run until `passed: true` (never bypass `--strict`).
+- `--register auto` infers register from `/input/task.md` & `case.json` and checks `word_limit` constraints; `result.json` dynamically merges all `case.json.output_contract` keys.
+- If exit code is non-zero (`blocked_invariant_violation` or unresolved glossary drift), fix the offending sentences in `/app/output/polished_manuscript.md` and re-run until `passed: true` (never bypass `--strict`).
 
 ### Step 4: Final Grounding & Package Audit
 ```bash
 python3 -B /skills/weekly-skill/scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
-python3 -B /skills/weekly-skill/scripts/final_audit.py --dir /app/output --result-file result.json --require manuscript_polished.md --require polishing_redline_diff.md --require polishing_audit.json
+python3 -B /skills/weekly-skill/scripts/final_audit.py --dir /app/output --result-file result.json --require polished_manuscript.md --require polishing_redline_diff.md --require polishing_audit.json
 ```
 
 ## Exception & Boundary Handling
@@ -99,7 +107,7 @@ python3 -B /skills/weekly-skill/scripts/final_audit.py --dir /app/output --resul
 ## Output Contract
 
 See `references/output_contract_spec.md`. Required deliverables under `/app/output/`:
-1. `manuscript_polished.md` (clean editable polished text; plus `.docx` if requested)
+1. `polished_manuscript.md` (clean editable polished text; plus `.docx` if requested)
 2. `polishing_redline_diff.md` (sentence-level original vs. revised table with `edit_type`, `status`, `rationale`)
 3. `polishing_audit.json` (machine-readable invariants, false-positive guard log, glossary/abbreviation audit, prose lint diff)
 4. `result.json` (preserving `case_id`, `deliverable`, `preserved_facts`, `evidence_map`, `change_log`, `status`, `sources`, `gaps`, `limitations`, `verification`)

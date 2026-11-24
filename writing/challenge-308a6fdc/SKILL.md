@@ -66,10 +66,10 @@ python3 /skills/weekly-skill/scripts/manuscript_workbench_engine.py audit \
 ```
 
 Inspect `/app/work/manuscript_audit.json` and resolve every blocking finding before export:
-- `ungrounded_numbers` / `ungrounded_dois`: trace to `/input` and fix typos, or replace unsupported claims with `[EVIDENCE_GAP: ...]`.
-- `dangling_citations` / `uncited_references`: synchronize in-text `[n]` citations with the `References` section 1:1.
+- `ungrounded_numbers` / `ungrounded_dois` / `CONDITION_BINDING_MISMATCH`: trace every value to `/input` and verify condition-row binding, or replace unsupported claims with `[EVIDENCE_GAP: ...]`.
+- `dangling_citations` / `uncited_references` / `CLAIM_SUPPORT_LOW`: synchronize in-text `[n]` citations with `References` 1:1 AND verify topical claim-to-reference support (never attach unrelated input bibliography records solely because their DOI exists).
 - `MECHANISM_INTERPRETATION_IN_RESULTS` / `DISCUSSION_VERBATIM_NUMERIC_REPETITION`: move mechanistic claims to Discussion and replace repeated Result dumps with synthesis.
-- `abstract_body_mismatch_numbers`: reconcile Abstract metrics with Body Results.
+- `abstract_body_mismatch_numbers` / `image_only_without_caption`: reconcile Abstract metrics with Body Results and explicitly flag image-only figures lacking caption text.
 - `prose_deai_audit.high_count > 0`: eliminate flagged jargon, translationese, and contrarian clichés without altering numbers or hedges.
 
 Re-run `audit` until `blocking_issue_count == 0` (or every remaining gap is genuinely absent from `/input` and explicitly tagged).

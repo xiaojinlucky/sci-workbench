@@ -6,7 +6,7 @@ All final runtime deliverables must be written under `/app/output/` (or the conf
 
 | File | Format | Mandatory Content |
 | --- | --- | --- |
-| `manuscript_polished.md` | UTF-8 Markdown (or `.docx` when requested) | Clean, publication-ready edited manuscript with zero residual markup errors or altered empirical facts |
+| `polished_manuscript.md` | UTF-8 Markdown (or `.docx` when requested) | Clean, publication-ready edited manuscript with zero residual markup errors or altered empirical facts |
 | `polishing_redline_diff.md` | UTF-8 Markdown | Sentence-level table with `sentence_id`, `section`, `edit_type`, `status`, `original`, `revised`, `rationale` + dismissed false positives + glossary/abbreviation notes |
 | `polishing_audit.json` | UTF-8 JSON | Deterministic invariant diff, modality drift count, false-positive guard records, glossary & abbreviation consistency audit, before/after de-AI lint counts |
 | `result.json` | UTF-8 JSON | Machine-readable contract payload containing all 5 core fields plus Harbor verification fields |

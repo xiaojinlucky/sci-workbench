@@ -64,8 +64,9 @@ python3 /skills/weekly-skill/scripts/template_spec_and_adapter.py adapt \
 (Add `--alternate-template /input/<other_template>` for each conflicting template present in `/input`.)
 
 Inspect `/app/output/adaptation_fidelity_report.json` and `/app/output/compliance_checklist.md`:
-- Supports `.docx` (lossless OOXML in-place rewrite), `.tex` (preamble font/geometry adaptation with byte-identical document body preservation), and `.md` (structured OOXML `.docx` generation).
-- Confirm `adapt_report.fidelity_ok == true` (all 9 OOXML unit checks or LaTeX body byte-identity + numeric/citation invariants preserved).
+- Supports `.docx` (lossless OOXML in-place rewrite with `Heading1`–`Heading3` + `w:outlineLvl` binding, unstyled pseudo-heading upgrade, academic three-line table normalization, and plain-text reference entry adaptation for Vancouver/GB/T 7714/APA while leaving live Zotero/EndNote fields untouched), `.tex` (preamble font/geometry adaptation with byte-identical document body preservation), and `.md` (structured OOXML `.docx` generation).
+- Repeat `--alternate /input/<t>` (or `--alternate-template /input/<t>`) as many times as needed to isolate multiple conflicting legacy templates simultaneously.
+- Confirm `adapt_report.fidelity_ok == true` (all 11 OOXML unit checks including `headings_outline_bound` and `three_line_tables_normalized`, or LaTeX body byte-identity + numeric/citation invariants preserved).
 - Inspect `crossref_audit.issues` and fix or explicitly flag any broken Figure/Table cross-references in the manuscript change log.
 - If `preview.rendered == true`, confirm generated PDF/PNG preview files are non-empty; if `soffice` Writer is unavailable, confirm `degraded_reason` is honestly recorded in `gaps`.
 

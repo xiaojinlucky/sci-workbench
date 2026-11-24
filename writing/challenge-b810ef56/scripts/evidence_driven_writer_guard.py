@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from writing_io_and_invariants import (  # noqa: E402
     audit_academic_prose,
     build_writing_result,
     extract_invariants,
+    load_case_contract,
     read_document_text,
 )
 
@@ -96,7 +98,12 @@ RE_DESIGN_META = re.compile(r"\b(?:meta-?analysis|systematic\s+review)\b|荟萃�
 
 RE_TYPE_PREPRINT = re.compile(r"\b(?:preprint|biorxiv|medrxiv|arxiv|chemrxiv|ssrn|not\s+peer-?reviewed)\b|预印本", re.I)
 RE_TYPE_GUIDELINE = re.compile(r"\b(?:clinical\s+guideline|consensus\s+statement|practice\s+guideline|WHO\s+guideline)\b|指南|专家共识", re.I)
-RE_TYPE_REVIEW = re.compile(r"\b(?:narrative\s+review|systematic\s+review|literature\s+review|review\s+article)\b|综述", re.I)
+RE_TYPE_REVIEW = re.compile(
+    r"\b(?:narrative\s+review|systematic\s+review|literature\s+review|review\s+article|"
+    r"this\s+review\s+(?:organizes|summarizes|systematically|provides|focuses|centers|proposes)|"
+    r"this\s+is\s+a\s+narrative\s+review)\b|综述",
+    re.I,
+)
 RE_ABSTRACT_ONLY = re.compile(r"\b(?:abstract\s+only|abstract-only|full\s*text\s+(?:not\s+available|unavailable|absent))\b|仅有摘要|无全文", re.I)
 
 RE_CONFLICT_SYNTHESIS = re.compile(
@@ -122,29 +129,288 @@ STOPWORDS = {
 }
 
 
+# Outcome-aware polarity equivalence, double-negation, and concessive-clause protection
+RE_UNDESIRABLE_OUTCOME = re.compile(
+    r"\b(?:mortality|death|fatality|error|mae|rmse|loss|overpotential|risk|toxicity|inflammation|"
+    r"neuroinflammation|permeability|failure\s+rate|relapse|dissolution|degradation|agglomeration|"
+    r"complication|pathology|impairment|deficit|dysfunction|burden|latency|cost|resistance|"
+    r"translocation|dysbiosis|pyroptosis|hyperarousal|fragmentation|endotoxemia|leakage)\b|"
+    r"死亡率|误差|过电位|风险|毒性|炎症|渗透性|降解|病理|损伤|障碍|易位|失调|失效",
+    re.I,
+)
+RE_DESIRABLE_OUTCOME = re.compile(
+    r"\b(?:survival|accuracy|auroc|auc|f1|efficiency|capacity|stability|retention|recovery|"
+    r"activity|selectivity|performance|integrity|durability|tolerance|butyrate|treg|efficacy|homeostasis)\b|"
+    r"生存率|准确率|效率|容量|稳定性|恢复|活性|选择性|完整性|稳态|疗效",
+    re.I,
+)
+RE_DEC_VERB = re.compile(
+    r"\b(?:reduc(?:es?|ed|ing)|decreas(?:es?|ed|ing)|lower(?:s|ed|ing)?|suppress(?:es?|ed|ing)|"
+    r"mitigat(?:es?|ed|ing)|alleviat(?:es?|ed|ing)|prevent(?:s|ed|ing)|inhibit(?:s|ed|ing)|"
+    r"attenuat(?:es?|ed|ing)|shorten(?:s|ed|ing)|cut(?:s|ting)?)\b|降低|减少|抑制|缓解|减轻|缩短",
+    re.I,
+)
+RE_INC_VERB = re.compile(
+    r"\b(?:increas(?:es?|ed|ing)|improv(?:es?|ed|ing)|enhanc(?:es?|ed|ing)|elevat(?:es?|ed|ing)|"
+    r"higher|boost(?:s|ed|ing)|promot(?:es?|ed|ing)|outperform(?:s|ed|ing)|accelerat(?:es?|ed)|"
+    r"aggravat(?:es?|ed)|worsen(?:s|ed)|exacerbat(?:es?|ed))\b|提高|增加|增强|改善|促进|优于|加重|恶化",
+    re.I,
+)
+RE_DOUBLE_NEGATION = re.compile(
+    r"\b(?:not\s+unlikely|cannot\s+be\s+excluded|could\s+not\s+be\s+excluded|cannot\s+be\s+ruled\s+out|"
+    r"may\s+not\s+be\s+excluded|not\s+without\s+(?:benefit|effect|merit|value)|"
+    r"not\s+insignificant|never\s+failed\s+to|no\s+absence\s+of|not\s+uncommon)\b|"
+    r"并非没有|不无可能|未尝不能|并非无益|不可排除|无法排除",
+    re.I,
+)
+RE_HEDGED_UNCERTAIN = re.compile(
+    r"\b(?:cannot\s+be\s+excluded|could\s+not\s+be\s+excluded|cannot\s+be\s+ruled\s+out|"
+    r"may\s+not\s+be\s+excluded|not\s+unlikely|inconclusive|remains?\s+(?:unclear|uncertain|unresolved|elusive)|"
+    r"not\s+yet\s+(?:established|confirmed|proven|validated)|insufficient\s+evidence|uncertain)\b|"
+    r"不可排除|无法排除|不无可能|尚无定论|尚不明确|有待进一步验证",
+    re.I,
+)
+RE_NULL_NON_SIG = re.compile(
+    r"\b(?:no\s+(?:statistically\s+)?significant\s+(?:effect|difference|improvement|benefit|change|association|reduction|increase)|"
+    r"non-?significant|not\s+statistically\s+significant|failed\s+to\s+(?:improve|increase|reduce|show|reach\s+significance)|"
+    r"did\s+not\s+(?:improve|increase|differ|change|reach\s+significance)|"
+    r"null\s+effect|no\s+benefit|no\s+difference\s+(?:was\s+)?observed|p\s*>\s*0\.05)\b|"
+    r"无显著(?:差异|改善|影响|效果)|未达(?:到)?统计学显著|未能(?:提高|改善|降低)|未见明显变化",
+    re.I,
+)
+RE_NEGATIVE_DIRECTION = re.compile(
+    r"\b(?:decreas(?:es?|ed|ing)|reduc(?:es?|ed|ing)|impair(?:s|ed|ing)|"
+    r"worsen(?:s|ed|ing)|inhibit(?:s|ed|ing)|suppress(?:es?|ed|ing)|lower(?:s|ed)?|"
+    r"adverse|aggravat(?:es?|ed)|exacerbat(?:es?|ed))\b|"
+    r"降低|下降|抑制|恶化|受损|减少|加重",
+    re.I,
+)
+RE_CONCESSIVE_SPLIT = re.compile(
+    r"^\s*(?:Although|Though|Even\s+though|While|Whereas)\s+([^;]{4,180}?),\s+(.+)$",
+    re.I,
+)
+RE_CONCESSIVE_SPLIT_ZH = re.compile(r"^\s*(?:尽管|虽然)([^。；]{3,90}?)[，,]\s*(?:但(?:是)?|然而|不过)?(.+)$")
+RE_CONCESSIVE_QUALIFIERS = re.compile(
+    r"\b(?:observational|cross-?sectional|retrospective|small\s+sample|preliminary|correlational|"
+    r"not\s+yet\s+validated|remains?\s+limited|causal\s+validation|lacks?\s+direct|limited\s+to|"
+    r"in\s+mice|murine|in\s+vitro|preclinical|uncontrolled|non-?randomized|short-?term|"
+    r"single-?center|heterogeneous)\b|"
+    r"观察性|横断面|回顾性|样本量有限|初步|尚未完全验证|直接证据有限|动物模型|体外|单中心",
+    re.I,
+)
+SEMANTIC_CONCEPT_MAP = {
+    "mortality": "survival_axis", "death": "survival_axis", "survival": "survival_axis", "fatality": "survival_axis",
+    "error": "accuracy_axis", "rmse": "accuracy_axis", "mae": "accuracy_axis", "accuracy": "accuracy_axis",
+    "auroc": "accuracy_axis", "auc": "accuracy_axis", "performance": "accuracy_axis",
+    "overpotential": "activity_axis", "activity": "activity_axis",
+    "stability": "durability_axis", "durability": "durability_axis", "dissolution": "durability_axis",
+    "degradation": "durability_axis", "inflammation": "inflam_axis", "neuroinflammation": "inflam_axis",
+    "cytokines": "inflam_axis", "barrier": "barrier_axis", "permeability": "barrier_axis", "bbb": "barrier_axis",
+    "microbiota": "gut_axis", "dysbiosis": "gut_axis", "intestinal": "gut_axis", "gut": "gut_axis",
+    "scfa": "scfa_axis", "scfas": "scfa_axis", "butyrate": "scfa_axis",
+    "mice": "murine_axis", "mouse": "murine_axis", "murine": "murine_axis",
+    "septic": "sepsis_axis", "sepsis": "sepsis_axis",
+    "electrocatalyst": "catalyst_axis", "electrocatalysts": "catalyst_axis", "catalyst": "catalyst_axis", "catalysts": "catalyst_axis",
+    "gnn": "gnn_axis", "gnns": "gnn_axis", "substructure": "substruct_axis", "substructures": "substruct_axis",
+}
+
+
 def _keywords(text: str) -> set[str]:
     en = {w for w in re.findall(r"[a-z][a-z0-9\-]{2,}", text.lower()) if w not in STOPWORDS}
     zh = set(re.findall(r"[\u4e00-\u9fff]{2,}", text))
-    return en | zh
+    mapped = {SEMANTIC_CONCEPT_MAP.get(w, w) for w in en}
+    return en | mapped | zh
+
+
+def _split_concessive(text: str) -> tuple[str, str]:
+    """Return (concessive_clause, main_clause); returns ('', text) if not a concessive structure."""
+    m = RE_CONCESSIVE_SPLIT.match(text.strip())
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    mz = RE_CONCESSIVE_SPLIT_ZH.match(text.strip())
+    if mz:
+        return mz.group(1).strip(), mz.group(2).strip()
+    return "", text
 
 
 def _detect_polarity(text: str) -> str:
-    has_neg = bool(RE_NEGATIVE_OR_NULL_POLARITY.search(text))
-    has_pos = bool(RE_POSITIVE_POLARITY.search(text))
-    # Explicit null/no-effect phrases override positive words inside "no significant increase"
-    if re.search(r"\b(?:no\s+significant|failed\s+to|did\s+not|null\s+effect|no\s+benefit)\b|无显著|未能|未见明显", text, re.I):
-        return "null_or_negative"
-    if has_neg and not has_pos:
-        return "null_or_negative"
-    if has_pos and not has_neg:
-        return "positive"
-    if has_pos and has_neg:
+    """Outcome-aware polarity classifier strictly separating:
+    - positive (beneficial / directional increase of desirable or decrease of undesirable)
+    - negative (directional decrease/impairment/worsening/adverse)
+    - null_non_significant (explicit no statistically significant difference / null effect)
+    - hedged_uncertain (double-negation uncertainty like 'cannot be excluded' / 'inconclusive')
+    - mixed_conditional / neutral
+    """
+    concession, main_clause = _split_concessive(text)
+    target = main_clause if concession and len(main_clause) >= 15 else text
+
+    has_hedged_uncertain = bool(RE_HEDGED_UNCERTAIN.search(target))
+    has_double_neg = bool(RE_DOUBLE_NEGATION.search(target))
+    # Neutralize hedged-uncertain / double-negation phrases before checking single-negation triggers
+    target_clean = RE_HEDGED_UNCERTAIN.sub(" uncertain_possibility ", target) if has_hedged_uncertain else target
+    target_clean = RE_DOUBLE_NEGATION.sub(" uncertain_possibility ", target_clean) if has_double_neg else target_clean
+
+    # 1. Explicit non-significant / null-effect phrases -> strictly `null_non_significant` (never conflated with negative direction)
+    if RE_NULL_NON_SIG.search(target_clean):
+        return "null_non_significant"
+
+    # 2. Outcome-aware directional equivalence: "reduced mortality" / "lower overpotential" -> positive; "increased mortality" -> negative
+    gap = r"(?:(?!(?:and|or|but|while|whereas)\b)[a-z0-9\-]+\s+){0,2}"
+    dec_undesir = bool(re.search(
+        rf"(?:{RE_DEC_VERB.pattern})\s+{gap}(?:{RE_UNDESIRABLE_OUTCOME.pattern})",
+        target_clean, re.I,
+    ))
+    inc_desir = bool(re.search(
+        rf"(?:{RE_INC_VERB.pattern})\s+{gap}(?:{RE_DESIRABLE_OUTCOME.pattern})",
+        target_clean, re.I,
+    ))
+    inc_undesir = bool(re.search(
+        rf"(?:{RE_INC_VERB.pattern})\s+{gap}(?:{RE_UNDESIRABLE_OUTCOME.pattern})",
+        target_clean, re.I,
+    ))
+    dec_desir = bool(re.search(
+        rf"(?:{RE_DEC_VERB.pattern})\s+{gap}(?:{RE_DESIRABLE_OUTCOME.pattern})",
+        target_clean, re.I,
+    ))
+
+    if (dec_undesir or inc_desir) and not (inc_undesir or dec_desir):
+        return "hedged_uncertain" if has_hedged_uncertain else "positive"
+    if (inc_undesir or dec_desir) and not (dec_undesir or inc_desir):
+        return "negative"
+    if (dec_undesir or inc_desir) and (inc_undesir or dec_desir):
         return "mixed_conditional"
+
+    # 3. Direct directional terms (negative direction separated from null/non-significant)
+    has_neg_dir = bool(RE_NEGATIVE_DIRECTION.search(target_clean))
+    has_pos = bool(RE_POSITIVE_POLARITY.search(target_clean))
+    if has_neg_dir and not has_pos:
+        return "negative"
+    if has_pos and not has_neg_dir:
+        return "hedged_uncertain" if has_hedged_uncertain else "positive"
+    if has_pos and has_neg_dir:
+        return "mixed_conditional"
+
+    # 4. Double-negation / 'cannot be excluded' MUST NEVER be labeled positive -> `hedged_uncertain`
+    if has_hedged_uncertain or has_double_neg:
+        return "hedged_uncertain"
     return "neutral"
 
 
+MODEL_CONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("sleep_deprivation", re.compile(r"\bsleep\s+deprivation\b|\bSD\s+paradigm|睡眠剥夺", re.I)),
+    ("chronic_insomnia", re.compile(r"\b(?:chronic\s+)?insomnia\b|失眠", re.I)),
+    ("spinal_cord_injury", re.compile(r"\bspinal\s+cord\s+injury\b|\bSCI\b|脊髓损伤", re.I)),
+    ("acidic_electrolyte", re.compile(r"\bacidic\b|酸性", re.I)),
+    ("alkaline_electrolyte", re.compile(r"\balkaline\b|碱性", re.I)),
+    ("neutral_electrolyte", re.compile(r"\bneutral\s+(?:ph|medium|electrolyte)\b|中性", re.I)),
+    ("in_vitro_model", re.compile(r"\bin\s+vitro\b|\bcell\s+line\b|体外", re.I)),
+    ("in_vivo_model", re.compile(r"\bin\s+vivo\b|体内", re.I)),
+]
+
+SPECIES_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("human_clinical", re.compile(r"\b(?:human|humans|clinical|patients?|cohort)\b|临床|患者|人群", re.I)),
+    ("murine_rodent", re.compile(r"\b(?:mice|mouse|murine|rats?|rodents?)\b|小鼠|大鼠|啮齿", re.I)),
+]
+
+ENDPOINT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("sleep_fragmentation_insomnia", re.compile(r"\bsleep\s+fragmentation\b|\binsomnia\b|\bsleep\s+loss\b|睡眠", re.I)),
+    ("depressive_cognitive", re.compile(r"\b(?:depressive|depression|cognitive\s+decline|memory)\b|抑郁|认知", re.I)),
+    ("tight_junction_claudin", re.compile(r"\b(?:claudin-?23|tight-?junction|sp1/ampk|barrier\s+integrity|barrier\s+vulnerability)\b|紧密连接|屏障", re.I)),
+    ("nlrp3_pyroptosis", re.compile(r"\b(?:nlrp3|pyroptosis|caspase-?1|microglial)\b|焦亡", re.I)),
+    ("lps_tlr4_nfkb", re.compile(r"\b(?:lps|lipopolysaccharide|tlr4|nf-?kappab|nf-?κb|nf-?kb)\b", re.I)),
+    ("colonic_transit_scfa", re.compile(r"\b(?:colonic\s+transit|scfa|short-?chain\s+fatty\s+acid|butyrate)\b|短链脂肪酸|丁酸", re.I)),
+    ("overpotential_oer", re.compile(r"\b(?:overpotential|electrocatalys|water\s+splitting|oer|her)\b|过电位|电催化", re.I)),
+    ("mortality_survival", re.compile(r"\b(?:mortality|survival|fatality)\b|死亡率|生存率", re.I)),
+]
+
+RE_COMPARATIVE_NON_EQUIV = re.compile(
+    r"\b(?:do\s+not\s+(?:fully\s+)?recapitulate|not\s+equivalent\s+to|differs?\s+(?:fundamentally\s+)?from|"
+    r"diverges?\s+(?:substantially\s+)?across|cannot\s+be\s+equated\s+(?:to|with)|distinct\s+from)\b|"
+    r"不等同于|不能完全模拟|存在显著差异",
+    re.I,
+)
+
+
+def _extract_feature_tags(text: str, patterns: list[tuple[str, re.Pattern[str]]]) -> set[str]:
+    return {name for name, pat in patterns if pat.search(text)}
+
+
+def _check_claim_excerpt_alignment(claim_text: str, excerpt_text: str, source_context: str = "") -> dict[str, Any]:
+    """Verify structural alignment across experimental model/condition, species/population, endpoint, and comparative boundary."""
+    ctx_for_model = f"{source_context} {excerpt_text}" if source_context else excerpt_text
+    c_models = _extract_feature_tags(claim_text, MODEL_CONDITION_PATTERNS)
+    e_models = _extract_feature_tags(ctx_for_model, MODEL_CONDITION_PATTERNS)
+    c_species = _extract_feature_tags(claim_text, SPECIES_PATTERNS)
+    e_species = _extract_feature_tags(ctx_for_model, SPECIES_PATTERNS)
+    c_endpoints = _extract_feature_tags(claim_text, ENDPOINT_PATTERNS)
+    e_endpoints = _extract_feature_tags(excerpt_text, ENDPOINT_PATTERNS)
+
+    mismatch_fields: list[dict[str, Any]] = []
+
+    # 1. Experimental model / disease condition mismatch
+    missing_models = sorted(c_models - e_models)
+    if c_models and missing_models and not (c_models & e_models):
+        mismatch_fields.append({
+            "field": "experimental_model_or_condition",
+            "claim_values": sorted(c_models),
+            "excerpt_values": sorted(e_models),
+            "detail": f"Claim specifies model/condition {sorted(c_models)}, not supported by excerpt ({sorted(e_models) or 'none'}).",
+        })
+    elif len(c_models) >= 2 and len(missing_models) >= 1 and RE_COMPARATIVE_NON_EQUIV.search(claim_text):
+        mismatch_fields.append({
+            "field": "comparative_model_boundary",
+            "claim_values": sorted(c_models),
+            "excerpt_values": sorted(e_models),
+            "detail": f"Claim compares/contrasts models {sorted(c_models)}, but excerpt omits {missing_models}.",
+        })
+
+    # 2. Species / population mismatch (e.g., claim asserts human/clinical while excerpt only covers murine/rodent)
+    if c_species and e_species and not (c_species & e_species):
+        mismatch_fields.append({
+            "field": "species_or_population",
+            "claim_values": sorted(c_species),
+            "excerpt_values": sorted(e_species),
+            "detail": f"Claim targets {sorted(c_species)}, whereas excerpt reports {sorted(e_species)}.",
+        })
+
+    # 3. Endpoint / outcome mismatch
+    if c_endpoints and not (c_endpoints & e_endpoints):
+        mismatch_fields.append({
+            "field": "endpoint_or_outcome",
+            "claim_values": sorted(c_endpoints),
+            "excerpt_values": sorted(e_endpoints),
+            "detail": f"Claim asserts endpoint(s) {sorted(c_endpoints)}, absent from matched excerpt ({sorted(e_endpoints) or 'none'}).",
+        })
+
+    # 4. Comparative / non-equivalence boundary claim requires excerpt to contain contrasting/model-limitation language
+    if RE_COMPARATIVE_NON_EQUIV.search(claim_text) and not (
+        RE_COMPARATIVE_NON_EQUIV.search(excerpt_text)
+        or re.search(r"\b(?:recapitulate|sleep\s+deprivation|chronic\s+insomnia|model\s+limitation|acute\s+vs\.?\s+chronic|cannot\s+establish\s+causality)\b", excerpt_text, re.I)
+    ):
+        if not any(m["field"] == "comparative_model_boundary" for m in mismatch_fields):
+            mismatch_fields.append({
+                "field": "comparative_boundary_unsupported",
+                "claim_values": ["non_equivalence_or_design_divergence"],
+                "excerpt_values": [],
+                "detail": "Claim asserts experimental-model non-equivalence or cross-design divergence, but matched excerpt does not state this boundary.",
+            })
+
+    return {
+        "aligned": len(mismatch_fields) == 0,
+        "mismatch_fields": mismatch_fields,
+        "claim_models": sorted(c_models),
+        "excerpt_models": sorted(e_models),
+        "claim_endpoints": sorted(c_endpoints),
+        "excerpt_endpoints": sorted(e_endpoints),
+    }
+
+
 def _extract_conditions(text: str) -> list[str]:
-    return sorted({m.group(0).strip().lower() for m in RE_CONDITIONAL.finditer(text)})
+    conds = {m.group(0).strip().lower() for m in RE_CONDITIONAL.finditer(text)}
+    concession, _ = _split_concessive(text)
+    if concession and RE_CONCESSIVE_QUALIFIERS.search(concession):
+        conds.add(f"concessive_scope:{concession[:60].lower()}")
+    return sorted(conds)
 
 
 RE_CITE_NARRATIVE = re.compile(
@@ -241,7 +507,7 @@ def _parse_draft_references_bridge(draft_text: str) -> dict[str, dict[str, Any]]
 # ---------------------------------------------------------------------------
 
 def _classify_source_type(text: str, filename: str, meta_scope: str = "") -> str:
-    blob = f"{filename} {meta_scope} {text[:1200]}"
+    blob = f"{filename} {meta_scope} {text[:3200]}"
     if meta_scope == "abstract_only" or RE_ABSTRACT_ONLY.search(blob):
         return "abstract_only"
     if RE_TYPE_PREPRINT.search(blob):
@@ -253,15 +519,18 @@ def _classify_source_type(text: str, filename: str, meta_scope: str = "") -> str
     return "primary_research"
 
 
-def _classify_study_design(text: str, meta_design: str = "") -> str:
-    blob = f"{meta_design} {text}"
-    if RE_DESIGN_OBSERVATIONAL.search(blob) and not RE_DESIGN_RCT.search(blob):
-        return "observational_correlational"
-    if RE_DESIGN_RCT.search(blob):
-        return "rct_or_intervention"
-    if RE_DESIGN_META.search(blob):
+def _classify_study_design(text: str, meta_design: str = "", source_type: str = "") -> str:
+    # Prioritize title/abstract/methods header (first 3600 chars) so cited papers in long reviews do not mislabel study design
+    head_blob = f"{meta_design} {text[:3600]}"
+    if RE_DESIGN_META.search(head_blob):
         return "meta_analysis"
-    if re.search(r"\bin\s+vitro\b|\bcell\s+line\b|\bmouse\s+model\b|细胞实验|动物模型", blob, re.I):
+    if source_type == "review":
+        return "review_synthesis"
+    if RE_DESIGN_OBSERVATIONAL.search(head_blob) and not RE_DESIGN_RCT.search(head_blob):
+        return "observational_correlational"
+    if RE_DESIGN_RCT.search(head_blob):
+        return "rct_or_intervention"
+    if re.search(r"\bin\s+vitro\b|\bcell\s+line\b|\bmouse\s+model\b|细胞实验|动物模型", head_blob, re.I):
         return "in_vitro_preclinical"
     return "unknown"
 
@@ -287,9 +556,11 @@ def _source_aliases(doc_id: str, filename: str, text: str, meta: dict[str, Any] 
             aliases.add(f"{first} et al., {yr}")
             aliases.add(f"{first}, {yr}")
             aliases.add(f"{first} {yr}")
-    # Extract DOIs & bracket numbers from header lines
-    for d in RE_DOI.findall(text[:1200]):
+    # Extract DOIs, PMCIDs & bracket numbers from header lines / filename
+    for d in RE_DOI.findall(text[:1600]):
         aliases.add(d.rstrip(".,;)").lower())
+    for pmc in re.findall(r"\b(PMC\d{5,9})\b", filename + " " + text[:1600], re.I):
+        aliases.add(pmc.lower())
     m_num = re.search(r"(?:ref|paper|source)[_\-\s]*(\d+)", filename, re.I)
     if m_num:
         aliases.add(f"[{m_num.group(1)}]")
@@ -305,7 +576,7 @@ def _source_aliases(doc_id: str, filename: str, text: str, meta: dict[str, Any] 
 
 
 def index_literature_corpus(corpus_dir: Path, draft_path: Path | None = None) -> list[dict[str, Any]]:
-    """Scan corpus_dir for papers/excerpts/JSON references and build paragraph-indexed source objects."""
+    """Scan corpus_dir for MD/TXT/JSON/DOCX/XML/HTML/PDF full texts & excerpts and build page/section/line-indexed sources."""
     sources: list[dict[str, Any]] = []
     if not corpus_dir.is_dir():
         return sources
@@ -321,7 +592,7 @@ def index_literature_corpus(corpus_dir: Path, draft_path: Path | None = None) ->
         if fp.name.lower() in skip_names:
             continue
         suf = fp.suffix.lower()
-        if suf not in {".md", ".txt", ".json", ".docx", ".pdf", ".tex"}:
+        if suf not in {".md", ".txt", ".json", ".docx", ".pdf", ".tex", ".xml", ".html", ".htm"}:
             continue
 
         rel = fp.relative_to(corpus_dir).as_posix()
@@ -356,6 +627,7 @@ def index_literature_corpus(corpus_dir: Path, draft_path: Path | None = None) ->
                         "title": str(item.get("title") or sid),
                         "source_type": stype,
                         "study_design": sdesign,
+                        "extractor": "structured_json",
                         "is_abstract_only": stype == "abstract_only",
                         "aliases": _source_aliases(sid, rel, body, item),
                         "chunks": chunks,
@@ -369,13 +641,14 @@ def index_literature_corpus(corpus_dir: Path, draft_path: Path | None = None) ->
         if not doc["ok"] or not doc["text"].strip():
             continue
         text = doc["text"]
+        extractor = str((doc.get("meta") or {}).get("extractor") or doc.get("format") or suf.lstrip("."))
         stype = _classify_source_type(text, rel)
-        sdesign = _classify_study_design(text)
+        sdesign = _classify_study_design(text, source_type=stype)
 
-        # Parse paragraphs with section, page, and line locators
+        # Parse paragraphs with section, page (supports [Page N] and PDF form-feed \f), and line locators
         chunks: list[dict[str, Any]] = []
         section = "Document Header"
-        page_num: int | None = None
+        page_num: int | None = 1 if suf == ".pdf" else None
         buf: list[tuple[int, str]] = []
 
         def _flush_buf() -> None:
@@ -397,6 +670,10 @@ def index_literature_corpus(corpus_dir: Path, draft_path: Path | None = None) ->
             buf = []
 
         for lno, raw in enumerate(text.splitlines(), start=1):
+            if "\f" in raw:
+                _flush_buf()
+                page_num = (page_num or 1) + raw.count("\f")
+                raw = raw.replace("\f", " ")
             st = raw.strip()
             m_pg = re.match(r"^\[?Page\s+(\d+)\]?$", st, re.I)
             if m_pg:
@@ -411,7 +688,12 @@ def index_literature_corpus(corpus_dir: Path, draft_path: Path | None = None) ->
                 _flush_buf()
                 section = hm.group(2).strip()
                 continue
+            # EuropePMC/JATS Markdown puts each full paragraph on a single long line: flush per paragraph line
+            if len(st) >= 180 and buf:
+                _flush_buf()
             buf.append((lno, st))
+            if len(st) >= 180:
+                _flush_buf()
         _flush_buf()
 
         sources.append({
@@ -420,6 +702,7 @@ def index_literature_corpus(corpus_dir: Path, draft_path: Path | None = None) ->
             "title": (text.splitlines()[0].lstrip("# ").strip()[:160] if text.splitlines() else fp.stem),
             "source_type": stype,
             "study_design": sdesign,
+            "extractor": extractor,
             "is_abstract_only": stype == "abstract_only",
             "aliases": _source_aliases(fp.stem, rel, text),
             "chunks": chunks,
@@ -477,13 +760,18 @@ def decompose_atomic_claims(draft_text: str) -> list[dict[str, Any]]:
                 continue
 
             cid += 1
-            if RE_CAUSAL.search(sent):
+            concession, main_part = _split_concessive(sent)
+            has_concessive_qual = bool(concession and RE_CONCESSIVE_QUALIFIERS.search(concession))
+            has_double_neg = bool(RE_DOUBLE_NEGATION.search(sent))
+            # Check causal verb only on main clause when a concessive qualifier is explicitly present
+            causal_target = main_part if has_concessive_qual else sent
+            if RE_CAUSAL.search(causal_target):
                 strength = "causal"
-            elif RE_CONSENSUS.search(sent):
+            elif RE_CONSENSUS.search(causal_target):
                 strength = "consensus_broad"
-            elif RE_CONDITIONAL.search(sent) and RE_CORRELATIONAL.search(sent):
+            elif (RE_CONDITIONAL.search(sent) or has_concessive_qual) and RE_CORRELATIONAL.search(sent):
                 strength = "conditional_associative"
-            elif RE_CONDITIONAL.search(sent):
+            elif RE_CONDITIONAL.search(sent) or has_concessive_qual:
                 strength = "conditional_scoped"
             elif RE_CORRELATIONAL.search(sent):
                 strength = "associative_correlational"
@@ -498,6 +786,8 @@ def decompose_atomic_claims(draft_text: str) -> list[dict[str, Any]]:
                 "claim_strength": strength,
                 "polarity": _detect_polarity(sent),
                 "conditions": _extract_conditions(sent),
+                "concessive_qualification": has_concessive_qual,
+                "double_negation_detected": has_double_neg,
                 "citations": cites,
                 "invariants": extract_invariants(sent),
             })
@@ -562,18 +852,61 @@ def _match_citation_to_sources(
     return matched
 
 
+def _focus_sentence_in_chunk(claim_kw: set[str], chunk_text: str) -> str:
+    """Select the single highest-overlap sentence inside a long paragraph so polarity/condition checks stay strictly on-target."""
+    if len(chunk_text) <= 260:
+        return chunk_text
+    prot = re.sub(ABBREV_PROT, lambda m: m.group(0).replace(".", "<DOT>"), chunk_text)
+    prot = re.sub(r"(\d)\.(\d)", r"\1<DOT>\2", prot)
+    sents = [p.replace("<DOT>", ".").strip() for p in re.split(r"(?<=[.!?。！？])\s+", prot) if len(p.strip()) >= 15]
+    if len(sents) <= 1:
+        return chunk_text
+    scored = sorted(
+        ((len(claim_kw & _keywords(s)), -len(s) / 1000.0, i, s) for i, s in enumerate(sents)),
+        key=lambda x: (-x[0], -x[1], x[2]),
+    )
+    best_ov, _, _, best_s = scored[0]
+    return best_s if best_ov > 0 else chunk_text
+
+
 def _best_chunk_for_claim(claim_kw: set[str], source: dict[str, Any]) -> tuple[dict[str, Any] | None, float, int]:
+    """IDF-weighted chunk retrieval prioritizing rare domain entities (e.g., claudin-23, NLRP3) and body evidence over generic abstract summaries."""
+    valid_chunks = [
+        ch for ch in source["chunks"]
+        if not re.match(r"^(?:References|Bibliography|参考文献)\b", ch.get("section", ""), re.I)
+    ]
+    if not valid_chunks:
+        return None, 0.0, 0
+
+    n_chunks = len(valid_chunks)
+    df: dict[str, int] = {}
+    for ch in valid_chunks:
+        for w in ch["keywords"]:
+            df[w] = df.get(w, 0) + 1
+
     best_chunk = None
-    best_score = -1.0
+    best_idf_score = -1.0
+    best_ratio = 0.0
     best_overlap = 0
-    for ch in source["chunks"]:
-        ov = len(claim_kw & ch["keywords"])
+
+    for ch in valid_chunks:
+        shared = claim_kw & ch["keywords"]
+        ov = len(shared)
+        if ov == 0:
+            continue
+        idf_sum = sum(math.log((n_chunks + 1.0) / (df.get(w, 1) + 0.5)) + 1.0 for w in shared)
+        # Prefer specific body sections over generic abstract/title when evidence exists in full text
+        sec_low = (ch.get("section") or "").lower()
+        if n_chunks > 3 and sec_low in ("abstract", "document header"):
+            idf_sum *= 0.82
         ratio = ov / max(1, len(claim_kw))
-        if ratio > best_score or (ratio == best_score and ov > best_overlap):
-            best_score = ratio
+        if idf_sum > best_idf_score or (abs(idf_sum - best_idf_score) < 1e-6 and ov > best_overlap):
+            best_idf_score = idf_sum
+            best_ratio = ratio
             best_overlap = ov
             best_chunk = ch
-    return best_chunk, round(max(0.0, best_score), 3), best_overlap
+
+    return best_chunk, round(max(0.0, best_ratio), 3), best_overlap
 
 
 def verify_claims_against_corpus(
@@ -603,6 +936,8 @@ def verify_claims_against_corpus(
                 **cl,
                 "verdict": verdict,
                 "matched_sources": [],
+                "conflicting_sources": [],
+                "mismatch_fields": [],
                 "verbatim_excerpts": [],
                 "rationale": reason,
                 "required_action": "Attach verifiable source citation from /input or mark [EVIDENCE_GAP].",
@@ -629,9 +964,11 @@ def verify_claims_against_corpus(
                 "verdict": verdict,
                 "matched_sources": [],
                 "missing_citations": missing_cites,
+                "conflicting_sources": [],
+                "mismatch_fields": [],
                 "verbatim_excerpts": [],
                 "rationale": reason,
-                "required_action": f"Supply full text for {missing_cites} or mark [EVIDENCE_GAP].",
+                "required_action": f"Supply full text for {missing_cites} or replace ungrounded citation with [EVIDENCE_GAP].",
             })
             verdict_counts[verdict] += 1
             continue
@@ -645,7 +982,9 @@ def verify_claims_against_corpus(
         any_obs_only = False
         any_preprint = False
         contradiction_hits: list[str] = []
+        conflicting_sources: list[dict[str, Any]] = []
         condition_gaps: list[str] = []
+        alignment_results: list[dict[str, Any]] = []
 
         for src in matched_sources:
             if not src["is_abstract_only"]:
@@ -668,25 +1007,89 @@ def verify_claims_against_corpus(
                 if ch["page"] is not None:
                     loc_str += f"#page={ch['page']}"
                 loc_str += f":{ch['section']}:L{ch['line_start']}-{ch['line_end']}"
+                focused_text = _focus_sentence_in_chunk(ckw, ch["text"])
+                focused_pol = _detect_polarity(focused_text)
+                focused_conds = _extract_conditions(focused_text)
+                align_info = _check_claim_excerpt_alignment(
+                    cl["claim_text"],
+                    focused_text,
+                    source_context=f"{src.get('title', '')} {ch.get('section', '')}",
+                )
+                alignment_results.append(align_info)
                 excerpts.append({
                     "source_id": src["source_id"],
                     "source_type": src["source_type"],
                     "study_design": src["study_design"],
+                    "extractor": src.get("extractor", "text"),
                     "locator": loc_str,
                     "overlap_ratio": ratio,
                     "overlap_terms": ov,
-                    "excerpt_polarity": ch["polarity"],
-                    "verbatim_excerpt": ch["text"][:320],
+                    "excerpt_polarity": focused_pol,
+                    "alignment_check": align_info,
+                    "verbatim_excerpt": focused_text[:320],
                 })
-                # Polarity contradiction check (only when claim and excerpt actually share topic >=2 terms)
+                # Polarity contradiction check on focused matching excerpt (strictly separating negative vs null_non_significant, never confusing hedged_uncertain with positive)
                 if ov >= 2:
-                    if cl["polarity"] == "positive" and ch["polarity"] == "null_or_negative":
-                        contradiction_hits.append(f"{src['source_id']} ({loc_str}) reports null/negative outcome while claim asserts positive effect")
-                    elif cl["polarity"] == "null_or_negative" and ch["polarity"] == "positive":
-                        contradiction_hits.append(f"{src['source_id']} ({loc_str}) reports positive outcome while claim asserts null/negative effect")
+                    if cl["polarity"] == "positive" and focused_pol in ("negative", "null_non_significant"):
+                        msg = f"{src['source_id']} ({loc_str}) reports `{focused_pol}` outcome while claim asserts `positive` effect"
+                        contradiction_hits.append(msg)
+                        conflicting_sources.append({
+                            "source_id": src["source_id"],
+                            "file": src["file"],
+                            "source_polarity": focused_pol,
+                            "locator": loc_str,
+                            "reason": msg,
+                        })
+                    elif cl["polarity"] in ("negative", "null_non_significant") and focused_pol == "positive":
+                        msg = f"{src['source_id']} ({loc_str}) reports `positive` outcome while claim asserts `{cl['polarity']}` effect"
+                        contradiction_hits.append(msg)
+                        conflicting_sources.append({
+                            "source_id": src["source_id"],
+                            "file": src["file"],
+                            "source_polarity": focused_pol,
+                            "locator": loc_str,
+                            "reason": msg,
+                        })
                 # Applicability condition scope check
-                if ch["conditions"] and not cl["conditions"] and cl["claim_strength"] in ("causal", "consensus_broad", "descriptive"):
-                    condition_gaps.append(f"{src['source_id']} is bounded by condition(s) {ch['conditions'][:3]}, omitted in claim")
+                if focused_conds and not cl["conditions"] and cl["claim_strength"] in ("causal", "consensus_broad", "descriptive"):
+                    condition_gaps.append(f"{src['source_id']} is bounded by condition(s) {focused_conds[:3]}, omitted in claim")
+
+        # Bind corpus-level opposing/negative/null sources back to this claim if topically overlapping (>=2 shared terms)
+        bound_conflict_ids = {cs["source_id"] for cs in conflicting_sources}
+        for src in sources:
+            if src["source_id"] in bound_conflict_ids:
+                continue
+            spol = src["overall_polarity"]
+            is_opposing = (
+                (cl["polarity"] == "positive" and spol in ("negative", "null_non_significant"))
+                or (cl["polarity"] in ("negative", "null_non_significant") and spol == "positive")
+            )
+            if not is_opposing:
+                continue
+            ch_c, _, ov_c = _best_chunk_for_claim(ckw, src)
+            if ch_c and ov_c >= 2:
+                loc_c = f"{src['file']}:{ch_c['section']}:L{ch_c['line_start']}-{ch_c['line_end']}"
+                focused_c = _focus_sentence_in_chunk(ckw, ch_c["text"])
+                conflicting_sources.append({
+                    "source_id": src["source_id"],
+                    "file": src["file"],
+                    "source_polarity": spol,
+                    "locator": loc_c,
+                    "overlap_terms": ov_c,
+                    "reason": f"Corpus source `{src['source_id']}` exhibits opposing polarity (`{spol}`) on shared topic terms (overlap={ov_c}).",
+                    "excerpt_preview": focused_c[:200],
+                })
+                bound_conflict_ids.add(src["source_id"])
+
+        # Collect structural alignment mismatches (model/species/endpoint/comparative boundary)
+        # SUPPORTED requires at least one matched excerpt to pass structural alignment!
+        any_structurally_aligned = any(a["aligned"] for a in alignment_results) if alignment_results else False
+        mismatch_fields: list[dict[str, Any]] = []
+        if alignment_results and not any_structurally_aligned:
+            for a in alignment_results:
+                for mf in a["mismatch_fields"]:
+                    if mf["field"] not in {x["field"] for x in mismatch_fields}:
+                        mismatch_fields.append(mf)
 
         # Determine strict 5-state verdict
         issues: list[str] = []
@@ -704,12 +1107,14 @@ def verify_claims_against_corpus(
             issues.extend(contradiction_hits)
             issues.append("Claim cites conflicting evidence without explicitly stating the divergence or boundary conditions.")
         else:
-            # Check for PARTIALLY_SUPPORTED causes: causal overclaim, consensus overclaim, missing conditions, missing partial cites, preprint-only consensus
+            # Check for PARTIALLY_SUPPORTED causes: causal overclaim, consensus overclaim, missing conditions, model/species/endpoint mismatch, missing partial cites, preprint-only consensus
             partial_reasons: list[str] = []
             if cl["claim_strength"] == "causal" and any_obs_only and not any_rct:
                 partial_reasons.append("Causal overclaim: cited source(s) are observational/correlational only; downgrade to associative/hedged phrasing.")
             if cl["claim_strength"] == "consensus_broad" and (len(matched_sources) == 1 or any_preprint):
                 partial_reasons.append("Consensus overclaim: single or preprint source cannot support universal/field-consensus wording.")
+            if mismatch_fields:
+                partial_reasons.extend(mf["detail"] for mf in mismatch_fields)
             if condition_gaps:
                 partial_reasons.extend(condition_gaps)
             if missing_cites:
@@ -720,7 +1125,7 @@ def verify_claims_against_corpus(
                 issues.extend(partial_reasons)
             else:
                 verdict = "SUPPORTED"
-                issues.append("Claim topic, epistemic strength, polarity, and scope align with supplied verbatim source excerpt(s).")
+                issues.append("Claim topic, experimental model/endpoint alignment, epistemic strength, polarity, and scope align with supplied verbatim source excerpt(s).")
 
         verdict_counts[verdict] += 1
         evaluated.append({
@@ -731,16 +1136,28 @@ def verify_claims_against_corpus(
                 for s in matched_sources
             ],
             "missing_citations": missing_cites,
+            "conflicting_sources": conflicting_sources,
+            "mismatch_fields": mismatch_fields,
             "verbatim_excerpts": excerpts,
             "rationale": " ".join(issues),
             "required_action": "None" if verdict == "SUPPORTED" else f"Revise claim to resolve {verdict}: {' '.join(issues)}",
         })
 
-    # Corpus-level conflict & synthesis audit
+    # Corpus-level conflict & synthesis audit (strictly separating negative direction vs null_non_significant vs hedged_uncertain)
     pos_sources = [s["source_id"] for s in sources if s["overall_polarity"] == "positive"]
-    neg_sources = [s["source_id"] for s in sources if s["overall_polarity"] == "null_or_negative"]
+    neg_dir_sources = [s["source_id"] for s in sources if s["overall_polarity"] == "negative"]
+    null_nonsig_sources = [s["source_id"] for s in sources if s["overall_polarity"] == "null_non_significant"]
+    hedged_unc_sources = [s["source_id"] for s in sources if s["overall_polarity"] == "hedged_uncertain"]
+    neg_or_null_sources = sorted(set(neg_dir_sources + null_nonsig_sources))
     obs_sources = [s["source_id"] for s in sources if s["study_design"] == "observational_correlational"]
-    corpus_has_conflict = bool(pos_sources and neg_sources)
+    corpus_has_conflict = bool(pos_sources and neg_or_null_sources)
+
+    # Ensure every detected negative/null source in conflict_audit is traceable to claim-level bindings
+    bound_conflict_map = {
+        c["claim_id"]: [cs["source_id"] for cs in c.get("conflicting_sources", [])]
+        for c in evaluated
+        if c.get("conflicting_sources")
+    }
 
     draft_acknowledges_conflict = bool(RE_CONFLICT_SYNTHESIS.search(draft_text))
     draft_explains_conditions = bool(RE_CONDITIONAL.search(draft_text))
@@ -753,8 +1170,12 @@ def verify_claims_against_corpus(
     conflict_audit = {
         "corpus_has_divergent_evidence": corpus_has_conflict,
         "positive_polarity_sources": pos_sources,
-        "null_or_negative_polarity_sources": neg_sources,
+        "negative_direction_sources": neg_dir_sources,
+        "null_non_significant_sources": null_nonsig_sources,
+        "hedged_uncertain_sources": hedged_unc_sources,
+        "null_or_negative_polarity_sources": neg_or_null_sources,
         "observational_only_sources": obs_sources,
+        "claim_conflicting_source_bindings": bound_conflict_map,
         "draft_acknowledges_divergence": draft_acknowledges_conflict,
         "draft_explains_applicability_conditions": draft_explains_conditions,
         "paper_by_paper_recitation_warning": paper_by_paper_warning,
@@ -800,11 +1221,12 @@ def render_evidence_matrix_md(audit: dict[str, Any]) -> str:
         "",
         "## Claim-by-Claim Evidence Table",
         "",
-        "| Claim ID | Loc | Strength | Citations | Verdict | Source Type / Design | Locator | Verbatim Excerpt | Rationale |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Claim ID | Loc | Strength | Citations | Verdict | Conflicting Sources | Source Type / Design | Locator | Verbatim Excerpt | Rationale |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for c in audit["claims"]:
         cites = ", ".join(c["citations"]) if c["citations"] else "NONE"
+        conf_s = ", ".join(cs["source_id"] for cs in c.get("conflicting_sources", [])) or "NONE"
         if c["verbatim_excerpts"]:
             ex0 = c["verbatim_excerpts"][0]
             st_des = f"{ex0['source_type']} / {ex0['study_design']}"
@@ -816,15 +1238,16 @@ def render_evidence_matrix_md(audit: dict[str, Any]) -> str:
             quote = "—"
         rat = c["rationale"].replace("|", "/").replace("\n", " ")[:140]
         lines.append(
-            f"| {c['claim_id']} | L{c['line']} ({c['section']}) | `{c['claim_strength']}` | {cites} | `{c['verdict']}` | {st_des} | `{loc}` | {quote} | {rat} |"
+            f"| {c['claim_id']} | L{c['line']} ({c['section']}) | `{c['claim_strength']}` | {cites} | `{c['verdict']}` | {conf_s} | {st_des} | `{loc}` | {quote} | {rat} |"
         )
     return "\n".join(lines) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Evidence-driven scientific writing guard (5-state verdict + conflict synthesis + structured 5-field contract).")
+    parser = argparse.ArgumentParser(description="Evidence-driven scientific writing guard (5-state verdict + polarity/concessive/double-negation guard + XML/PDF fulltext + dynamic output_contract).")
     parser.add_argument("--draft", required=True, help="Draft manuscript path (.md/.txt/.docx).")
-    parser.add_argument("--corpus-dir", required=True, help="Directory of supplied literature full texts / abstracts / notes.")
+    parser.add_argument("--corpus-dir", required=True, help="Directory of supplied literature full texts (.md/.xml/.html/.pdf/.docx/.txt/.json).")
+    parser.add_argument("--input-dir", default="", help="Optional /input directory containing case.json and task.md for dynamic output_contract merging.")
     parser.add_argument("--out-dir", required=True, help="Output directory for claims_list.json, evidence_matrix.md, evidence_audit.json, result.json.")
     parser.add_argument("--case-id", default="CASE-UNSPECIFIED")
     parser.add_argument("--strict", action="store_true", help="Exit 1 if any claim fails or conflict synthesis fails.")
@@ -837,12 +1260,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     corpus_dir = Path(args.corpus_dir)
+    in_dir = Path(args.input_dir) if args.input_dir else (corpus_dir if (corpus_dir / "case.json").is_file() else corpus_dir.parent)
+    case_contract = load_case_contract(in_dir if in_dir.is_dir() else None)
+    effective_case_id = case_contract.get("case_id") or args.case_id
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sources = index_literature_corpus(corpus_dir, draft_path=draft_path)
     claims = decompose_atomic_claims(doc["text"])
     audit = verify_claims_against_corpus(claims, sources, doc["text"])
+    audit["case_constraints_applied"] = case_contract.get("task_constraints", {})
 
     # Deliverable 1: claims_list.json
     claims_list_path = out_dir / "claims_list.json"
@@ -856,7 +1284,7 @@ def main(argv: list[str] | None = None) -> int:
     audit_json_path = out_dir / "evidence_audit.json"
     audit_json_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    # Deliverable 4: structured 5-field result.json
+    # Deliverable 4: structured result.json (merging dynamic case.json output_contract fields)
     gaps: list[dict[str, Any]] = []
     for c in audit["claims"]:
         if c["verdict"] != "SUPPORTED":
@@ -865,7 +1293,7 @@ def main(argv: list[str] | None = None) -> int:
         gaps.append({"code": "CONFLICT_SYNTHESIS_INCOMPLETE", "detail": audit["conflict_synthesis_audit"]})
 
     res = build_writing_result(
-        case_id=args.case_id,
+        case_id=effective_case_id,
         task_id="evidence-driven-writing",
         deliverable={
             "draft_file": draft_path.name,
@@ -887,6 +1315,8 @@ def main(argv: list[str] | None = None) -> int:
                 "claim_strength": c["claim_strength"],
                 "citations": c["citations"],
                 "verdict": c["verdict"],
+                "conflicting_sources": c.get("conflicting_sources", []),
+                "mismatch_fields": c.get("mismatch_fields", []),
                 "locators": [e["locator"] for e in c["verbatim_excerpts"]],
                 "verbatim_excerpts": [e["verbatim_excerpt"] for e in c["verbatim_excerpts"]],
             }
@@ -902,16 +1332,17 @@ def main(argv: list[str] | None = None) -> int:
             if c["verdict"] != "SUPPORTED"
         ],
         artifacts=[draft_path.name, claims_list_path.name, matrix_md_path.name, audit_json_path.name, "result.json"],
-        sources=[{"source_id": s["source_id"], "file": s["file"], "source_type": s["source_type"], "study_design": s["study_design"]} for s in sources],
+        sources=[{"source_id": s["source_id"], "file": s["file"], "source_type": s["source_type"], "study_design": s["study_design"], "extractor": s.get("extractor", "text")} for s in sources],
         gaps=gaps,
         limitations=[
-            "Offline verification inspects only files supplied under /input; absent or abstract-only sources are marked UNVERIFIABLE_ABSENT rather than fabricated.",
+            "Offline verification inspects only files supplied under /input (.md/.xml/.html/.pdf/.docx/.txt/.json); absent or abstract-only sources are marked UNVERIFIABLE_ABSENT rather than fabricated.",
         ],
         verification={
             "evidence_guard_passed": audit["passed"],
             "summary": audit["summary"],
         },
         status="ok" if audit["passed"] and not gaps else "partial_with_gaps",
+        case_contract=case_contract,
     )
     (out_dir / "result.json").write_text(json.dumps(res, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 

@@ -66,10 +66,12 @@ python3 /skills/weekly-skill/scripts/rd_row_provenance_auditor.py audit \
 
 Resolve every high-severity issue before sealing:
 - `ROW_CONDITION_VALUE_MISMATCH`: fix any value attached to the wrong condition row.
-- `OMITTED_NULL_OR_NONSIG_ROW`: restore omitted non-significant/null findings.
+- `DANGLING_FIGURE_OR_TABLE_ANCHOR`: remove or reconcile any cited Figure/Table/Supplementary panel ID absent from `/input` captions and tables.
+- `OMITTED_NULL_OR_NONSIG_ROW` / `OMITTED_CONDITION_ROW`: restore omitted non-significant/null findings and ensure full condition-row retention (`condition_rows_retained == total_condition_rows`).
 - `NONSIG_PROMOTED_TO_SIGNIFICANT_OR_CAUSAL`: downgrade causal/significant claims on `p >= 0.05` rows to hedged non-significant trend descriptions.
-- `ERROR_BAR_DEFINITION_CONFLICT`: align `SD`/`SEM`/`IQR`/`95% CI` with source definitions.
-- `MECHANISM_INTERPRETATION_IN_RESULTS` / `MISSING_CONCRETE_LIMITATIONS_IN_DISCUSSION` / `UNGROUNDED_VALUE`.
+- `ERROR_BAR_DEFINITION_CONFLICT`: align `SD`/`SEM`/`IQR`/`95% CI` with source definitions, or quarantine unverified dispersion metrics non-destructively with an explicit `[EVIDENCE_GAP: ...]` tag rather than deleting informative rows.
+- `UNGROUNDED_VALUE`: verify every numeric token against `/input` (unit conversions pass only when both the converted number and target unit match a source `(value, unit)` pair).
+- `MECHANISM_INTERPRETATION_IN_RESULTS` / `MISSING_CONCRETE_LIMITATIONS_IN_DISCUSSION`.
 
 Re-run `audit` until `high_issue_count == 0`.
 

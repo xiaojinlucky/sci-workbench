@@ -36,14 +36,14 @@ Target task: `academic-citation-management` (References & Citation Management). 
    - Synchronize in-text citations (`[1]`, `[1-3, 5]`, `(Author et al., 2023)`, `\cite{}`), figure/table captions, and end-of-manuscript reference lists in exact first-appearance order.
    - Detect duplicate reference numbers, dangling in-text citations, orphan uncited bibliography items, non-sequential ordering, and **multi-marker → single-source collapse** (e.g., 20 citation markers backed by only 1 structured source object).
 4. **Multi-Format Parsing & Explainable Deduplication (`收得净`)**
-   - Parse `.bib`, `.ris`, and CSL-JSON with zero external dependencies.
+   - Parse `.bib`, `.ris`, CSL-JSON, native **Crossref REST API JSON** (`work` / `work-list`, including `component` SI parent-DOI grouping), **EuropePMC JATS XML** (`<ref-list>`), and **Markdown reference sections** (`--include-manuscript-refs`) with zero external dependencies.
    - Deduplicate via explicit, auditable criteria: normalized DOI match, normalized title + author overlap, **preprint vs. peer-reviewed formal publication** (preferring formal publication while preserving preprint DOI), and bilingual/alternative titles.
-   - **Homonymous-Author Protection**: never merge two records solely by shared surname and year when titles/DOIs differ; explicitly log `protected_homonymous_pairs`.
-5. **Dual-Standard Offline Formatting & Two-Layer Verification (`对得上`)**
+   - **Homonymous-Author & Component Protection**: never merge distinct papers by homonymous authors (`protected_homonymous_pairs`) or distinct Crossref Supplemental Information components (`.s001` vs `.s003`, logged under `related_component_groups`).
+5. **Dual-Standard Offline Formatting & Semantic Two-Layer Verification (`对得上`)**
    - Generate publication-ready **GB/T 7714-2015** (`[J]`/`[C]`/`[M]`/`[D]`/`[EB/OL]`, CJK vs. English author/et al. punctuation) and **APA 7th** lists plus `cleaned_references.bib`.
-   - Emit two strictly independent fields per citation:
+   - Emit two strictly independent fields per citation (for both numeric and author-year citations):
      - `metadata_existence_status`: `verified_in_library` | `missing_from_library` | `incomplete_metadata` | `retracted_or_eoc`
-     - `claim_support_status`: `supported_by_supplied_excerpt` | `partially_supported` | `unverified_fulltext_not_supplied` | `mismatch_or_unsupported`
+     - `claim_support_status`: `supported_by_supplied_excerpt` | `partially_supported` | `contradicted_by_supplied_excerpt` | `unverified_fulltext_not_supplied` | `mismatch_or_unsupported` — evaluated via **outcome-aware polarity equivalence normalization** (e.g., `reduced mortality` <-> `improved survival`, `lower error` <-> `higher accuracy`) and **experimental condition boundary comparison**.
 
 ## Runtime Execution Workflow (Offline Linux Harbor)
 
@@ -61,13 +61,15 @@ python3 -B /skills/weekly-skill/scripts/block_indexer.py --scan /input --out /ap
 ```bash
 python3 -B /skills/weekly-skill/scripts/citation_lifecycle_manager.py \
   --manuscript /input/<manuscript_or_docx> \
-  --bib /input/<refs_1.bib> \
-  --bib /input/<refs_2.ris> \
+  --input-dir /input \
+  --bib /input/<refs_file_or_dir> \
+  --include-manuscript-refs \
   --excerpts-dir /input/<optional_excerpts_dir> \
   --source-mapping /input/<optional_source_mapping.json> \
   --out-dir /app/output \
   --case-id "<CASE_ID>"
 ```
+- Automatically consumes `/input/case.json` (`case_id`, dynamic `output_contract` fields) and `/input/task.md` (`citation_style`, `target_journal`) via `writing_io_and_invariants.load_case_contract`.
 - Review `/app/output/citation_audit_report.md` and `/app/output/citation_audit.json`.
 - If the task asks to produce an edited `.docx` or revised Markdown manuscript with inserted/reordered citations, update the draft and re-run `citation_lifecycle_manager.py --strict` until closure passes (or remaining genuine source gaps are explicitly documented in `gaps` and `change_log`).
 

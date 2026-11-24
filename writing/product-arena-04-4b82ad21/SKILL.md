@@ -1,6 +1,6 @@
 ---
 name: intro-related-work-architect
-description: Evidence-grounded Introduction and Related Work drafting and verification Skill . Enforces Press-Release four-beat opening (Problem -> Gap -> Approach -> Key Finding), dimension-grouped comparative Related Work taxonomy (anti-chronological-laundry-list), bounded gap derivation blocking unsubstantiated "first ever / no prior work" claims, and 1:1 contribution-to-evidence alignment with citation coverage checks.
+description: Evidence-grounded Introduction and Related Work drafting and verification Skill. Enforces Press-Release four-beat opening (Problem -> Gap -> Approach -> Key Finding), dimension-grouped comparative Related Work taxonomy (generating embeddable related_work_taxonomy.md), citation paraphrase semantic fidelity auditing against supplied source texts, bounded gap derivation blocking unsubstantiated "first ever / no prior work" claims, dynamic /input/task.md & case.json contract consumption, and 1:1 contribution-to-evidence alignment.
 ---
 
 # Introduction & Related Work Drafting and Verification (`introduction-related-work-writing`)
@@ -19,9 +19,10 @@ Use this Skill to draft, revise, and audit academic **Introduction** and **Relat
 3. **Bounded Gap Derivation — Zero Baseless "First" Claims (说得实)**:
    - Every research gap must be derived from specific limitations, uncovered regimes, or conflicting findings of **cited supplied literature**, AND specify **who cares / why the gap matters** within an explicit scope boundary.
    - **Interceptor rule (`UNSUBSTANTIATED_GAP_CLAIM`)**: Reject unsupported declarations such as "尚无研究", "首次", "填补空白", "first ever", "no prior work", or "unprecedented" unless strictly scoped and anchored to cited limitations. Never infer "novelty" merely from empty search results.
-4. **1:1 Contribution-to-Evidence & Citation Alignment (对得上)**:
-   - Every itemized contribution in the Introduction must map 1:1 to supplied Methods, Figures, Tables, and quantitative Results.
-   - **Interceptor rule (`OVERCLAIMED_CONTRIBUTION`)**: Flag any contribution asserting untested datasets, missing Figure/Table pointers, or ungrounded metrics.
+4. **1:1 Contribution-to-Evidence, Citation Paraphrase Fidelity & Dynamic Contract (对得上)**:
+   - Every itemized contribution in the Introduction must map 1:1 to supplied Methods, Figures, Tables, and quantitative Results (`OVERCLAIMED_CONTRIBUTION` interceptor).
+   - **Citation Paraphrase Semantic Fidelity (`citation_paraphrase_fidelity`)**: Compares every cited sentence in the draft against the matched supplied source text (`.md`/`.json`/`.csv`/`.bib`/`.xml`/`.html`/`.docx`/`.pdf` with stdlib fallback) to intercept direction reversals (`PARAPHRASE_DIRECTION_REVERSAL`), drifted metrics (`PARAPHRASE_NUMERIC_DISTORTION`), and stripped applicability boundaries (`PARAPHRASE_SCOPE_OVERGENERALIZATION`).
+   - Automatically consumes `/input/case.json` (`output_contract`, `citation_style`, `target_journal`) and `/input/task.md` via `wio.load_case_contract()`, and emits a ready-to-embed `related_work_taxonomy.md` comparison table alongside `related_work_taxonomy.json` and `gap_contribution_alignment.md`.
    - Verify every inline citation against supplied bibliography metadata and flag uncited key supplied works (`UNCOVERED_SUPPLIED_REFERENCES`) or unverified citations (`UNVERIFIED_CITATION`).
 
 ## Runtime Execution Workflow
@@ -49,13 +50,15 @@ python3 /skills/weekly-skill/scripts/intro_related_work_auditor.py \
   --out-dir /app/output
 ```
 (When auditing an existing user draft directly in `/input/`, pass `--input-dir /input --out-dir /app/output` first to locate every blocking defect before revising.)
-- Resolve every `blocking` finding (`HOLLOW_GENERIC_OPENER`, `CHRONOLOGICAL_SUMMARY_STITCHING`, `UNRECONCILED_PRIOR_WORK_DIVERGENCE`, `UNSUBSTANTIATED_GAP_CLAIM`, `OVERCLAIMED_CONTRIBUTION`, `UNVERIFIED_CITATION`), then re-run the auditor until `blocking_count == 0` (or honestly record unresolvable input shortages in `gaps`).
+- Resolve every `blocking` finding (`HOLLOW_GENERIC_OPENER`, `CHRONOLOGICAL_SUMMARY_STITCHING`, `UNRECONCILED_PRIOR_WORK_DIVERGENCE`, `UNSUBSTANTIATED_GAP_CLAIM`, `OVERCLAIMED_CONTRIBUTION`, `UNVERIFIED_CITATION`, `PARAPHRASE_DIRECTION_REVERSAL`, `PARAPHRASE_NUMERIC_DISTORTION`, `PARAPHRASE_SCOPE_OVERGENERALIZATION`, `MANUSCRIPT_META_POLLUTION`), then re-run the auditor until `blocking_count == 0` (or honestly record unresolvable input shortages in `gaps`). The auditor also runs an automatic **Manuscript Cleanliness Gate** (`manuscript_cleanliness`) that strips process self-narration, script paths, and audit jargon and emits submission-ready `/app/output/introduction_and_related_work_clean.md`; unknown paper publication years or ambiguous conclusion directions are honestly marked `year: "unknown"` / `conclusion_direction: "unknown"` with explicit gaps rather than guessed from body prose.
 
 ### Step 4: Grounding gate & final Harbor audit
 ```bash
 python3 /skills/weekly-skill/scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
 python3 /skills/weekly-skill/scripts/final_audit.py --dir /app/output \
+  --require introduction_and_related_work_clean.md \
   --require related_work_taxonomy.json \
+  --require related_work_taxonomy.md \
   --require gap_contribution_alignment.md
 ```
 

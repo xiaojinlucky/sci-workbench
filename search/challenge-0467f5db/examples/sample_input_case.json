@@ -1,0 +1,64 @@
+{
+  "case_id": "example-coverage-01",
+  "note": "Illustrative synthetic example only; not a formal evaluation case.",
+  "query_metadata": {
+    "query_id": "Q1_baseline",
+    "query_string": "(butyrate OR SCFA) AND (colitis OR IBD)",
+    "databases": ["crossref", "europepmc"],
+    "field_scope": "title_only",
+    "year_min": 2020,
+    "year_max": 2025
+  },
+  "source_failures": [
+    {"source": "openalex", "status": "timeout", "error": "HTTP 504 gateway timeout", "query_id": "Q1_openalex"}
+  ],
+  "reference_set": [
+    {
+      "record_id": "REF-01",
+      "title": "Butyrate supplementation attenuates murine colitis via Treg induction",
+      "authors": ["Alice Chen"],
+      "year": 2022,
+      "doi": "10.1000/ex.2022.001",
+      "source": "crossref"
+    },
+    {
+      "record_id": "REF-02",
+      "title": "Microbial metabolites modulate intestinal mucosal barrier homeostasis",
+      "abstract": "Short-chain fatty acids including butyrate reduced colitis severity in adult cohorts.",
+      "authors": ["Marco Silva"],
+      "year": 2023,
+      "doi": "10.1000/ex.2023.002",
+      "source": "europepmc"
+    },
+    {
+      "record_id": "REF-03",
+      "title": "Long-term dietary fiber intervention in ulcerative colitis",
+      "authors": ["Hana Sato"],
+      "year": 2021,
+      "doi": "10.1000/ex.2021.003",
+      "source": "openalex"
+    }
+  ],
+  "records": [
+    {
+      "record_id": "HIT-01",
+      "title": "Butyrate supplementation attenuates murine colitis via Treg induction",
+      "authors": ["Alice Chen"],
+      "year": 2022,
+      "doi": "10.1000/ex.2022.001",
+      "source": "crossref",
+      "query_id": "Q1_baseline"
+    }
+  ],
+  "supplemental_hits": [
+    {
+      "record_id": "SUPP-01",
+      "title": "Butyrate supplementation attenuates murine colitis via Treg induction",
+      "authors": ["Alice Chen"],
+      "year": 2022,
+      "doi": "10.1000/ex.2022.001",
+      "source": "supplemental",
+      "query_id": "Q2_synonym_spin"
+    }
+  ]
+}

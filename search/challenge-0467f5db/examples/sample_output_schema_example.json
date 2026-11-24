@@ -1,0 +1,70 @@
+{
+  "example_notice": "Illustrative output schema example only; runtime outputs are generated strictly from /input snapshots.",
+  "case_id": "example-coverage-01",
+  "status": "ok",
+  "reference_set_sha256": "example_sha256_fingerprint_placeholder",
+  "reference_denominator_count": 3,
+  "actionable_reference_count": 3,
+  "baseline_coverage_ratio": 0.3333,
+  "actionable_baseline_coverage_ratio": 0.3333,
+  "post_supplemental_coverage_ratio": 0.3333,
+  "actionable_post_supplemental_coverage_ratio": 0.3333,
+  "supplemental_empty_spin_detected": true,
+  "missed_references_attributed": [
+    {
+      "record_id": "REF-02",
+      "title": "Microbial metabolites modulate intestinal mucosal barrier homeostasis",
+      "omission_category": "field_restriction_too_narrow",
+      "query_id": "Q1_baseline",
+      "field_scope": "title_only",
+      "evidence": "Query terms match abstract/fulltext but were missed because field_scope='title_only' restricted matching to title-only.",
+      "evidence_state": "SUPPORTED"
+    },
+    {
+      "record_id": "REF-03",
+      "title": "Long-term dietary fiber intervention in ulcerative colitis",
+      "omission_category": "source_unreachable_or_failed",
+      "query_id": "Q1_openalex",
+      "field_scope": "title_only",
+      "evidence": "Source 'openalex' failed during retrieval (status=timeout: HTTP 504 gateway timeout).",
+      "evidence_state": "UNKNOWN"
+    }
+  ],
+  "targeted_remediation_actions": [
+    {
+      "omission_category": "source_unreachable_or_failed",
+      "affected_count": 1,
+      "action": "Re-run frozen queries against failed/timed-out source(s) ['openalex'] once restored."
+    },
+    {
+      "omission_category": "field_restriction_too_narrow",
+      "affected_count": 1,
+      "action": "Expand field_scope from title-only to title+abstract+keywords while preserving Boolean concept blocks."
+    }
+  ],
+  "metrics": {
+    "reference_denominator_count": 3,
+    "actionable_reference_count": 3,
+    "baseline_matched_count": 1,
+    "omission_count": 2,
+    "supplemental_net_new_count": 0,
+    "residual_omission_count": 2,
+    "baseline_coverage_ratio": 0.3333,
+    "post_supplemental_coverage_ratio": 0.3333,
+    "supplemental_marginal_gain": 0.0
+  },
+  "metric_provenance": {
+    "reference_denominator_count": "coverage_audit_report.json:reference_denominator_count",
+    "baseline_matched_count": "coverage_audit_report.json:matched_references",
+    "omission_count": "coverage_audit_report.json:missed_references_attributed",
+    "supplemental_net_new_count": "coverage_audit_report.json:supplemental_recoveries"
+  },
+  "gaps": [
+    {
+      "code": "SUPPLEMENTAL_SEARCH_ZERO_NET_GAIN",
+      "severity": "warning",
+      "source": "coverage_omission_analyzer",
+      "message": "Supplemental search yielded 0 newly recovered reference items; stop synonym spinning."
+    }
+  ]
+}

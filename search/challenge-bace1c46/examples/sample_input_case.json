@@ -1,0 +1,29 @@
+{
+  "case_id": "example-quality-01",
+  "note": "Illustrative synthetic example only; not a formal evaluation case.",
+  "appraisal_scale": "ROBINS-I",
+  "scale_version": "V2",
+  "records": [
+    {
+      "record_id": "STUDY-01",
+      "title": "Propensity-score matched non-randomized intervention of dietary butyrate in adult colitis",
+      "abstract": "Non-randomized intervention cohort evaluating dietary butyrate in 120 adults with colitis.",
+      "paragraphs": [
+        {"paragraph_id": "S1-M1", "section": "methods", "page_number": 2, "text": "Consecutive patients meeting inclusion criteria were matched via propensity score weighting to adjust for baseline confounders."},
+        {"paragraph_id": "S1-M2", "section": "methods", "page_number": 3, "text": "Outcomes were measured by blinded outcome assessors using validated Mayo scores; multiple imputation handled missing data."},
+        {"paragraph_id": "S1-D1", "section": "discussion", "page_number": 6, "text": "Code availability: scripts are deposited on GitHub; however, unblinded exposure self-report remains a limitation."}
+      ],
+      "year": 2024,
+      "doi": "10.1000/qual.2024.01",
+      "fulltext_available": true
+    },
+    {
+      "record_id": "STUDY-02",
+      "title": "Abstract-only cohort note on metabolite profiles",
+      "abstract": "Observational study of 45 participants reporting fecal SCFA associations.",
+      "year": 2023,
+      "doi": "10.1000/qual.2023.02",
+      "fulltext_available": false
+    }
+  ]
+}

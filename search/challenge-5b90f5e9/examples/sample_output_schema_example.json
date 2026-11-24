@@ -1,0 +1,65 @@
+{
+  "example_notice": "Illustrative output schema example only; runtime outputs are generated strictly from /input snapshots.",
+  "case_id": "example-prisma-01",
+  "status": "ok",
+  "protocol_version": "v1_frozen",
+  "protocol_sha256": "example_protocol_sha256_placeholder",
+  "prisma_flow": {
+    "balanced": true,
+    "n_identified": 5,
+    "n_dedup": 1,
+    "n_screened": 4,
+    "n_screen_excl": 0,
+    "n_sought": 4,
+    "n_not_retrieved": 1,
+    "n_assessed": 3,
+    "n_elig_excl": 0,
+    "n_awaiting_elig": 2,
+    "n_included": 1
+  },
+  "dual_reviewer_summary": {
+    "dual_rated_record_count": 2,
+    "exact_decision_agreement_count": 1,
+    "observed_agreement_rate": 0.5,
+    "cohens_kappa": 0.0,
+    "conflict_count": 1
+  },
+  "screening_decisions": [
+    {
+      "record_id": "REC-01",
+      "decision": "include",
+      "reason_code": "INC_MATCH",
+      "triggered_clause": "all_inclusion_clauses_satisfied",
+      "evidence_quote": "A randomized trial evaluating butyrate supplementation in adult ulcerative colitis.",
+      "needs_human_arbitration": false
+    },
+    {
+      "record_id": "REC-02",
+      "decision": "borderline",
+      "reason_code": "BORDERLINE_MISSING_REQUIRED_METADATA",
+      "triggered_clause": "missing_protocol_bounded_year[2020,2025]",
+      "missing_critical_fields": ["year"],
+      "evidence_quote": "Clinical cohort study of butyrate levels in colitis patients.",
+      "needs_human_arbitration": true
+    },
+    {
+      "record_id": "REC-04",
+      "decision": "not_retrieved",
+      "reason_code": "FULLTEXT_NOT_RETRIEVED",
+      "triggered_clause": "fulltext_unavailable_after_tiab_pass",
+      "evidence_quote": "Prospective trial of butyrate in colitis with fulltext behind paywall.",
+      "needs_human_arbitration": false
+    }
+  ],
+  "metrics": {
+    "n_identified": 5,
+    "n_dedup": 1,
+    "n_screened": 4,
+    "n_included": 1,
+    "n_excluded": 0,
+    "n_not_retrieved": 1,
+    "n_arbitration": 2,
+    "n_near_duplicate_candidates": 0,
+    "prisma_balanced": 1
+  }
+}

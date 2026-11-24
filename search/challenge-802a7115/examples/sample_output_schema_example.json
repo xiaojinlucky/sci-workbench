@@ -1,0 +1,24 @@
+{
+  "_synthetic_notice": "SYNTHETIC SCHEMA EXAMPLE — NOT ACTUAL EVALUATION OUTPUT",
+  "case_id": "synthetic-xling-01",
+  "task_id": "challenge-802a7115",
+  "status": "ok",
+  "metrics": {
+    "raw_view_count": 4,
+    "unique_work_count": 2,
+    "exact_duplicate_count": 1,
+    "homonym_distinct_doi_separated_count": 1,
+    "title_overwritten_count": 0,
+    "query_count": 2
+  },
+  "title_overwrite_audit": {
+    "records_checked": 4,
+    "overwritten_count": 0,
+    "audit_passed": true
+  },
+  "artifacts": [
+    "result.json",
+    "cross_lingual_alignment.json",
+    "cross_lingual_report.md"
+  ]
+}

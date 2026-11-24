@@ -1,0 +1,51 @@
+{
+  "_synthetic_notice": "SYNTHETIC EXAMPLE — NOT ACTUAL EVALUATION OUTPUT",
+  "case_id": "synthetic-xling-01",
+  "queries": [
+    {
+      "question_id": "Q1",
+      "question": "Which studies analyze exogenous intoxications in children and adolescents (外源性中毒) with TP53 or SC markers?"
+    },
+    {
+      "question_id": "Q2",
+      "question": "Quais estudos avaliam necrose avascular em pacientes com doenca falciforme?"
+    }
+  ],
+  "records": [
+    {
+      "record_id": "V1_PT",
+      "work_id": "W1",
+      "title": "Perfil epidemiológico de intoxicações exógenas em crianças e adolescentes",
+      "body_language": "pt",
+      "view_type": "original_fulltext",
+      "doi": "10.9999/synth.xling.01",
+      "text": "Estudo epidemiológico sobre intoxicações exógenas em crianças e adolescentes atendidos em hospital pediátrico."
+    },
+    {
+      "record_id": "V2_EN_TRANS",
+      "work_id": "W1",
+      "title": "Epidemiological profile of exogenous intoxications in children and adolescents",
+      "body_language": "en",
+      "view_type": "publisher_full_translation",
+      "doi": "10.9999/synth.xling.01",
+      "text": "Epidemiological study on exogenous intoxications in children and adolescents treated at a pediatric hospital."
+    },
+    {
+      "record_id": "V3_DUP",
+      "work_id": "W1",
+      "title": "Perfil epidemiológico de intoxicações exógenas em crianças e adolescentes",
+      "body_language": "pt",
+      "view_type": "exact_duplicate",
+      "doi": "10.9999/synth.xling.01",
+      "text": "Estudo epidemiológico sobre intoxicações exógenas em crianças e adolescentes atendidos em hospital pediátrico."
+    },
+    {
+      "record_id": "V4_HOMONYM_OTHER_DOI",
+      "title": "Epidemiological profile of exogenous intoxications in children and adolescents",
+      "body_language": "en",
+      "view_type": "english_abstract_only",
+      "doi": "10.9999/synth.xling.99",
+      "abstract": "Separate regional cohort with identical title but distinct DOI."
+    }
+  ]
+}

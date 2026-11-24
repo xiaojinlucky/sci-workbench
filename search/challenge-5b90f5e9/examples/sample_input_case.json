@@ -1,0 +1,74 @@
+{
+  "case_id": "example-prisma-01",
+  "note": "Illustrative synthetic example only; not a formal evaluation case.",
+  "criteria": {
+    "version": "v1_frozen",
+    "year_min": 2020,
+    "year_max": 2025,
+    "allowed_languages": ["en"],
+    "required_terms": ["butyrate", "colitis"],
+    "exclude_terms": ["editorial", "in vitro only"],
+    "require_fulltext": true
+  },
+  "reviewer_opinions": [
+    {"record_id": "REC-01", "reviewer": "R1", "decision": "include", "synthetic": true},
+    {"record_id": "REC-01", "reviewer": "R2", "decision": "include", "synthetic": true},
+    {"record_id": "REC-03", "reviewer": "R1", "decision": "include", "synthetic": true},
+    {"record_id": "REC-03", "reviewer": "R2", "decision": "exclude", "reason": "unclear population", "synthetic": true}
+  ],
+  "records": [
+    {
+      "record_id": "REC-01",
+      "title": "Oral butyrate reduces inflammation in adult ulcerative colitis",
+      "abstract": "A randomized trial evaluating butyrate supplementation in adult ulcerative colitis.",
+      "authors": ["Elena Rossi"],
+      "year": 2023,
+      "doi": "10.1000/prisma.2023.01",
+      "language": "en",
+      "fulltext_available": true,
+      "source": "europepmc"
+    },
+    {
+      "record_id": "REC-01-DUP",
+      "title": "Oral butyrate reduces inflammation in adult ulcerative colitis",
+      "abstract": "A randomized trial evaluating butyrate supplementation in adult ulcerative colitis.",
+      "authors": ["Elena Rossi"],
+      "year": 2023,
+      "doi": "10.1000/prisma.2023.01",
+      "language": "en",
+      "source": "crossref"
+    },
+    {
+      "record_id": "REC-02",
+      "title": "Butyrate signaling in mucosal colitis models",
+      "abstract": "Clinical cohort study of butyrate levels in colitis patients.",
+      "authors": ["David Park"],
+      "year": null,
+      "language": "en",
+      "source": "crossref"
+    },
+    {
+      "record_id": "REC-03",
+      "title": "Short-chain fatty acids and colitis endpoints",
+      "abstract": "Prospective study testing butyrate supplementation in colitis remission.",
+      "authors": ["Nadia Benali"],
+      "year": 2024,
+      "doi": "10.1000/prisma.2024.03",
+      "language": "en",
+      "fulltext_available": true,
+      "source": "openalex"
+    },
+    {
+      "record_id": "REC-04",
+      "title": "Butyrate therapy in refractory colitis",
+      "abstract": "Prospective trial of butyrate in colitis with fulltext behind paywall.",
+      "authors": ["Kenji Ito"],
+      "year": 2024,
+      "doi": "10.1000/prisma.2024.04",
+      "language": "en",
+      "fulltext_available": false,
+      "retrieval_status": "not_retrieved",
+      "source": "crossref"
+    }
+  ]
+}

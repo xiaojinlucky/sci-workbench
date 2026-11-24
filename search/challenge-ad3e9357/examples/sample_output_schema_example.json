@@ -1,0 +1,20 @@
+{
+  "_synthetic_notice": "SYNTHETIC SCHEMA EXAMPLE — NOT ACTUAL EVALUATION OUTPUT",
+  "case_id": "synthetic-patent-01",
+  "task_id": "challenge-ad3e9357",
+  "status": "ok",
+  "metrics": {
+    "raw_patent_records_ingested": 3,
+    "publication_document_count": 3,
+    "docdb_simple_family_count": 2,
+    "inpadoc_extended_family_count": 1,
+    "scientific_paper_count": 1,
+    "wo_ocr_boundary_count": 1,
+    "claims_extracted_count": 2
+  },
+  "artifacts": [
+    "result.json",
+    "patent_search_report.json",
+    "patent_landscape_report.md"
+  ]
+}

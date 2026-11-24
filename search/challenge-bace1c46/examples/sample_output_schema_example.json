@@ -1,0 +1,70 @@
+{
+  "example_notice": "Illustrative output schema example only; runtime outputs are generated strictly from /input snapshots.",
+  "case_id": "example-quality-01",
+  "status": "ok",
+  "scales_applied": {
+    "ROBINS-I V2 (V2 (2024))": 2
+  },
+  "overall_tier_distribution": {
+    "mixed_needs_review": 1,
+    "incomplete_material_abstract_only": 1
+  },
+  "ranked_evidence_candidates": [
+    {
+      "rank": 1,
+      "record_id": "STUDY-01",
+      "scale": "ROBINS-I V2 (V2 (2024))",
+      "material_tier": "fulltext_verified",
+      "overall_quality_tier": "mixed_needs_review",
+      "recommended_triage": "retain_with_targeted_domain_verification",
+      "grounded_domains": 4,
+      "concern_domains": 0,
+      "unknown_domains": 3
+    },
+    {
+      "rank": 2,
+      "record_id": "STUDY-02",
+      "scale": "ROBINS-I V2 (V2 (2024))",
+      "material_tier": "abstract_only",
+      "overall_quality_tier": "incomplete_material_abstract_only",
+      "recommended_triage": "hold_pending_fulltext_retrieval",
+      "grounded_domains": 0,
+      "concern_domains": 0,
+      "unknown_domains": 7
+    }
+  ],
+  "appraisals": [
+    {
+      "record_id": "STUDY-01",
+      "scale_name": "ROBINS-I V2",
+      "scale_version": "V2 (2024)",
+      "material_tier": "fulltext_verified",
+      "overall_quality_tier": "mixed_needs_review",
+      "tier_derivation_rule": "Rule T7: mixed grounded (4), partial (0), and unknown (3) domains -> mixed_needs_review.",
+      "dimensions": [
+        {
+          "dimension_id": "ROBINS_V2_D1_confounding",
+          "bias_rating": "no_indication_observed",
+          "evidence_state": "SUPPORTED",
+          "evidence": [
+            {
+              "paragraph_id": "S1-M1",
+              "section": "methods",
+              "page_number": 2,
+              "quote": "Consecutive patients meeting inclusion criteria were matched via propensity score weighting to adjust for baseline confounders."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "metrics": {
+    "appraised_study_count": 2,
+    "fulltext_study_count": 1,
+    "abstract_only_count": 1,
+    "scanned_unparsed_count": 0,
+    "anchored_dimension_count": 4,
+    "non_unknown_dimension_count": 4,
+    "unknown_dimension_count": 10
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "_synthetic_notice": "SYNTHETIC EXAMPLE — NOT ACTUAL EVALUATION OUTPUT",
+  "case_id": "synthetic-patent-01",
+  "queries": [
+    {
+      "query_id": "Q1",
+      "question": "Retrieve patents classified under H01M 10/0562 for sulfide solid-state electrolyte membranes and compare with academic studies."
+    }
+  ],
+  "patents": [
+    {
+      "record_id": "US20230000001A1",
+      "title": "Solid-state sulfide electrolyte synthesis",
+      "publication_number": "US20230000001A1",
+      "application_number": "US17/900,001",
+      "priority_numbers": ["US202163200001P"],
+      "filing_date": "2022-05-01",
+      "publication_date": "2023-01-10",
+      "legal_status": "Pending (2023 snapshot)",
+      "legal_status_date": "2023-11-01",
+      "claims_text": "1. A solid-state sulfide electrolyte membrane classified under H01M 10/0562 comprising Li6PS5Cl. 2. The membrane of claim 1 having ionic conductivity above 2 mS/cm."
+    },
+    {
+      "record_id": "US20230000001A4",
+      "title": "Solid-state sulfide electrolyte synthesis (amended publication)",
+      "publication_number": "US20230000001A4",
+      "application_number": "US17/900,001",
+      "priority_numbers": ["US202163200001P"],
+      "filing_date": "2022-05-01",
+      "publication_date": "2023-04-15",
+      "claims_text": "1. An amended solid-state sulfide electrolyte membrane comprising Li6PS5Cl."
+    },
+    {
+      "record_id": "WO2022000010A1",
+      "title": "PCT counterpart sulfide electrolyte with polymer binder",
+      "publication_number": "WO2022000010A1",
+      "application_number": "PCT/US2022/000010",
+      "priority_numbers": ["US202163200001P", "US202263300099P"],
+      "ocr_boundary": true,
+      "text": "WO merged OCR boundary example under H01M 10/0562."
+    }
+  ],
+  "records": [
+    {
+      "record_id": "SCI1",
+      "title": "Academic review on sulfide electrolyte interfaces",
+      "doi": "10.9999/sci.synth.1",
+      "year": 2024
+    }
+  ]
+}

@@ -77,3 +77,7 @@ python /skills/weekly-skill/scripts/gap_gate.py --verify-json /app/output/result
 python /skills/weekly-skill/scripts/final_audit.py --dir /app/output --result-file result.json --require logic_audit.json --require logic_review_report.md
 ```
 If `gap_gate.py` flags any ungrounded DOI/arXiv or missing metric provenance, resolve it before exit. If genuine input gaps exist (e.g., scanned PDF pages or truncated sections), preserve them in `gaps` so `result.json` honestly seals with `"status": "partial_with_gaps"` and `"audit_status": "partial"`.
+
+## Offline Extraction & Six-Facet Companion Guarantees
+- **4-Tier PDF Cascade**: `review_io_core.py` cascades `pypdf` (two-column reading order) → `pdfplumber` → `pdftotext` → pure-stdlib FlateDecode `BT..ET` fallback (`PDF_STDLIB_FALLBACK_USED`).
+- **Real-Journal Precision, B7 Interpretive Tension & Non-Bundling Rule**: Disambiguates clinical/epidemiological noun phrases (e.g., `causes of death`) from causal overclaim verbs, separates `regulatory_guidance` from `research_manuscript`, automatically flags **B7 Interpretive Tension** (95% CI vs p-value mathematical contradictions & AAPC trend-vs-endpoint divergence) as individual line-anchored findings (never bundled into a single suggestion or buried in `uncertainty`), and emits `six_facet_coverage` + `semantic_review_checklist` in both `logic_audit.json` and `result.json`. Step 3 MUST preserve all deterministic `file:L<start>-L<end>` anchors and explicitly ADD substantiated semantic findings rather than only dropping weak candidates.

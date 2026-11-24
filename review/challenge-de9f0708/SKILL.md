@@ -79,3 +79,7 @@ python /skills/weekly-skill/scripts/result_guard.py --path /app/output/result.js
 python /skills/weekly-skill/scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
 python /skills/weekly-skill/scripts/final_audit.py --dir /app/output --result-file result.json --require compliance_audit.json --require compliance_report.md
 ```
+
+## Offline Extraction, Citation Norms & Six-Facet Companion Coverage
+- **4-Tier PDF Cascade**: `review_io_core.py` cascades `pypdf` (two-column reading order) → `pdfplumber` → `pdftotext` → pure-stdlib FlateDecode `BT..ET` fallback (`PDF_STDLIB_FALLBACK_USED`) so multi-page real PDFs remain auditable even in minimal containers.
+- **Citation Norms & Companion Audit**: In addition to ethics anti-spoofing, PII redaction, dual-track third-party asset permissions, and 128-bit HV-dHash image fingerprinting, `compliance_ethics_auditor.py` runs deterministic multi-line bibliography parsing (with Vancouver superscript protection, retracted/withdrawn reference checks, and dangling citation mapping), numeric sanity (`df > N`, `p = 0.000`), and exports `six_facet_coverage` + `semantic_review_checklist` (with post-hoc PII redaction across every finding) into both `compliance_audit.json` and `result.json`.

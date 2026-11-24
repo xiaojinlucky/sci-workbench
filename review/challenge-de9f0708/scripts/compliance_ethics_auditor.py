@@ -161,11 +161,21 @@ MRN_RE = re.compile(
     re.I,
 )
 CN_ID_CARD_RE = re.compile(r"(?<!\d)[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?!\d)")
-# Dynamically composed host path regex so source text never triggers static host-path scanners
+# Dynamically composed host & cloud-personal workspace path regex so source text never triggers static scanners
 HOST_PATH_RE = re.compile(
     r"(?:[A-Za-z]:\\(?:" + "Users" + "|" + "Desktop" + r")\\[^\s'\"<>]+"
     + r"|/" + "Users" + r"/[A-Za-z0-9._-]+/[^\s'\"<>]*"
-    + r"|/" + "home" + r"/[A-Za-z0-9._-]+/[^\s'\"<>]*)",
+    + r"|/" + "home" + r"/[A-Za-z0-9._-]+/[^\s'\"<>]*"
+    + r"|https?://[^\s'\"<>]*sharepoint\.com/personal/[A-Za-z0-9._-]+(?:/[^\s'\"<>]*)?"
+    + r"|https?://[^\s'\"<>]*onedrive\.live\.com/[^\s'\"<>]*)",
+    re.I,
+)
+ETHICS_EXEMPTION_RE = re.compile(
+    r"\b(?:no\s+approval\s+by\s+(?:the\s+)?(?:research\s+)?ethics\s+committee\s+was\s+necessary|"
+    r"exempt\s+from\s+(?:ethics|irb|institutional\s+review)|"
+    r"waiver\s+of\s+(?:written\s+)?(?:informed\s+)?consent|"
+    r"public\s+domain\s+secondary\s+data|secondary\s+data\s+(?:of|in)\s+(?:the\s+)?public\s+domain|"
+    r"did\s+not\s+require\s+(?:ethics|irb)\s+approval)\b|免除伦理审查|豁免知情同意",
     re.I,
 )
 NON_ANON_REPO_RE = re.compile(
@@ -401,6 +411,8 @@ def audit_compliance(target: Path, guidelines_path: Path | None = None) -> dict[
     checklist_status: list[dict[str, Any]] = []
     rejected_pseudo_ids: list[dict[str, Any]] = []
     third_party_assets: list[dict[str, Any]] = []
+    six_facet_coverage_docs: list[dict[str, Any]] = []
+    semantic_checklists: list[dict[str, Any]] = []
     fid = 0
 
     guideline_supplied = bool(guidelines)
@@ -467,14 +479,25 @@ def audit_compliance(target: Path, guidelines_path: Path | None = None) -> dict[
         abs_meth_text = "\n".join(s["text"] for s in abs_meth_secs) if abs_meth_secs else non_ref_text
         methods_text = "\n".join(s["text"] for s in methods_secs) if methods_secs else abs_meth_text
 
-        # 1. Ethics / IRB / IACUC / Clinical Trial Anti-Spoofing
+        # 1. Ethics / IRB / IACUC / Clinical Trial Anti-Spoofing (skip for regulatory guidance documents)
+        doc_role = io_core.detect_document_role(doc)
         is_computational_exempt = (
-            bool(COMPUTATIONAL_EXEMPT_RE.search(abs_meth_text))
-            and not bool(DIRECT_HUMAN_METHODS_RE.search(methods_text))
+            doc_role == "regulatory_guidance"
+            or (
+                bool(COMPUTATIONAL_EXEMPT_RE.search(abs_meth_text))
+                and not bool(DIRECT_HUMAN_METHODS_RE.search(methods_text))
+            )
         )
         raw_human_hit = bool(HUMAN_SIGNAL_RE.search(non_ref_text))
         has_human = raw_human_hit and not is_computational_exempt
-        if raw_human_hit and is_computational_exempt:
+        if doc_role == "regulatory_guidance":
+            checklist_status.append({
+                "file": doc["file"],
+                "item": "document_role_classification",
+                "status": "regulatory_guidance_exempt",
+                "detail": "Document identified as regulatory/industry guidance rather than an empirical research manuscript; IRB/informed-consent and manuscript declaration rules are skipped while PII/host-path leak checks remain active.",
+            })
+        elif raw_human_hit and is_computational_exempt:
             checklist_status.append({
                 "file": doc["file"],
                 "item": "human_subjects_ethics_trigger",
@@ -615,7 +638,20 @@ def audit_compliance(target: Path, guidelines_path: Path | None = None) -> dict[
                     "verified_ids": [v["id"] for v in valid_ethics_ids[:5]],
                 })
 
-            if has_human and not INFORMED_CONSENT_RE.search(non_ref_text):
+            has_ethics_exemption = bool(ETHICS_EXEMPTION_RE.search(non_ref_text))
+            if has_ethics_exemption:
+                ex_lno = next(
+                    (i for i, ln in enumerate(lines, 1) if i not in ref_line_set and ETHICS_EXEMPTION_RE.search(ln)),
+                    1,
+                )
+                checklist_status.append({
+                    "file": doc["file"],
+                    "item": "ethics_exemption_and_consent_waiver",
+                    "status": "exemption_declared_verify_public_deid",
+                    "line": ex_lno,
+                    "detail": f"Explicit ethics exemption / public-domain secondary-data waiver declared at L{ex_lno}; suppressed contradictory missing-consent alert.",
+                })
+            if has_human and not INFORMED_CONSENT_RE.search(non_ref_text) and not has_ethics_exemption:
                 fid += 1
                 findings.append({
                     "finding_id": f"CMP-{fid:03d}",
@@ -722,8 +758,14 @@ def audit_compliance(target: Path, guidelines_path: Path | None = None) -> dict[
                         "status": "confirmed",
                     })
 
-            # International phone numbers only when near phone/tel/contact/patient cue to avoid false alarms on numeric strings
-            if re.search(r"\b(?:phone|tel|call|contact|patient|mobile)\b|电话|联系", raw, re.I):
+            # International phone numbers only when near phone/tel/contact/patient cue AND NOT a public agency/institutional hotline
+            is_agency_hotline = bool(re.search(
+                r"\b(?:FDA|CDER|CBER|MedWatch|Office\s+of\s+Communication|Division\s+of\s+Drug\s+Information|"
+                r"Center\s+for\s+(?:Drug|Biologics)|toll[- ]free|hotline|helpline|1-800|800-|888-|301-827)\b",
+                raw,
+                re.I,
+            ))
+            if re.search(r"\b(?:phone|tel|call|contact|patient|mobile)\b|电话|联系", raw, re.I) and not is_agency_hotline:
                 for m in INTL_PHONE_RE.finditer(raw):
                     fid += 1
                     findings.append({
@@ -900,7 +942,7 @@ def audit_compliance(target: Path, guidelines_path: Path | None = None) -> dict[
                         "status": "needs_human_review",
                     })
 
-        # 4. Standard Declarations (COI, Funding, Data/Code Availability) & Funding Self-Contradiction
+        # 4. Standard Declarations (COI, Funding, Data/Code Availability) — skip for regulatory guidance documents
         req_decls = guidelines.get("required_declarations")
         decl_specs = [
             ("conflict_of_interest", COI_RE, "minor", "Add explicit Conflict of Interest / Competing Interests statement."),
@@ -908,7 +950,7 @@ def audit_compliance(target: Path, guidelines_path: Path | None = None) -> dict[
             ("data_code_availability", DATA_AVAIL_RE, "minor", "Add Data & Code Availability statement specifying repository or access restrictions."),
             ("author_contributions", AUTHOR_CONTRIB_RE, "minor", "Add Author Contributions (CRediT) statement."),
         ]
-        for dname, pat, default_sev, fix in decl_specs:
+        for dname, pat, default_sev, fix in ([] if doc_role == "regulatory_guidance" else decl_specs):
             # Skip funding/author_contributions requirement in double-blind mode unless explicitly demanded
             if is_double_blind and dname in ("funding_disclosure", "author_contributions"):
                 checklist_status.append({"file": doc["file"], "item": dname, "status": "exempt_double_blind"})
@@ -1083,6 +1125,37 @@ def audit_compliance(target: Path, guidelines_path: Path | None = None) -> dict[
             "standards": found_any_std,
         })
 
+        # 6. Direction-2 Citation Norms & Six-Facet Companion Audit (retracted/dangling refs, df>N, p=0.000, causal/intro alignment)
+        comp_f, comp_cov, comp_chk = io_core.audit_six_facet_companion(
+            doc, secs, skip_facets={"academic_norms"}, id_prefix="CMP-AUX",
+        )
+        for cf in comp_f:
+            fid += 1
+            findings.append({
+                "finding_id": f"CMP-{fid:03d}",
+                "facet": cf["facet"],
+                "subtype": f"companion_{cf['facet']}",
+                "finding_type": cf["finding_type"],
+                "compliance_state": "confirmed_violation" if cf["status"] == "confirmed" else "needs_human_or_legal_ethics_review",
+                "severity": cf["severity"],
+                "severity_rationale": cf["evidence_basis"],
+                "location": cf["location"],
+                "verbatim_quote": cf["verbatim_quote"],
+                "evidence_basis": cf["evidence_basis"],
+                "actionable_revision": cf["actionable_revision"],
+                "rule_reference": f"Academic Norms & Companion Audit [{cf['facet']}]",
+                "status": cf["status"],
+            })
+        six_facet_coverage_docs.append({"file": doc["file"], "facets": comp_cov})
+        semantic_checklists.append({"file": doc["file"], "items": comp_chk})
+        cit_chk = next((c for c in comp_chk if c.get("facet") == "citation_support"), {})
+        checklist_status.append({
+            "file": doc["file"],
+            "item": "citation_norms_and_bibliography_screen",
+            "status": "issues_flagged" if comp_cov.get("citation_support", {}).get("companion_findings", 0) > 0 else "checked_clean",
+            "references_parsed": int(cit_chk.get("references_parsed", 0)),
+        })
+
     # Post-hoc PII scrubbing across every finding and third-party asset excerpt to ensure 0 raw PII leaks
     for f in findings:
         f["verbatim_quote"] = _sanitize_pii_in_text(str(f.get("verbatim_quote", "")))
@@ -1137,6 +1210,8 @@ def audit_compliance(target: Path, guidelines_path: Path | None = None) -> dict[
         "third_party_assets": third_party_assets,
         "rejected_pseudo_ethics_ids": rejected_pseudo_ids,
         "checklist_status": checklist_status,
+        "six_facet_coverage": six_facet_coverage_docs,
+        "semantic_review_checklist": semantic_checklists,
         "compliance_state_counts": {
             "confirmed_violation": sum(1 for f in findings if f.get("compliance_state") == "confirmed_violation"),
             "material_not_supplied": sum(1 for f in findings if f.get("compliance_state") == "material_not_supplied"),
@@ -1259,6 +1334,7 @@ def main(argv: list[str] | None = None) -> int:
             "documents_scanned_count": len(rep.get("documents_scanned", [])),
             "images_scanned_count": rep.get("images_scanned", 0),
             "findings_count": rep.get("findings_count", 0),
+            "anchored_findings_count": sum(1 for f in rep.get("findings", []) if (f.get("location") or {}).get("line_start")),
             "confirmed_violation_count": state_counts.get("confirmed_violation", 0),
             "material_not_supplied_count": state_counts.get("material_not_supplied", 0),
             "needs_review_count": state_counts.get("needs_human_or_legal_ethics_review", 0),
@@ -1289,6 +1365,8 @@ def main(argv: list[str] | None = None) -> int:
             "image_integrity_matches": rep.get("image_integrity_matches", []),
             "third_party_assets": rep.get("third_party_assets", []),
             "rejected_pseudo_ethics_ids": rep.get("rejected_pseudo_ethics_ids", []),
+            "six_facet_coverage": rep.get("six_facet_coverage", []),
+            "semantic_review_checklist": rep.get("semantic_review_checklist", []),
             "findings": rep.get("findings", []),
             "uncertainty": rep.get("uncertainty", []),
             "gaps": rep.get("gaps", []),

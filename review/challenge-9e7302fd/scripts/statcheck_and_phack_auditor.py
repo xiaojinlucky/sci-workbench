@@ -529,6 +529,8 @@ def audit_methods_and_stats(target: Path) -> dict[str, Any]:
     unassessable_items: list[str] = []
     uncertainty: list[str] = []
     all_manuscript_total_ns: list[int] = []
+    six_facet_coverage_docs: list[dict[str, Any]] = []
+    semantic_checklists: list[dict[str, Any]] = []
     max_crosscheck_err: float = 0.0
     fid = 0
 
@@ -604,7 +606,8 @@ def audit_methods_and_stats(target: Path) -> dict[str, Any]:
                 animal_ns.append(nv)
         has_subunit_cues = bool(SUBUNIT_CUE_RE.search(full_text))
         has_mixed_model_cues = bool(REPEATED_MIXED_RE.search(full_text))
-        is_observational = _is_observational_study(sections)
+        doc_role = io_core.detect_document_role(doc)
+        is_observational = _is_observational_study(sections) if doc_role == "research_manuscript" else False
 
         # -------------------------------------------------------------------
         # Paragraph-merged, sentence-isolated deterministic checks (preserves line_start..line_end across PDF wraps)
@@ -1133,11 +1136,11 @@ def audit_methods_and_stats(target: Path) -> dict[str, Any]:
                         cost="low",
                     )
 
-                # 8. Observational study making strong causal claims (method_flaw, excluding limitations/hypotheses)
+                # 8. Observational study making strong causal claims (method_flaw, excluding limitations/hypotheses & clinical nouns)
                 if (
                     is_observational
                     and sec_role in {"abstract", "results", "discussion", "conclusion", "results_discussion"}
-                    and CAUSAL_CLAIM_RE.search(st)
+                    and io_core.is_true_causal_overclaim(st)
                     and not re.search(r"\b(?:limitation|cannot\s+prove|does\s+not\s+prove|hypothesize|causal\s+inference\s+requires)\b|局限|不能证明", st, re.I)
                 ):
                     add_finding(
@@ -1295,6 +1298,124 @@ def audit_methods_and_stats(target: Path) -> dict[str, Any]:
                 status="needs_human_review",
             )
 
+        # Dual-scale (linear + log) conditional 95% CI vs p-value check & Trend-vs-Endpoint (AAPC/APC) audit
+        for ci_hit in io_core.audit_ci_vs_p_consistency(doc, sections):
+            loc = ci_hit["location"]
+            met = ci_hit.get("metrics", {})
+            both_checked = bool(met.get("both_scales_checked"))
+            p_lin = met.get("p_linear")
+            p_log = met.get("p_log")
+            both_violated = (
+                both_checked
+                and (p_lin is not None and p_lin >= 0.01)
+                and (p_log is not None and p_log >= 0.01)
+                and float(met.get("p_reported", 1.0)) <= 0.001
+            )
+            add_finding(
+                facet="statistical_reporting",
+                finding_type=ci_hit["finding_type"],
+                defect_class="decision_error" if both_violated else "under_reported",
+                severity=ci_hit["severity"],
+                file=loc["file"],
+                line_start=loc["line_start"],
+                line_end=loc["line_end"],
+                page=int(loc.get("page") or 0),
+                section=loc["section"],
+                verbatim_quote=ci_hit["verbatim_quote"],
+                evidence_basis=ci_hit["evidence_basis"],
+                actionable_revision=ci_hit["actionable_revision"],
+                impact="high" if both_violated else "medium",
+                cost="medium",
+                status=ci_hit["status"],
+            )
+            ci_checks.append({
+                "file": loc["file"],
+                "line": loc["line_start"],
+                "section": loc["section"],
+                "metric": met.get("label") or "AAPC/CI",
+                "estimate": met.get("estimate", 0.0),
+                "ci_95": [met.get("ci_lo", 0.0), met.get("ci_hi", 0.0)],
+                "null_value": 0.0,
+                "reported_p_op": "<",
+                "reported_p": met.get("p_reported", 0.0),
+                "z_linear": met.get("z_linear"),
+                "p_linear": p_lin,
+                "z_log": met.get("z_log"),
+                "p_log": p_log,
+                "scale_assumption": met.get("scale_assumption"),
+                "verdict": "dual_scale_ci_p_tension_needs_review",
+            })
+
+        for tr_hit in io_core.audit_trend_vs_endpoint_tension(doc, sections):
+            loc = tr_hit["location"]
+            add_finding(
+                facet="method_design",
+                finding_type="insufficient_evidence",
+                defect_class="method_flaw",
+                severity=tr_hit["severity"],
+                file=loc["file"],
+                line_start=loc["line_start"],
+                line_end=loc["line_end"],
+                page=int(loc.get("page") or 0),
+                section=loc["section"],
+                verbatim_quote=tr_hit["verbatim_quote"],
+                evidence_basis=tr_hit["evidence_basis"],
+                actionable_revision=tr_hit["actionable_revision"],
+                impact="high",
+                cost="medium",
+                status=tr_hit["status"],
+            )
+
+        # Non-standard epidemiological rate denominator check (e.g., /10,000 without census/population source)
+        for sec in sections:
+            if sec["role"] in ("abstract", "methods", "results"):
+                for sent in io_core.split_sentences(sec):
+                    if re.search(r"/\s*10[,.]?000\s+(?:inhabitants?|person|children|population)", sent["text"], re.I):
+                        if not re.search(r"\b(?:census|IBGE|population\s+denominator|person[- ]years?)\b", full_text, re.I):
+                            add_finding(
+                                facet="variable_definition",
+                                finding_type="insufficient_evidence",
+                                defect_class="under_reported",
+                                severity="minor",
+                                file=doc["file"],
+                                line_start=sent["line_start"],
+                                line_end=sent["line_end"],
+                                page=int(doc["page_map"].get(sent["line_start"], 0)),
+                                section=sec["title"],
+                                verbatim_quote=sent["text"][:200],
+                                evidence_basis="Incidence/reporting rate uses non-standard /10,000 denominator without citing the exact population denominator source.",
+                                actionable_revision="Specify the exact population denominator source and distinguish surveillance notification rate from true population incidence.",
+                                impact="medium",
+                                cost="low",
+                                status="needs_human_review",
+                            )
+                        break
+
+        # Six-facet companion coverage (citation_support, argument_chain, academic_norms)
+        comp_f, comp_cov, comp_chk = io_core.audit_six_facet_companion(
+            doc, sections, skip_facets={"method_design", "statistical_reporting", "fact_verification"}, id_prefix="STAT-AUX",
+        )
+        for cf in comp_f:
+            add_finding(
+                facet=cf["facet"],
+                finding_type=cf["finding_type"],
+                defect_class="norm_violation" if cf["facet"] == "academic_norms" else "under_reported",
+                severity=cf["severity"],
+                file=cf["location"]["file"],
+                line_start=cf["location"]["line_start"],
+                line_end=cf["location"]["line_end"],
+                page=int(cf["location"].get("page") or 0),
+                section=cf["location"]["section"],
+                verbatim_quote=cf["verbatim_quote"],
+                evidence_basis=cf["evidence_basis"],
+                actionable_revision=cf["actionable_revision"],
+                impact="high" if cf["severity"] in ("critical", "major") else "medium",
+                cost="low",
+                status=cf["status"],
+            )
+        six_facet_coverage_docs.append({"file": doc["file"], "facets": comp_cov})
+        semantic_checklists.append({"file": doc["file"], "items": comp_chk})
+
     # Audit any supplied .csv tabular datasets (row/col count, missingness, group counts vs manuscript total N)
     for cdoc in csv_docs:
         crec, mismatch = _audit_csv_document(cdoc, all_manuscript_total_ns)
@@ -1371,6 +1492,8 @@ def audit_methods_and_stats(target: Path) -> dict[str, Any]:
         "pseudoreplication_flags": pseudoreplication_flags,
         "csv_checks": csv_checks,
         "methodology_coverage": methodology_coverage,
+        "six_facet_coverage": six_facet_coverage_docs,
+        "semantic_review_checklist": semantic_checklists,
         "phack_analysis": phack_summary,
         "findings_count": len(findings),
         "findings": findings,
@@ -1573,6 +1696,8 @@ def _build_result_contract(
         "metrics": metrics,
         "metric_provenance": metric_provenance,
         "methodology_coverage": rep.get("methodology_coverage", {}),
+        "six_facet_coverage": rep.get("six_facet_coverage", []),
+        "semantic_review_checklist": rep.get("semantic_review_checklist", []),
         "findings": rep.get("findings", []),
         "uncertainty": rep.get("uncertainty", []),
         "gaps": rep.get("gaps", []),

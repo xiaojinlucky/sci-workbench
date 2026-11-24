@@ -84,7 +84,8 @@ python -B /skills/weekly-skill/scripts/final_audit.py --dir /app/output --requir
 | 异常场景 | 识别信号 | 规定处置 |
 | --- | --- | --- |
 | PDF 为扫描图片/低文本页 | `gaps` 中出现 `PDF_LOW_TEXT_PAGE` | 保留页码定位与 gap，相关引文标 `source_not_provided`，`status: "partial_with_gaps"`、`audit_status: "partial"` |
-| 沙箱缺少 PDF 解析工具 | `PDF_EXTRACTOR_UNAVAILABLE` | 记录 gap，继续处理其余 MD/TEX/DOCX/BIB/JSON 输入，不编造 PDF 内容 |
+| 沙箱缺少 PDF 解析工具 | `PDF_STDLIB_FALLBACK_USED` / `PDF_EXTRACTOR_UNAVAILABLE` | `review_io_core.py` 依次级联 `pypdf`（双栏阅读序）→ `pdfplumber` → `pdftotext` → 纯 stdlib FlateDecode `BT..ET` 解码；全部不可用时记 gap 并继续处理其余格式，绝不编造 PDF 内容 |
+| 医学/温哥华上标数字引文 | `detect_superscript_numeric_style` 命中 | 自动识别正文上标数字引文并避免对整表参考文献误报孤立未引，同步记录 `uncertainty` 边界说明 |
 | 结构化导出多标记坍缩到单对象 | `many_to_one_source_collapses` 非空 | 明确区分解析/持久化丢失与伪造，列出全部未映射标记并要求核对原始来源图例 |
-| 仅有参考文献表、无原文全文 | `source_documents_indexed == []` | 完成三向对账、撤稿/预印本检查、裸引文与跨章节数值对账；语义支持度一律标 `source_not_provided` 并在 `uncertainty` 写明边界 |
+| 仅有参考文献表、无原文全文 | `source_documents_indexed == []` | 完成三向对账、撤稿/预印本检查、裸引文与跨章节数值对账；语义支持度一律标 `source_not_provided` 并在 `uncertainty` 写明边界；同步输出六维度协同审查 `six_facet_coverage` 与 `semantic_review_checklist` |
 | 临近预算/时间上限 | `budget_guard.py` 告警 | 立即用 `result_guard.py --finalize` 落盘已有确定性审计结果并标注未完章节于 `gaps` |

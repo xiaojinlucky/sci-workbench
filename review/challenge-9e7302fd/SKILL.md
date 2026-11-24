@@ -65,7 +65,7 @@ python -B /skills/weekly-skill/scripts/statcheck_and_phack_auditor.py \
 1. **研究设计与偏倚控制**：核对设计类型是否能回答研究问题、对照/随机化/盲法/主要终点是否事前明确，区分“未报告（`under_reported`）”与“设计错误（`method_flaw`）”。
 2. **变量定义与数据筛选漏斗**：核对暴露/结局/协变量编码、分类切点（是否事后挑选？）、单位换算、入排标准与失访分母是否贯穿 Methods、Results 和图表。
 3. **统计模型与数据结构匹配**：核对独立性/嵌套结构（患者/动物 vs 细胞/重复测量）、分布假设、交互项、混杂控制与敏感性分析；若提供原始 CSV 数据，审阅 `csv_checks` 并视需要用纯 Python 做独立复算并记录步骤。
-4. **反误报与公平性校准**：对照 ACL H1–H17 过滤掉“方法不够新潮”“阴性结果”“可再加无关实验”等伪缺陷；对于合法的无缺陷或纯探索性披露稿件，诚实报告无重大缺陷并写清未核验边界。
+4. **反误报、禁打包压缩与独立锚点铁律**：对照 ACL H1–H17 过滤伪缺陷；**严禁将不同位置或不同类型的独立统计缺陷（如 CI-vs-p 数学矛盾、AAPC 与端点率背离、分母/人口口径缺失、监测漏报偏倚）合并打包成单条 `minor` 意见**，每条独立缺陷必须保留独立编号与精确 `file:L<start>-L<end>` 原句锚点；对非研究型监管指南（`regulatory_guidance`）自动标注文档角色、不套用实证稿件伦理/因果规则。
 5. 若 Step 3 有人工增补/修订，同步更新 `/app/output/stats_audit.json`、`/app/output/stats_review_report.md`，并用 `result_guard.py --patch-json` 同步 `/app/output/result.json`。
 
 ### Step 4：归档校验、溯源闸门与最终审计
@@ -81,6 +81,6 @@ python -B /skills/weekly-skill/scripts/final_audit.py --dir /app/output --requir
 | 异常场景 | 识别信号 | 规定处置 |
 | --- | --- | --- |
 | 镜像无 `scipy`/`numpy` | `math_backend == "pure_stdlib_lentz"` | 自动启用 `stat_math_core.py` Lentz Beta/Gamma 引擎与纯 stdlib `phack_detect.py`，零报错完成全量复算 |
-| 扫描 PDF 低文本页或无解析器 | `gaps` 含 `PDF_LOW_TEXT_PAGE` / `PDF_EXTRACTOR_UNAVAILABLE` | 标注缺页定位，不杜撰图表或统计数值，`status: "partial_with_gaps"`、`audit_status: "partial"` |
-| 缺少原始数据与预注册方案 | `unassessable_items` 非空 | 明确列出不可判断项与缺失输入，将未说明多重比较校正归为 `under_reported`，严禁定性 p-hacking |
+| 扫描 PDF 低文本页或无解析器 | `gaps` 含 `PDF_LOW_TEXT_PAGE` / `PDF_STDLIB_FALLBACK_USED` / `PDF_EXTRACTOR_UNAVAILABLE` | 级联 `pypdf` → `pdfplumber` → `pdftotext` → 纯 stdlib FlateDecode 解码；低文本页标注缺页定位，不杜撰图表或统计数值，`status: "partial_with_gaps"`、`audit_status: "partial"` |
+| 缺少原始数据与预注册方案 | `unassessable_items` 非空 | 明确列出不可判断项与缺失输入，将未说明多重比较校正归为 `under_reported`，严禁定性 p-hacking；同步通过 `is_true_causal_overclaim` 排除 `causes of death` 等流行病学名词误报，并在 `result.json` 输出 `six_facet_coverage` 与 `semantic_review_checklist`（含引文撤稿/悬空与伦理合规协同检查） |
 | 精确显著 p 值 `< 5` | `phack_analysis.ran == false` | 自动跳过 p-curve 群体检验以防低效能误报 |

@@ -456,35 +456,8 @@ def _detect_significance(text: str) -> str | None:
 
 
 def _extract_filtered_percents(text: str) -> list[tuple[str, Decimal]]:
-    """Extract outcome percentages while excluding 95%/99%/90% CI, 5% alpha, and 80%/90% statistical power."""
-    pcts: list[tuple[str, Decimal]] = []
-    for m in PERCENT_RE.finditer(text):
-        raw_num = m.group(1).replace("−", "-")
-        try:
-            val = Decimal(raw_num)
-        except InvalidOperation:
-            continue
-        after = text[m.end():m.end() + 28].lower()
-        before = text[max(0, m.start() - 24):m.start()].lower()
-        # Exclude confidence/credible/prediction interval levels (e.g., 95% CI, 99% confidence interval)
-        if val in (Decimal("90"), Decimal("95"), Decimal("99")) and re.match(
-            r"^\s*(?:ci\b|cri\b|pi\b|confidence|credible|prediction)", after
-        ):
-            continue
-        # Exclude statistical power (e.g., 80% power, 90% statistical power)
-        if val in (Decimal("80"), Decimal("85"), Decimal("90"), Decimal("95")) and (
-            re.match(r"^\s*(?:statistical\s+)?power\b", after)
-            or re.search(r"power\s*(?:of|=|:)?\s*$", before)
-        ):
-            continue
-        # Exclude significance level alpha (e.g., 5% significance level, alpha = 5%)
-        if val in (Decimal("1"), Decimal("5"), Decimal("10")) and (
-            re.match(r"^\s*(?:significance|alpha|level|type\s+i)", after)
-            or re.search(r"(?:alpha\s*=|at\s+the\s+|significance\s+level\s+of\s+)$", before)
-        ):
-            continue
-        pcts.append((m.group(0), val))
-    return pcts
+    """Extract outcome percentages while excluding 95%/99%/90% CI (incl. IC95%), 5% alpha, and 80%/90% power."""
+    return io_core.extract_outcome_percents(text)
 
 
 def _extract_quant_records(
@@ -964,6 +937,8 @@ def audit_arguments(target: Path) -> dict[str, Any]:
         active_manuscripts = [d for d in docs if d not in doc_roles["prior_review"] and d not in doc_roles["author_response"]]
 
     manuscript_findings: list[dict[str, Any]] = []
+    six_facet_coverage_docs: list[dict[str, Any]] = []
+    semantic_checklists: list[dict[str, Any]] = []
     claim_seq = 0
 
     for doc in active_manuscripts:
@@ -983,11 +958,12 @@ def audit_arguments(target: Path) -> dict[str, Any]:
                         design_sents.append(sent["text"])
         design_blob = "\n".join(design_sents) if design_sents else doc["text"]
 
+        doc_role = io_core.detect_document_role(doc)
         has_obs = bool(OBSERVATIONAL_DESIGN_RE.search(design_blob))
         interv_sents = [st for st in design_sents if not FUTURE_RCT_RE.search(st)]
         interv_blob = "\n".join(interv_sents) if interv_sents else ("" if design_sents else doc["text"])
         has_interv = bool(INTERVENTIONAL_DESIGN_RE.search(interv_blob))
-        is_observational_only = has_obs and not has_interv
+        is_observational_only = (has_obs and not has_interv) if doc_role == "research_manuscript" else False
 
         # Check constrained experimental scale (cell/animal/single-center without multicenter clinical trial)
         scale_anchor: dict[str, Any] | None = None
@@ -1018,7 +994,7 @@ def audit_arguments(target: Path) -> dict[str, Any]:
                 identity_counts[ident] += 1
 
                 if ident != "author_claim":
-                    if CAUSAL_STRONG_RE.search(st) or OVER_EXTRAPOLATION_RE.search(st):
+                    if io_core.is_true_causal_overclaim(st) or OVER_EXTRAPOLATION_RE.search(st):
                         if len(suppressed_examples) < 15:
                             suppressed_examples.append({
                                 "file": doc["file"],
@@ -1030,19 +1006,28 @@ def audit_arguments(target: Path) -> dict[str, Any]:
                             })
                     continue
 
-                is_strong_causal = bool(CAUSAL_STRONG_RE.search(st))
+                is_strong_causal = bool(io_core.is_true_causal_overclaim(st))
                 is_hedged = bool(HEDGED_MODALITY_RE.search(st)) and not is_strong_causal
                 is_over_extrap = bool(OVER_EXTRAPOLATION_RE.search(st))
                 is_promise = sec["role"] == "introduction" and bool(INTRO_PROMISE_RE.search(st))
                 ev_matches = [m.group(0) for m in EVIDENCE_ANCHOR_RE.finditer(st)]
                 has_cite = bool(CITATION_RE.search(st))
 
-                # Build structured Claim -> Evidence -> Warrant -> Boundary node for substantive claims
+                # Build structured Claim -> Evidence -> Warrant -> Boundary node for substantive claims (never leave real papers with an empty graph)
+                is_substantive_claim = bool(re.search(
+                    r"\b(?:we\s+(?:show|find|report|demonstrate|recommend|propose|conclude|observe|argue|compare)|"
+                    r"results?\s+(?:show|indicate|suggest|demonstrate)|should\s+be\s+reported|must\s+be\s+reported|"
+                    r"is\s+recommended|cannot\s+be\s+compared|varies?\s+by|depends?\s+on)\b",
+                    st,
+                    re.I,
+                ))
                 if (
                     is_strong_causal
                     or is_over_extrap
                     or is_promise
                     or (sec["role"] in ("abstract", "results", "results_discussion", "conclusion") and (ev_matches or _detect_direction(st)))
+                    or (ev_matches and (has_cite or _detect_direction(st) or is_substantive_claim))
+                    or is_substantive_claim
                 ):
                     claim_seq += 1
                     warrant_risk = "none_detected"
@@ -1050,6 +1035,8 @@ def audit_arguments(target: Path) -> dict[str, Any]:
                         warrant_risk = "observational_to_causal_leap"
                     elif is_over_extrap and scale_anchor and not has_multicenter:
                         warrant_risk = "scale_or_sample_extrapolation"
+                    elif not ev_matches and not has_cite:
+                        warrant_risk = "unlinked_needs_review"
 
                     ev_source = (
                         "internal_statistical_or_figure" if ev_matches
@@ -1375,6 +1362,58 @@ def audit_arguments(target: Path) -> dict[str, Any]:
                 "status": "confirmed",
             })
 
+        # --- B7: Interpretive Tension (dual-scale CI-vs-p tension & Trend-vs-Endpoint divergence; always needs_human_review with exact line anchors) ---
+        for ci_hit in io_core.audit_ci_vs_p_consistency(doc, secs):
+            manuscript_findings.append({
+                "facet": "statistical_reporting",
+                "subtype": "b7_ci_vs_p_interpretive_tension",
+                "finding_type": "insufficient_evidence",
+                "severity": ci_hit["severity"],
+                "severity_rationale": "Dual-scale (linear & log) approximation flags tension between reported 95% CI width and p-value threshold; requires model-output verification.",
+                "location": ci_hit["location"],
+                "verbatim_quote": ci_hit["verbatim_quote"],
+                "evidence_basis": ci_hit["evidence_basis"],
+                "actionable_revision": ci_hit["actionable_revision"],
+                "firewall_check": "PASS (dual-scale conditional check; marked needs_human_review until model link/df confirmed)",
+                "status": ci_hit["status"],
+            })
+
+        for tr_hit in io_core.audit_trend_vs_endpoint_tension(doc, secs):
+            manuscript_findings.append({
+                "facet": "argument_chain",
+                "subtype": "b7_effect_estimate_vs_endpoint_divergence",
+                "finding_type": "insufficient_evidence",
+                "severity": tr_hit["severity"],
+                "severity_rationale": "Summary trend claim (AAPC/APC) diverges substantially from reported start/end rates without annual trajectory warrant.",
+                "location": tr_hit["location"],
+                "verbatim_quote": tr_hit["verbatim_quote"],
+                "evidence_basis": tr_hit["evidence_basis"],
+                "actionable_revision": tr_hit["actionable_revision"],
+                "firewall_check": "PASS (evidence-anchored warrant gap; marked needs_human_review)",
+                "status": tr_hit["status"],
+            })
+
+        # Six-facet companion coverage (fact_verification, citation_support, method_design, statistical_reporting, academic_norms)
+        comp_f, comp_cov, comp_chk = io_core.audit_six_facet_companion(
+            doc, secs, skip_facets={"argument_chain", "method_design", "statistical_reporting"}, id_prefix="LOG-AUX",
+        )
+        for cf in comp_f:
+            manuscript_findings.append({
+                "facet": cf["facet"],
+                "subtype": "six_facet_companion_check",
+                "finding_type": cf["finding_type"],
+                "severity": cf["severity"],
+                "severity_rationale": cf["evidence_basis"],
+                "location": cf["location"],
+                "verbatim_quote": cf["verbatim_quote"],
+                "evidence_basis": cf["evidence_basis"],
+                "actionable_revision": cf["actionable_revision"],
+                "firewall_check": "PASS (deterministic companion audit)",
+                "status": cf["status"],
+            })
+        six_facet_coverage_docs.append({"file": doc["file"], "facets": comp_cov})
+        semantic_checklists.append({"file": doc["file"], "items": comp_chk})
+
     # --- Scope isolation in Revision Closure Mode ---
     if revision_mode:
         isolated_new: list[dict[str, Any]] = []
@@ -1432,6 +1471,8 @@ def audit_arguments(target: Path) -> dict[str, Any]:
         "argument_graph": argument_graph,
         "claim_inventory": argument_graph[:40],  # Backward-compatible alias
         "revision_closure": revision_closure,
+        "six_facet_coverage": six_facet_coverage_docs,
+        "semantic_review_checklist": semantic_checklists,
         "findings_count": len(final_findings),
         "severity_counts": {
             "critical": sum(1 for f in final_findings if f["severity"] == "critical"),
@@ -1593,6 +1634,8 @@ def main(argv: list[str] | None = None) -> int:
             "suppressed_non_author_candidates": rep.get("suppressed_non_author_candidates", []),
             "argument_graph": rep.get("argument_graph", []),
             "revision_closure": rep.get("revision_closure", {"enabled": False}),
+            "six_facet_coverage": rep.get("six_facet_coverage", []),
+            "semantic_review_checklist": rep.get("semantic_review_checklist", []),
             "severity_counts": sev_counts,
             "findings": rep.get("findings", []),
             "uncertainty": rep.get("uncertainty", []),

@@ -10,7 +10,7 @@ Use this checklist during Step 3 to verify all six official review facets and ke
 
 ## Facet 2: `citation_support` (Source Binding & Attribution Boundaries)
 - [ ] **Bibliography Closure**: No dangling in-text citation keys; note uncited reference entries (`minor`).
-- [ ] **Source Status**: Flag explicit `Retracted` / `Withdrawn` / `Erratum` markers (`critical`); mark preprints (`arXiv`/`bioRxiv`/`medRxiv`) transparently when relied on as established fact.
+- [ ] **Source Status**: Flag explicit `Retracted` / `Withdrawn` markers (`critical`, `confirmed`); flag `Erratum` / `Corrigendum` / `Expression of Concern` separately as `minor`/`major` (`needs_human_review`) so publication notices are never conflated with proven semantic falsehood; mark preprints (`arXiv`/`bioRxiv`/`medRxiv`) transparently when relied on as established fact.
 - [ ] **Citation Marker != Causal Proof**: In observational studies, causal claims bearing citations remain `needs_human_review` unless inspected source text actually establishes causal identification.
 - [ ] **No Unsupported Prior-Work Numbers**: Flag specific numerical claims attributed to "prior studies" without any citation anchor.
 
@@ -33,5 +33,5 @@ Use this checklist during Step 3 to verify all six official review facets and ke
 
 ## Facet 6: `academic_norms` (Structure & Publication Disclosures)
 - [ ] **IMRaD Completeness**: Check Abstract, Introduction, Methods, Results, Discussion (accepting merged `Results and Discussion` as valid without false positives).
-- [ ] **Mandatory Disclosures**: Human/clinical or animal signals without IRB/IACUC/informed consent -> `norm_violation` (`critical`). Missing COI, funding, or data/code availability -> `norm_violation` (`minor`).
+- [ ] **Mandatory Disclosures**: Active human clinical enrollment or animal experimentation without any IRB/IACUC/informed consent statement -> `norm_violation` (`critical`, unless explicitly exempt as public de-identified secondary data, which if under-specified is `minor`/`needs_human_review`, NOT `critical`). Regulatory guidance documents are exempt from manuscript IRB/declaration rules. Missing COI, funding, or data/code availability in empirical manuscripts -> `norm_violation` (`minor`).
 - [ ] **Fairness Self-Check**: Verify every `critical`/`major` finding survives ACL H1-H17; downgrade stylistic or speculative extras to `suggestion` (`P3`) or drop.

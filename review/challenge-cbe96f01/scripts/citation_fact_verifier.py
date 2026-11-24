@@ -63,11 +63,14 @@ BIBTEX_ENTRY_RE = re.compile(r"@(\w+)\s*\{\s*([^,\s]+)\s*,", re.I)
 BIBITEM_RE = re.compile(r"\\bibitem(?:\[[^\]]*\])?\{([^}]+)\}\s*(.*)")
 
 RETRACTION_RE = re.compile(
-    r"\b(?:retracted|retraction\s+notice|withdrawn\s+(?:article|paper|from\s+publication)|expression\s+of\s+concern)\b|"
+    r"\b(?:retracted|retraction\s+notice|withdrawn\s+(?:article|paper|from\s+publication))\b|"
     r"已撤稿|撤稿声明|撤回稿件",
     re.I,
 )
-ERRATUM_RE = re.compile(r"\b(?:erratum|corrigendum|author\s+correction|publisher\s+correction)\b|勘误|更正声明", re.I)
+ERRATUM_RE = re.compile(
+    r"\b(?:erratum|corrigendum|author\s+correction|publisher\s+correction|expression\s+of\s+concern)\b|勘误|更正声明|关切声明",
+    re.I,
+)
 PREPRINT_RE = re.compile(r"\b(?:arXiv|bioRxiv|medRxiv|chemRxiv|SSRN|Research\s+Square|preprint)\b|预印本", re.I)
 PEER_REVIEWED_CLAIM_RE = re.compile(
     r"\b(?:peer[- ]reviewed|published\s+in\s+(?:Nature|Science|Cell|Lancet|NEJM|JAMA)|established\s+clinical\s+standard)\b|"
@@ -896,6 +899,31 @@ def _evaluate_subclaim_against_source(
             ),
         }
 
+    # 2b. Complementary clinical endpoints (e.g., "survival +25%" vs "mortality -25%"):
+    # Same beneficial polarity prevents a false CRITICAL contradiction, but baselines differ so they are NOT numerically equivalent.
+    if (
+        claim_dir in {"beneficial_outcome", "adverse_outcome"}
+        and claim_dir == src_dir
+        and claim_dprof["raw_dir"] != src_dprof["raw_dir"]
+        and claim_dprof["target_polarity"] != src_dprof["target_polarity"]
+        and claim_dprof["target_polarity"] in {"positive", "negative"}
+        and src_dprof["target_polarity"] in {"positive", "negative"}
+    ):
+        return {
+            "support_status": "partially_supported",
+            "needs_human_review": True,
+            "downgraded_severity": "minor",
+            "source_file": src["file"],
+            "source_location": loc_str,
+            "source_quote": best_sent["text"][:190],
+            "match_method": match_method,
+            "rationale": (
+                f"Complementary clinical endpoints ({claim_dprof['raw_dir']} {claim_dprof['targets']} vs "
+                f"{src_dprof['raw_dir']} {src_dprof['targets']}): directionally aligned in polarity (not a reversal), "
+                "but distinct endpoint baselines are NOT numerically equivalent (e.g., survival +25% != mortality -25%); verify exact endpoint conversion."
+            ),
+        }
+
     # If raw directional verbs oppose but target metric polarity is uncertain on either side,
     # downgrade to needs_human_review instead of emitting a false CRITICAL contradiction.
     if (
@@ -1439,6 +1467,8 @@ def verify_citations_and_facts(target: Path) -> dict[str, Any]:
     total_bib_entries = len({id(v) for v in external_bib.values()})
     total_markers = 0
     unique_cited_all: set[str] = set()
+    six_facet_coverage_docs: list[dict[str, Any]] = []
+    semantic_checklists: list[dict[str, Any]] = []
 
     # -----------------------------------------------------------------------
     # A. Process primary manuscripts
@@ -1476,6 +1506,10 @@ def verify_citations_and_facts(target: Path) -> dict[str, Any]:
         has_numeric_bib = any(v.get("style") == "numeric" for v in bib_entries.values())
         has_any_bib = bool(bib_entries)
         allow_num_brackets = has_numeric_bib or (not has_any_bib)
+        body_non_ref_pre = "\n".join(s["text"] for s in body_sections)
+        num_bib_count_pre = sum(1 for v in local_unique_bib.values() if str(v.get("key", "")).isdigit())
+        is_superscript_doc, _ = io_core.detect_superscript_numeric_style(body_non_ref_pre, num_bib_count_pre)
+        max_num_bib_key = max([int(v["key"]) for v in local_unique_bib.values() if str(v.get("key", "")).isdigit()] + [num_bib_count_pre])
         cited_marker_occurrences: dict[str, list[int]] = defaultdict(list)
         doc_marker_instances = 0
         key_to_source_file: dict[str, str] = {}
@@ -1487,6 +1521,10 @@ def verify_citations_and_facts(target: Path) -> dict[str, Any]:
                 lend = sent.get("line_end", lno)
                 page = doc["page_map"].get(lno, 0)
                 cites = _extract_citations_from_sentence(st, allow_numeric_brackets=allow_num_brackets)
+                sup_cites: list[dict[str, Any]] = []
+                if is_superscript_doc and not cites:
+                    sup_cites = io_core.extract_superscript_citations(st, max_num_bib_key)
+                    cites = sup_cites
                 if cites:
                     doc_marker_instances += len(cites)
                     total_markers += len(cites)
@@ -1496,7 +1534,20 @@ def verify_citations_and_facts(target: Path) -> dict[str, Any]:
 
                     # Atomic sub-claim decomposition & five-state evaluation
                     is_lim_or_hyp = bool(LIMITATION_HYPOTHESIS_RE.search(st))
-                    subclaims = _decompose_atomic_subclaims(st, allow_numeric_brackets=allow_num_brackets)
+                    if sup_cites:
+                        dprof_sup = _detect_direction_profile(st)
+                        subclaims = [{
+                            "subclaim_idx": 1,
+                            "text": st,
+                            "citations": sup_cites,
+                            "tokens": _content_tokens(st),
+                            "numbers": _extract_claim_numbers(st),
+                            "direction": dprof_sup["clinical_dir"],
+                            "direction_profile": dprof_sup,
+                            "causal": _detect_causal_strength(st),
+                        }]
+                    else:
+                        subclaims = _decompose_atomic_subclaims(st, allow_numeric_brackets=allow_num_brackets)
                     for sc in subclaims:
                         for c in sc["citations"]:
                             k = c["key"]
@@ -1718,13 +1769,22 @@ def verify_citations_and_facts(target: Path) -> dict[str, Any]:
                 f"Preprint references detected in {doc['file']}: {sorted(set(preprint_keys))}. Verify peer-reviewed publication status and version drift."
             )
 
-        # Uncited bibliography entries (deduplicated across key, author_year alias, and shared DOI)
+        # Uncited bibliography entries (deduplicated across key, author_year alias, shared DOI, and Vancouver superscript style)
         cited_canonical_ids: set[int] = {id(bib_entries[k]) for k in cited_marker_occurrences if k in bib_entries}
         cited_keys_set: set[str] = set(cited_marker_occurrences.keys())
         cited_dois_set: set[str] = {
             d for k in cited_marker_occurrences if k in bib_entries for d in bib_entries[k].get("dois", [])
         }
         dup_keys_set: set[str] = {d["key"] for d in dup_bibs}
+        body_non_ref = "\n".join(s["text"] for s in sections if s["role"] != "references")
+        num_bib_count = sum(1 for v in local_unique_bib.values() if str(v.get("key", "")).isdigit())
+        is_superscript_style, superscript_cited_keys = io_core.detect_superscript_numeric_style(body_non_ref, num_bib_count)
+        if is_superscript_style:
+            cited_keys_set.update(superscript_cited_keys)
+            uncertainty.append(
+                f"Detected Vancouver/superscript numeric citation style in {doc['file']} ({len(superscript_cited_keys)} superscript keys parsed); "
+                "orphan-reference alerts suppressed where PDF plain-text extraction strips superscript tags."
+            )
         uncited_keys: list[str] = []
         seen_bib_obj: set[int] = set()
         for bk, rec in sorted(bib_entries.items(), key=lambda x: (x[1]["line"], x[0])):
@@ -1737,6 +1797,8 @@ def verify_citations_and_facts(target: Path) -> dict[str, Any]:
                 or rec["key"] in dup_keys_set
                 or (rec.get("dois") and (set(rec["dois"]) & cited_dois_set))
             ):
+                continue
+            if is_superscript_style and str(rec["key"]).isdigit():
                 continue
             uncited_keys.append(rec["key"])
             add_finding(
@@ -1836,6 +1898,30 @@ def verify_citations_and_facts(target: Path) -> dict[str, Any]:
                         impact="high",
                         cost="low",
                     )
+
+        # Six-facet companion coverage (method_design, statistical_reporting, argument_chain, academic_norms)
+        comp_f, comp_cov, comp_chk = io_core.audit_six_facet_companion(
+            doc, sections, skip_facets={"citation_support", "fact_verification"}, id_prefix="CIT-AUX",
+        )
+        for cf in comp_f:
+            add_finding(
+                facet=cf["facet"],
+                finding_type=cf["finding_type"],
+                severity=cf["severity"],
+                file=cf["location"]["file"],
+                line_start=cf["location"]["line_start"],
+                line_end=cf["location"]["line_end"],
+                page=int(cf["location"].get("page") or 0),
+                section=cf["location"]["section"],
+                verbatim_quote=cf["verbatim_quote"],
+                evidence_basis=cf["evidence_basis"],
+                actionable_revision=cf["actionable_revision"],
+                impact="high" if cf["severity"] in ("critical", "major") else "medium",
+                cost="low",
+                status=cf["status"],
+            )
+        six_facet_coverage_docs.append({"file": doc["file"], "facets": comp_cov})
+        semantic_checklists.append({"file": doc["file"], "items": comp_chk})
 
     # -----------------------------------------------------------------------
     # B. Process structured JSON citation exports (marker-to-object reconciliation)
@@ -1953,6 +2039,8 @@ def verify_citations_and_facts(target: Path) -> dict[str, Any]:
         "five_state_counts": state_counts,
         "citation_matrix": citation_matrix,
         "cross_section_checks": cross_section_all,
+        "six_facet_coverage": six_facet_coverage_docs,
+        "semantic_review_checklist": semantic_checklists,
         "findings_count": len(findings),
         "findings": findings,
         "uncertainty": uncertainty,
@@ -2135,6 +2223,8 @@ def _build_result_contract(
         "metric_provenance": metric_provenance,
         "five_state_counts": sc,
         "reconciliation_summary": rep.get("reconciliation_summary", []),
+        "six_facet_coverage": rep.get("six_facet_coverage", []),
+        "semantic_review_checklist": rep.get("semantic_review_checklist", []),
         "findings": rep.get("findings", []),
         "uncertainty": rep.get("uncertainty", []),
         "gaps": rep.get("gaps", []),

@@ -90,7 +90,8 @@ CITE_ANY_RE = re.compile(
 SCALE_RANGE_CTX_RE = re.compile(r"\b(?:scale|score|rating|likert|range|interval|grade|stage|point|points|tier|quartile|level|ci)\b", re.I)
 BIB_NUM_ENTRY_RE = re.compile(r"^\s*(?:\[(\d+)\]|(\d+)\.)\s+(.+)$")
 BIB_AY_START_RE = re.compile(r"^\s*([A-Z][A-Za-z'-]+(?:\s+[A-Z]{1,3}\.?)?(?:,|\s+et\s+al\.|\s+&|\s+and).*?(?:19|20)\d{2}[a-z]?)\b")
-RETRACTION_RE = re.compile(r"\b(?:retracted|retraction|withdrawn|erratum|expression\s+of\s+concern)\b|撤稿|撤回|勘误", re.I)
+RETRACTION_RE = re.compile(r"\b(?:retracted|retraction|withdrawn)\b|撤稿|撤回", re.I)
+ERRATUM_EOC_RE = re.compile(r"\b(?:erratum|corrigendum|expression\s+of\s+concern)\b|勘误|更正声明|关切声明", re.I)
 NORM_DECL_RE = re.compile(r"\b(?:conflict\s+of\s+interest|competing\s+interests?|funding|grant\s+no|data\s+availability|code\s+availability|ethics|IRB|IACUC)\b|利益冲突|基金资助|数据可用性|伦理审批", re.I)
 HUMAN_ANIMAL_RE = re.compile(r"\b(?:patients?|participants?|clinical\s+trial|human\s+cohort|mice|rats|animal\s+experiment)\b|患者|受试者|临床试验|小鼠|大鼠|动物实验", re.I)
 ETHICS_RE = re.compile(r"\b(?:IRB|ethics\s+committee|institutional\s+review\s+board|IACUC|informed\s+consent|Helsinki|ARRIVE)\b|伦理(?:委员会|审批|审查)|知情同意", re.I)
@@ -129,20 +130,8 @@ def _expand_num_list(spec: str) -> list[str]:
 
 
 def _extract_outcome_percents(text: str) -> list[tuple[str, Decimal]]:
-    """Extract outcome percentages while filtering out statistical constants (95% CI, 80% power, 5% alpha)."""
-    out: list[tuple[str, Decimal]] = []
-    for m in PERCENT_RE.finditer(text):
-        raw_num = m.group(1).replace("−", "-")
-        val = Decimal(raw_num)
-        after = text[m.end():m.end() + 36]
-        before = text[max(0, m.start() - 32):m.start()]
-        if STAT_CONST_PCT_AFTER_RE.match(after):
-            continue
-        if val in (Decimal("5"), Decimal("1"), Decimal("10"), Decimal("80"), Decimal("90"), Decimal("95"), Decimal("99")):
-            if STAT_CONST_PCT_BEFORE_RE.search(before):
-                continue
-        out.append((m.group(0), val))
-    return out
+    """Extract outcome percentages while filtering out statistical constants (95% CI / IC95% / 80% power / 5% alpha)."""
+    return io_core.extract_outcome_percents(text)
 
 
 def _detect_observational_study(secs: list[dict[str, Any]]) -> bool:
@@ -601,8 +590,8 @@ def _check_numeric_and_sample_consistency(doc: dict[str, Any], secs: list[dict[s
                     break
 
     if not flagged_sample_gap:
-        # Fallback check for multiple conflicting formal N= totals across document
-        formal_ns = [(lno, int(m.group(1))) for lno, raw in enumerate(doc["lines"], 1) for m in re.finditer(r"\b[Nn]\s*=\s*(\d{2,6})\b", raw)]
+        # Fallback check for multiple conflicting formal uppercase N= totals across document (ignores lowercase subgroup n=)
+        formal_ns = [(lno, int(m.group(1))) for lno, raw in enumerate(doc["lines"], 1) for m in re.finditer(r"\bN\s*=\s*(\d{2,6})\b", raw)]
         distinct_formal = sorted({v for _, v in formal_ns})
         if len(distinct_formal) > 2:
             fid += 1
@@ -648,6 +637,8 @@ def audit_quality(target: Path, *, case_id: str = "") -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     facet_hits: dict[str, int] = {k: 0 for k in CANONICAL_FACETS}
     figure_summaries: list[dict[str, Any]] = []
+    semantic_checklists: list[dict[str, Any]] = []
+    citation_claim_mapping: list[dict[str, Any]] = []
     fid = 0
     total_pages = 0
     low_text_pages = 0
@@ -824,6 +815,11 @@ def audit_quality(target: Path, *, case_id: str = "") -> dict[str, Any]:
             ))
 
         if exact_p_count >= 3 and not MULTIPLICITY_RE.search(text):
+            is_desc_epi = bool(re.search(
+                r"\b(?:descriptive\s+(?:study|analysis)|ecological\s+(?:study|time[- ]series)|joinpoint\s+regression|exploratory\s+(?:study|analysis))\b",
+                text,
+                re.I,
+            ))
             fid += 1
             facet_hits["method_design"] += 1
             findings.append(_make_finding(
@@ -831,7 +827,7 @@ def audit_quality(target: Path, *, case_id: str = "") -> dict[str, Any]:
                 facet="method_design",
                 finding_type="insufficient_evidence",
                 defect_distinction="under_reported",
-                severity="major",
+                severity="minor" if is_desc_epi else "major",
                 file=doc["file"],
                 section="Methods/Results",
                 line_start=1,
@@ -844,15 +840,16 @@ def audit_quality(target: Path, *, case_id: str = "") -> dict[str, Any]:
                 revision_cost="low_editorial",
             ))
 
-        # 5. Observational causal overclaim & citation-support boundary (scoped strictly to Abstract/Methods design!)
-        is_obs = _detect_observational_study(secs)
+        # 5. Observational causal overclaim & citation-support boundary (scoped strictly to empirical manuscripts!)
+        doc_role = io_core.detect_document_role(doc)
+        is_obs = _detect_observational_study(secs) if doc_role == "research_manuscript" else False
         for sec in secs:
             if sec["role"] == "references":
                 continue
             for sent in io_core.split_sentences(sec):
                 st = sent["text"]
                 ls, le = sent["line_start"], sent["line_end"]
-                if is_obs and CAUSAL_STRONG_RE.search(st) and not NON_AUTHOR_CLAIM_RE.search(st) and not FUTURE_OR_LIMIT_RE.search(st):
+                if is_obs and io_core.is_true_causal_overclaim(st) and not NON_AUTHOR_CLAIM_RE.search(st) and not FUTURE_OR_LIMIT_RE.search(st):
                     cites = [m.group(0) for m in CITE_ANY_RE.finditer(st)]
                     fid += 1
                     if cites:
@@ -1078,6 +1075,135 @@ def audit_quality(target: Path, *, case_id: str = "") -> dict[str, Any]:
                 revision_cost="low_editorial",
             ))
 
+        # 6b. Dual-scale 95% CI vs p-value conditional check, Trend-vs-Endpoint tension, Bilingual numeric alignment & Citation-Claim Mapping
+        for ci_hit in io_core.audit_ci_vs_p_consistency(doc, secs):
+            fid += 1
+            facet_hits["statistical_reporting"] += 1
+            loc = ci_hit["location"]
+            findings.append(_make_finding(
+                fid,
+                facet="statistical_reporting",
+                finding_type=ci_hit["finding_type"],
+                defect_distinction="needs_reconciliation",
+                severity=ci_hit["severity"],
+                file=loc["file"],
+                section=loc["section"],
+                line_start=loc["line_start"],
+                line_end=loc["line_end"],
+                page=loc.get("page"),
+                verbatim_quote=ci_hit["verbatim_quote"],
+                evidence_basis=ci_hit["evidence_basis"],
+                actionable_revision=ci_hit["actionable_revision"],
+                status=ci_hit["status"],
+                revision_cost="medium_structural",
+            ))
+
+        for bh in io_core.audit_bilingual_numeric_alignment(doc, secs):
+            fid += 1
+            facet_hits["fact_verification"] += 1
+            loc = bh["location"]
+            findings.append(_make_finding(
+                fid,
+                facet="fact_verification",
+                finding_type=bh["finding_type"],
+                defect_distinction="needs_reconciliation",
+                severity=bh["severity"],
+                file=loc["file"],
+                section=loc["section"],
+                line_start=loc["line_start"],
+                line_end=loc["line_end"],
+                page=loc.get("page"),
+                verbatim_quote=bh["verbatim_quote"],
+                evidence_basis=bh["evidence_basis"],
+                actionable_revision=bh["actionable_revision"],
+                status=bh["status"],
+                revision_cost="low_editorial",
+            ))
+
+        for tr_hit in io_core.audit_trend_vs_endpoint_tension(doc, secs):
+            fid += 1
+            facet_hits["argument_chain"] += 1
+            loc = tr_hit["location"]
+            findings.append(_make_finding(
+                fid,
+                facet="argument_chain",
+                finding_type="insufficient_evidence",
+                defect_distinction="needs_reconciliation",
+                severity=tr_hit["severity"],
+                file=loc["file"],
+                section=loc["section"],
+                line_start=loc["line_start"],
+                line_end=loc["line_end"],
+                page=loc.get("page"),
+                verbatim_quote=tr_hit["verbatim_quote"],
+                evidence_basis=tr_hit["evidence_basis"],
+                actionable_revision=tr_hit["actionable_revision"],
+                status=tr_hit["status"],
+                revision_cost="medium_structural",
+            ))
+
+        # Structured Citation-Claim Mapping table (manuscript claim vs bibliography metadata/title lexical alignment)
+        body_blob_ref = "\n".join(s["text"] for s in secs if s["role"] != "references")
+        is_sup_doc, _ = io_core.detect_superscript_numeric_style(body_blob_ref, len(num_entries))
+        for sec in secs:
+            if sec["role"] == "references":
+                continue
+            for sent in io_core.split_sentences(sec):
+                st = sent["text"]
+                c_keys: list[str] = []
+                for m in CITE_NUM_RE.finditer(st):
+                    ctx = st[max(0, m.start() - 32):min(len(st), m.end() + 32)]
+                    if not SCALE_RANGE_CTX_RE.search(ctx):
+                        c_keys.extend(_expand_num_list(m.group(1)))
+                if not c_keys and is_sup_doc:
+                    c_keys.extend(x["key"] for x in io_core.extract_superscript_citations(st, len(num_entries)))
+                if not c_keys:
+                    continue
+                claim_kws = {w for w in re.findall(r"[a-z]{4,}", st.lower()) if w not in {"this", "that", "with", "from", "were", "have", "been", "study", "results", "their"}}
+                for ck in c_keys[:3]:
+                    if len(citation_claim_mapping) >= 40:
+                        break
+                    bib_rec = num_entries.get(ck)
+                    bib_txt = bib_rec[2] if bib_rec else ""
+                    bib_kws = set(re.findall(r"[a-z]{4,}", bib_txt.lower())) if bib_txt else set()
+                    ov = round(len(claim_kws & bib_kws) / max(len(claim_kws), 1), 3) if (claim_kws and bib_kws) else 0.0
+                    citation_claim_mapping.append({
+                        "file": doc["file"],
+                        "section": sec["title"],
+                        "line_start": sent["line_start"],
+                        "line_end": sent["line_end"],
+                        "cited_key": ck,
+                        "manuscript_claim": st[:180],
+                        "bib_entry_excerpt": bib_txt[:160] if bib_txt else "[MISSING_IN_REFERENCES]",
+                        "title_lexical_overlap": ov,
+                        "support_grade": "unverified_metadata_only" if bib_txt else "dangling_missing_bib",
+                    })
+
+        comp_f, _, doc_chk = io_core.audit_six_facet_companion(
+            doc, secs, skip_facets=set(CANONICAL_FACETS) - {"argument_chain"}, id_prefix="MQ-SEM",
+        )
+        for cf in comp_f:
+            fid += 1
+            facet_hits[cf["facet"]] += 1
+            findings.append(_make_finding(
+                fid,
+                facet=cf["facet"],
+                finding_type=cf["finding_type"],
+                defect_distinction="needs_reconciliation",
+                severity=cf["severity"],
+                file=cf["location"]["file"],
+                section=cf["location"]["section"],
+                line_start=cf["location"]["line_start"],
+                line_end=cf["location"]["line_end"],
+                page=cf["location"].get("page"),
+                verbatim_quote=cf["verbatim_quote"],
+                evidence_basis=cf["evidence_basis"],
+                actionable_revision=cf["actionable_revision"],
+                status=cf["status"],
+                revision_cost="low_editorial",
+            ))
+        semantic_checklists.append({"file": doc["file"], "items": doc_chk})
+
     # 7. Cross-image duplication & flipped/rotated panel screening (128-bit HV-dHash + intensity correlation)
     image_matches: list[dict[str, Any]] = []
     if images:
@@ -1153,6 +1279,8 @@ def audit_quality(target: Path, *, case_id: str = "") -> dict[str, Any]:
         "image_duplication_matches": image_matches,
         "figure_table_summary": figure_summaries,
         "facet_coverage": facet_coverage,
+        "citation_claim_mapping": citation_claim_mapping,
+        "semantic_review_checklist": semantic_checklists,
         "findings_count": len(findings),
         "severity_counts": sev_counts,
         "findings": findings,
@@ -1270,6 +1398,8 @@ def main(argv: list[str] | None = None) -> int:
             "metrics": metrics,
             "metric_provenance": metric_prov,
             "facet_coverage": rep.get("facet_coverage", {}),
+            "citation_claim_mapping": rep.get("citation_claim_mapping", []),
+            "semantic_review_checklist": rep.get("semantic_review_checklist", []),
             "severity_counts": sev,
             "findings": rep.get("findings", []),
             "uncertainty": rep.get("uncertainty", []),

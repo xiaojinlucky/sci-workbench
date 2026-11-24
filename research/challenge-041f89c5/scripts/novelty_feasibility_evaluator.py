@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -306,7 +307,18 @@ def evaluate_topic_proposal(
     if rq_over:
         errors.append(f"Unbounded overclaim in question_formulation: {rq_over}")
 
-    # 2. 4-Axis Novelty Decomposition in unified TF-IDF space + strict scenario_transfer inflation guard
+    # Identify ubiquitous corpus-wide domain terms (DF > 40% when corpus >= 5) so topic sharing isn't conflated with novelty infringement!
+    doc_freq: Counter[str] = Counter()
+    for m in matrix_internal:
+        for tok in m["_tokens"]:
+            doc_freq[tok] += 1
+    ubiquitous_terms: set[str] = (
+        {t for t, df in doc_freq.items() if df / len(matrix_internal) > 0.40}
+        if len(matrix_internal) >= 5
+        else set()
+    )
+
+    # 2. 4-Axis Novelty Decomposition in unified TF-IDF space + ubiquitous-domain separation + strict scenario_transfer inflation guard
     novelty_checks: list[dict[str, Any]] = []
     for idx, nov in enumerate(claims_list, 1):
         cid = str(nov.get("id") or f"NOV-{idx}")
@@ -330,16 +342,19 @@ def evaluate_topic_proposal(
             errors.append(f"Novelty claim {cid} describes scenario_transfer (applying/adapting existing method to new domain/dataset) without algorithmic/mechanistic novelty; relabel as scenario_transfer.")
 
         stmt_toks = set(claim_tokens_list[idx - 1])
+        stmt_distinct = stmt_toks - ubiquitous_terms if (stmt_toks - ubiquitous_terms) else stmt_toks
         stmt_vec = claim_vecs[idx - 1]
         stmt_methods = set(extract_general_methods_and_objects(stmt)["methods"])
 
-        scored_neighbors: list[tuple[float, float, float, dict[str, Any]]] = []
+        scored_neighbors: list[tuple[float, float, float, float, dict[str, Any]]] = []
         for m in matrix_internal:
-            lex_ov = (len(stmt_toks & m["_tokens"]) / max(1, len(stmt_toks))) if stmt_toks else 0.0
+            m_distinct = m["_tokens"] - ubiquitous_terms if ubiquitous_terms else m["_tokens"]
+            dist_ov = (len(stmt_distinct & m_distinct) / max(1, len(stmt_distinct))) if stmt_distinct else 0.0
             cos_sim = cosine_similarity(stmt_vec, m["_vec"])
             meth_ov = (len(stmt_methods & m["_methods_set"]) / max(1, len(stmt_methods))) if stmt_methods else 0.0
-            combined = round(0.45 * lex_ov + 0.40 * cos_sim + 0.15 * meth_ov, 4)
-            scored_neighbors.append((combined, round(lex_ov, 4), round(cos_sim, 4), m))
+            # Prioritize distinctive non-ubiquitous terms + TF-IDF cosine + functional method overlap
+            combined = round(0.45 * dist_ov + 0.35 * cos_sim + 0.20 * meth_ov, 4)
+            scored_neighbors.append((combined, round(dist_ov, 4), round(cos_sim, 4), round(meth_ov, 4), m))
         scored_neighbors.sort(key=lambda x: (-x[0], -x[1]))
 
         top3 = [
@@ -348,15 +363,26 @@ def evaluate_topic_proposal(
                 "title": m["title"],
                 "year": m["year"],
                 "material_access": m["material_access"],
+                "locator": m.get("key_finding_locator") or f"{m.get('source_file') or m['record_id']}#abstract:S1",
+                "problem_scope": m["title"][:120],
+                "target_object": ", ".join((m.get("study_objects") or ["unspecified"])[:3]),
+                "functional_methods": ", ".join((m.get("functional_methods") or ["unspecified"])[:3]),
+                "data_or_metrics": ", ".join((m.get("evaluation_metrics") or ["unspecified"])[:3]),
                 "combined_similarity": comb,
-                "lexical_overlap": lex,
+                "distinctive_lexical_overlap": dlex,
                 "tfidf_cosine": cos,
-                "excerpt": m["key_finding_quote"][:160],
+                "functional_method_overlap": mov,
+                "excerpt": m["key_finding_quote"][:220],
             }
-            for comb, lex, cos, m in scored_neighbors[:3]
+            for comb, dlex, cos, mov, m in scored_neighbors[:3]
         ]
-        best_comb, best_lex, _, best_m = scored_neighbors[0]
-        covered = best_lex >= 0.45 or best_comb >= 0.38
+        best_comb, best_lex, best_cos, best_mov, best_m = scored_neighbors[0]
+        shared_ubiq = sorted((stmt_toks & best_m["_tokens"]) & ubiquitous_terms)[:8]
+        shared_dist = sorted((stmt_distinct & (best_m["_tokens"] - ubiquitous_terms)))[:10]
+        shared_meth = sorted(stmt_methods & best_m["_methods_set"])[:6]
+        unique_ops = sorted(stmt_distinct - best_m["_tokens"])[:10]
+
+        covered = (best_lex >= 0.45 and best_cos >= 0.22) or best_comb >= 0.38
 
         if covered and not diff_note:
             warnings.append(f"Novelty claim {cid} overlaps closely with {best_m['record_id']} (lexical={best_lex:.2f}, combined={best_comb:.2f}); provide source-anchored differentiation_note.")
@@ -394,7 +420,16 @@ def evaluate_topic_proposal(
             "novelty_type": ntype,
             "closest_local_source": best_m["record_id"],
             "lexical_overlap": best_lex,
+            "distinctive_lexical_overlap": best_lex,
+            "tfidf_cosine": best_cos,
+            "functional_method_overlap": best_mov,
             "combined_similarity": best_comb,
+            "novelty_overlap_breakdown": {
+                "shared_ubiquitous_domain_terms_excluded": shared_ubiq,
+                "shared_distinctive_terms": shared_dist,
+                "shared_functional_methods": shared_meth,
+                "unique_claim_operations": unique_ops,
+            },
             "prior_coverage_flag": covered,
             "scenario_transfer_inflation_flag": transfer_mislabeled,
             "differentiation_note": diff_note or None,
@@ -404,7 +439,7 @@ def evaluate_topic_proposal(
             "bounded_scope_note": (
                 f"Assessed strictly against {len(canonical)} deduplicated local sources "
                 f"({'full-text neighbor inspected' if has_ft_neighbor else 'abstract-only bounded screening; full-text verification targets listed'}); "
-                "never implies global novelty."
+                "ubiquitous domain vocabulary (>40% DF) excluded from overlap penalty; never implies global novelty."
             ),
         })
 
@@ -461,6 +496,27 @@ def evaluate_topic_proposal(
 
     n_blocked = sum(1 for fc in feasibility_checks if fc["tag"] == "BLOCKED_UNKNOWN")
     n_assumed = sum(1 for fc in feasibility_checks if fc["tag"] == "ASSUMPTION")
+    n_grounded_all = sum(1 for fc in feasibility_checks if fc["tag"] == "GROUNDED")
+    # Cross-axis feasibility consistency guard (e.g. timeline_window GROUNDED while experimental_conditions/data_availability is BLOCKED_UNKNOWN!)
+    tag_by_axis = {fc["axis"]: fc["tag"] for fc in feasibility_checks}
+    if tag_by_axis.get("timeline_window") == "GROUNDED" and (
+        tag_by_axis.get("experimental_conditions") == "BLOCKED_UNKNOWN"
+        or tag_by_axis.get("data_availability") == "BLOCKED_UNKNOWN"
+    ):
+        warnings.append(
+            "FEASIBILITY_TIMELINE_PREREQUISITE_CONFLICT: timeline_window is tagged [GROUNDED], "
+            "yet critical-path prerequisite (experimental_conditions or data_availability) is [BLOCKED_UNKNOWN]; "
+            "treat timeline as conditional until instrument/data access scheduling is verified."
+        )
+    if len(feasibility_checks) >= 5 and n_grounded_all == len(feasibility_checks):
+        warnings.append("ALL_FEASIBILITY_GROUNDED_AUDIT_NOTE: All 5 axes claimed [GROUNDED]; double-check for optimistic hidden assumptions.")
+    # Quantitative threshold baseline clarity note
+    exp_out_txt = str(rq.get("expected_outcome") or "")
+    if re.search(r"[<>]=?\s*\d+", exp_out_txt) and not re.search(r"\b(?:vs\.?|versus|relative\s+to|compared\s+(?:with|to)|baseline|control)\b", exp_out_txt, re.I):
+        warnings.append(
+            "THRESHOLD_BASELINE_CLARIFICATION_NOTE: expected_outcome states a quantitative threshold without naming the exact comparator/reference condition inside the same clause; verify absolute vs relative baseline definition."
+        )
+
     if errors or n_blocked >= 3:
         go_no_go = "BLOCKED_PENDING_PREREQUISITES"
     elif n_blocked > 0 or n_assumed > 0 or missing_axes:
@@ -469,17 +525,34 @@ def evaluate_topic_proposal(
         go_no_go = "CONDITIONALLY_READY_FOR_PILOT"
 
     user_opp = list(spec.get("opposing_evidence") or [])
+    if explicit_spec is not None and not user_opp:
+        warnings.append(
+            "USER_SPEC_OMITTED_OPPOSING_EVIDENCE: Proposal spec supplied an empty opposing_evidence[] array; "
+            f"{len(opposing_auto[:8])} counter/limiting passage(s) were auto-recovered from local corpus to prevent confirmation bias."
+        )
     combined_opp = user_opp + opposing_auto[:8]
     if not combined_opp:
         warnings.append("No opposing/limiting evidence entries found in spec or corpus; verify whether negative results were omitted.")
 
     premortem = build_premortem_risk_matrix(feasibility_checks, novelty_checks, combined_opp)
     clean_matrix = [{k: v for k, v in m.items() if not k.startswith("_")} for m in matrix_internal]
+    audit_config = {
+        "similarity_threshold_combined": 0.38,
+        "distinctive_lexical_threshold": 0.45,
+        "tfidf_cosine_threshold": 0.22,
+        "ubiquitous_domain_df_cutoff": 0.40,
+        "ubiquitous_domain_terms_excluded_count": len(ubiquitous_terms),
+        "dedup_rule": "exact_doi_arxiv_pmcid_plus_fuzzy_title_author_0.86",
+        "prior_overlap_flag_rule": "(distinctive_lexical_overlap >= 0.45 and tfidf_cosine >= 0.22) or combined_similarity >= 0.38",
+        "raw_to_dedup_counts": {"raw": len(raw_records), "deduped": len(canonical), "duplicates_merged": len(dup_log)},
+    }
     return {
         "case_id": case_id,
         "passed": len(errors) == 0,
         "formulation_status": formulation_status,
         "corpus_scope": f"bounded_local_corpus ({len(raw_records)} raw -> {len(canonical)} deduplicated prior works)",
+        "audit_config": audit_config,
+        "dedup_lineage": dup_log[:30],
         "block_index_summary": bundle["block_index_summary"],
         "identified_by_source": by_source,
         "question_formulation": rq,
@@ -527,13 +600,33 @@ def render_topic_markdown(rep: dict[str, Any]) -> str:
             f"{', '.join(m['functional_methods'][:3])} | {', '.join(m['evaluation_metrics'][:3])} | `{m['direct_comparability_status']}` ({m['incomparability_reason'][:70]}) |"
         )
 
-    lines.extend(["", "## 3. Four-Axis Novelty Decomposition & Red-Team Overlap"])
+    lines.extend(["", "### 2.1 Row-Level Deduplication Merge Pairings (Raw -> Canonical)"])
+    dedup_pairs = rep.get("dedup_lineage") or []
+    if dedup_pairs:
+        lines.append("| Kept Record ID | Merged Duplicate ID | Match Rule | Reason / Title Anchor |")
+        lines.append("|---|---|---|---|")
+        for dp in dedup_pairs[:30]:
+            kept = dp.get("kept_id") or dp.get("canonical_id") or dp.get("record_id") or "NA"
+            merged = dp.get("merged_id") or dp.get("duplicate_id") or dp.get("dropped_id") or "NA"
+            rule = dp.get("reason") or dp.get("match_rule") or dp.get("rule") or "exact_or_fuzzy_dedup"
+            t_anc = str(dp.get("title") or dp.get("merged_title") or dp.get("key") or "")[:75]
+            lines.append(f"| `{kept}` | `{merged}` | `{rule}` | {t_anc} |")
+    else:
+        lines.append("- No duplicate pairs detected (`raw == canonical`).")
+
+    lines.extend(["", "## 3. Four-Axis Novelty Decomposition & Claim-Level Top-3 Nearest-Neighbor 4-Column Diff"])
     for nc in rep.get("novelty_checks") or []:
         lines.append(
             f"- **`{nc['claim_id']}`** (`{nc['novelty_type']}`, verdict=`{nc['verdict']}`): closest=`{nc['closest_local_source']}` (lexical={nc['lexical_overlap']}, combined={nc['combined_similarity']}, prior_coverage_flag=`{nc['prior_coverage_flag']}`)"
         )
+        lines.append("| Neighbor ID (Year / Access) | Problem / Scope | Target Object | Functional Methods | Data / Metrics & Locator |")
+        lines.append("|---|---|---|---|---|")
         for nb in nc.get("top3_neighbors") or []:
-            lines.append(f"  - Neighbor `{nb['record_id']}` ({nb['year']}, `{nb['material_access']}`, sim={nb['combined_similarity']}): {nb['title'][:90]}")
+            lines.append(
+                f"| `{nb['record_id']}` ({nb.get('year') or 'NA'}, `{nb['material_access']}`, sim={nb['combined_similarity']}) | "
+                f"{str(nb.get('problem_scope') or nb['title'])[:70]} | {str(nb.get('target_object') or 'unspecified')[:40]} | "
+                f"{str(nb.get('functional_methods') or 'unspecified')[:45]} | {str(nb.get('data_or_metrics') or 'unspecified')[:35]} @ `{nb.get('locator') or 'abstract'}` |"
+            )
         for tgt in (nc.get("fulltext_verification_targets") or [])[:3]:
             lines.append(f"  - Full-Text Check Required: {tgt}")
 
@@ -543,11 +636,12 @@ def render_topic_markdown(rep: dict[str, Any]) -> str:
     for fc in rep.get("feasibility_checks") or []:
         lines.append(f"| `{fc['axis']}` | `[{fc['tag']}]` | `{fc['source_ref'] or 'none'}` | `{fc['source_ref_verified']}` | {fc['rationale'][:110]} |")
 
-    lines.extend(["", "## 5. Opposing / Limiting Evidence Preserved"])
+    lines.extend(["", "## 5. Opposing / Limiting Evidence Preserved (Locator-Anchored)"])
     for op in (rep.get("opposing_evidence") or [])[:8]:
-        lines.append(f"- `{op.get('record_id', 'src')}` (`{op.get('locator', '')}`): \"{str(op.get('quote') or op.get('summary') or '')[:200]}\"")
+        lines.append(f"- `{op.get('record_id', 'src')}` (`{op.get('locator', '')}`): \"{str(op.get('quote') or op.get('summary') or '')[:220]}\"")
 
-    lines.extend(["", "## 6. Pre-Mortem Risk Matrix (Assuming Failure / Rejection)"])
+    lines.extend(["", "## 6. Pre-Mortem Risk Matrix & Go/No-Go Decision Closure"])
+    lines.append(f"- **Binding Decision Closure**: `{rep.get('go_no_go_decision')}` — resource commitment remains gated until all `[BLOCKED_UNKNOWN]` prerequisites and P0 triggers below are closed.")
     lines.append("| Priority | Failure Mode | Earliest Warning Signal | Preventive Action | Stop / Pivot Trigger | Contingency Plan |")
     lines.append("|---|---|---|---|---|---|")
     for pm in rep.get("premortem_risk_matrix") or []:
@@ -618,6 +712,8 @@ def main(argv: list[str] | None = None) -> int:
             ],
             "formulation_status": rep.get("formulation_status"),
             "corpus_scope": rep.get("corpus_scope"),
+            "audit_config": rep.get("audit_config"),
+            "dedup_lineage": rep.get("dedup_lineage", []),
             "question_formulation": rep.get("question_formulation"),
             "prior_sources": rep.get("prior_sources", [])[:40],
             "prior_work_matrix": rep.get("prior_work_matrix", []),

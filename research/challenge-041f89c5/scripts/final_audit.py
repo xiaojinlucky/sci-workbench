@@ -127,6 +127,24 @@ def audit_deliverables(
                                 blocking.append(f"missing artifact declared in {rel}: {norm_art}")
                             elif art_p.stat().st_size == 0:
                                 blocking.append(f"zero-byte artifact declared in {rel}: {norm_art}")
+                if rel == "topic_evaluation.json" and isinstance(parsed, dict):
+                    ncs = parsed.get("novelty_checks") or []
+                    if not ncs:
+                        blocking.append("topic_evaluation.json missing non-empty novelty_checks")
+                    for nc in ncs:
+                        nbs = nc.get("top3_neighbors") or []
+                        if not nbs:
+                            blocking.append(f"novelty claim {nc.get('claim_id')} missing top3_neighbors")
+                        elif not all(nb.get("problem_scope") and nb.get("locator") for nb in nbs):
+                            blocking.append(f"novelty claim {nc.get('claim_id')} top3_neighbors missing 4-column diff/locator fields")
+                    raw_cnt = ((parsed.get("audit_config") or {}).get("raw_to_dedup_counts") or {}).get("raw", 0)
+                    ded_cnt = ((parsed.get("audit_config") or {}).get("raw_to_dedup_counts") or {}).get("deduped", 0)
+                    if raw_cnt > ded_cnt and not (parsed.get("dedup_lineage") or []):
+                        blocking.append("topic_evaluation.json has duplicates merged (raw > deduped) but empty dedup_lineage pairing table")
+                    if not (parsed.get("premortem_risk_matrix") or []):
+                        blocking.append("topic_evaluation.json missing non-empty premortem_risk_matrix")
+                    if not parsed.get("go_no_go_decision"):
+                        blocking.append("topic_evaluation.json missing go_no_go_decision closure")
 
     if not file_stats:
         blocking.append("no deliverable files produced in output directory")

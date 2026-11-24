@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -106,13 +107,67 @@ def _partition_phases(sorted_years: list[int]) -> list[dict[str, Any]]:
     ]
 
 
+def _wilson_ci(k: int, n: int, z: float = 1.959964) -> list[float]:
+    """Pure-stdlib Wilson score 95% confidence interval (non-degenerate for sparse counts k=0 or k=n)."""
+    if n <= 0:
+        return [0.0, 1.0]
+    p = k / n
+    denom = 1.0 + (z * z) / n
+    center = (p + (z * z) / (2.0 * n)) / denom
+    half = (z * math.sqrt((p * (1.0 - p) + (z * z) / (4.0 * n)) / n)) / denom
+    return [round(max(0.0, center - half), 4), round(min(1.0, center + half), 4)]
+
+
+def _fisher_exact_two_sided(a: int, b: int, c: int, d: int) -> float:
+    """Pure-stdlib exact two-sided Fisher test (hypergeometric probability sum <= observed)."""
+    r1 = a + b
+    r2 = c + d
+    c1 = a + c
+    n = r1 + r2
+    if n <= 0:
+        return 1.0
+    denom = math.comb(n, c1)
+    if denom <= 0:
+        return 1.0
+
+    def _prob(x: int) -> float:
+        return (math.comb(r1, x) * math.comb(r2, c1 - x)) / denom
+
+    p_obs = _prob(a)
+    lo = max(0, c1 - r2)
+    hi = min(r1, c1)
+    p_sum = 0.0
+    for x in range(lo, hi + 1):
+        px = _prob(x)
+        if px <= p_obs + 1e-12:
+            p_sum += px
+    return round(min(1.0, p_sum), 4)
+
+
+def _apply_bh_fdr(items: list[dict[str, Any]], p_key: str = "fisher_exact_p_value") -> None:
+    """In-place Benjamini-Hochberg FDR q-value adjustment across all tested themes."""
+    m = len(items)
+    if m == 0:
+        return
+    order = sorted(range(m), key=lambda i: float(items[i].get(p_key, 1.0)))
+    q_vals = [1.0] * m
+    running_min = 1.0
+    for rank_rev, idx in enumerate(reversed(order)):
+        rank = m - rank_rev
+        p = float(items[idx].get(p_key, 1.0))
+        q = min(running_min, (p * m) / rank)
+        running_min = q
+        q_vals[idx] = round(min(1.0, q), 4)
+    for idx, q in enumerate(q_vals):
+        items[idx]["bh_fdr_q_value"] = q
+
+
 def track_topic_evolution(
     dated_records: list[dict[str, Any]],
     phases: list[dict[str, Any]],
     alias_map: dict[str, str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Track canonical themes across phases using universal title+abstract text, stratified selection,
-    TF-IDF-weighted CONVERGING_MERGING, and genuine SPLITTING_SPECIALIZING detection."""
+    """Track canonical concept_id themes across phases with Wilson score CI, Fisher's exact test, and BH-FDR."""
     if not dated_records or not phases:
         return [], []
 
@@ -122,6 +177,18 @@ def track_topic_evolution(
             year_to_phase[y] = ph["phase"]
 
     # Source-bias-free text: ONLY universal title + abstract (never OpenAlex-only concepts!)
+    generic_unigrams = {
+        "structures", "structural", "structure", "feature", "features", "framework", "frameworks",
+        "evaluated", "evaluating", "evaluation", "challenges", "challenge", "challenging",
+        "prediction", "predictions", "predictive", "property", "properties", "learning",
+        "network", "networks", "method", "methods", "approach", "approaches", "analysis",
+        "processes", "process", "material", "materials", "application", "applications",
+        "performance", "strategy", "strategies", "mechanism", "mechanisms", "behavior",
+        "design", "system", "systems", "model", "models", "effect", "effects", "discovery",
+        "machine", "neural", "graph", "molecular", "accuracy", "accurate", "effective",
+        "efficient", "complex", "novel", "recent", "current", "study", "studies", "results",
+        "data", "using", "based", "high", "low", "large", "small", "new", "different",
+    }
     docs_tokens: list[list[str]] = []
     rec_phases: list[str] = []
     for rec in dated_records:
@@ -129,7 +196,7 @@ def track_topic_evolution(
         rec_phases.append(ph)
         universal_text = f"{rec.get('title', '')} {rec.get('abstract', '')}".strip()
         toks = tokenize_terms(universal_text, include_bigrams=True, aliases=alias_map)
-        docs_tokens.append([t for t in toks if (" " in t or len(t) >= 5)])
+        docs_tokens.append([t for t in toks if (" " in t or "_" in t or (len(t) >= 5 and t not in generic_unigrams))])
 
     tfidf_vecs = build_tfidf_vectors(docs_tokens)
     phase_doc_counts: Counter[str] = Counter()
@@ -144,11 +211,11 @@ def track_topic_evolution(
         doc_terms = set(toks)
         for t in doc_terms:
             term_phase_recs[t][ph].append(rec["record_id"])
-            if " " in t:
+            if " " in t or "_" in t:
                 bigram_recs_by_phase[ph][t].add(rec["record_id"])
-        # Pick Top-10 bigrams ranked by TF-IDF weight (NOT alphabetical order!)
+        # Pick Top-10 multi-word / canonical concept terms ranked by TF-IDF weight
         ranked_bigrams = sorted(
-            (t for t in doc_terms if " " in t),
+            (t for t in doc_terms if (" " in t or "_" in t)),
             key=lambda t: (-vec.get(t, 0.0), t),
         )[:10]
         for i in range(len(ranked_bigrams)):
@@ -160,7 +227,7 @@ def track_topic_evolution(
     first_ph = phase_names[0]
     last_ph = phase_names[-1]
 
-    # Compute phase-normalized statistics for every candidate term with DF >= 2
+    # Compute phase-normalized statistics with Wilson CI + exact Fisher test + BH-FDR
     scored_terms: list[dict[str, Any]] = []
     for term, pmap in term_phase_recs.items():
         total_docs = sum(len(v) for v in pmap.values())
@@ -168,56 +235,108 @@ def track_topic_evolution(
             continue
         early_n = len(pmap.get(first_ph, []))
         recent_n = len(pmap.get(last_ph, []))
-        early_share = round(early_n / max(1, phase_doc_counts[first_ph]), 4)
-        recent_share = round(recent_n / max(1, phase_doc_counts[last_ph]), 4)
-        share_delta = round(recent_share - early_share, 4)
-
-        if len(phase_names) == 1:
-            traj = "SINGLE_WINDOW_ACTIVE"
-        elif early_n == 0 and recent_n >= 2:
-            traj = "EMERGING_FRONTIER"
-        elif early_n >= 2 and recent_n == 0:
-            traj = "DECLINING_OR_SHIFTED"
-        elif recent_n >= 2 and (share_delta >= 0.04 or recent_share >= early_share * 1.3):
-            traj = "RISING_EXPANSION"
-        elif early_n >= 2 and (share_delta <= -0.05 and early_share >= recent_share * 1.35):
-            traj = "DECLINING_OR_MATURED"
-        else:
-            traj = "SUSTAINED_CORE"
+        n1 = max(1, phase_doc_counts[first_ph])
+        n2 = max(1, phase_doc_counts[last_ph])
+        p1 = early_n / n1
+        p2 = recent_n / n2
+        early_share = round(p1, 4)
+        recent_share = round(p2, 4)
+        share_delta = round(p2 - p1, 4)
+        early_wilson = _wilson_ci(early_n, n1)
+        recent_wilson = _wilson_ci(recent_n, n2)
+        # Newcombe-Wilson hybrid CI for proportion difference (non-degenerate when p1=0 or p2=0!)
+        delta_ci95 = [
+            round(share_delta - math.sqrt((p2 - recent_wilson[0]) ** 2 + (early_wilson[1] - p1) ** 2), 4),
+            round(share_delta + math.sqrt((recent_wilson[1] - p2) ** 2 + (p1 - early_wilson[0]) ** 2), 4),
+        ]
+        fisher_p = _fisher_exact_two_sided(recent_n, max(0, n2 - recent_n), early_n, max(0, n1 - early_n))
+        p_pool = (early_n + recent_n) / max(1, n1 + n2)
+        se_pool = math.sqrt(max(0.0, p_pool * (1.0 - p_pool) * (1.0 / n1 + 1.0 / n2)))
+        z_stat = round((p2 - p1) / se_pool, 3) if se_pool > 1e-9 else 0.0
 
         scored_terms.append({
             "canonical_theme": term,
             "total_records": total_docs,
-            "trajectory": traj,
             "early_n": early_n,
             "recent_n": recent_n,
             "share_delta": share_delta,
+            "z_stat": z_stat,
+            "fisher_exact_p_value": fisher_p,
+            "two_sided_p_value": fisher_p,
+            "early_wilson_ci95": early_wilson,
+            "recent_wilson_ci95": recent_wilson,
+            "ci95_delta": delta_ci95,
+            "ci_method": "newcombe_wilson_95",
             "phase_counts": {p: len(pmap.get(p, [])) for p in phase_names},
             "phase_shares": {p: round(len(pmap.get(p, [])) / max(1, phase_doc_counts[p]), 4) for p in phase_names},
             "example_record_ids": sorted({rid for rlist in pmap.values() for rid in rlist})[:6],
         })
 
-    # Stratified selection: emerging/rising + sustained core + declining (prevents total-DF truncation!)
-    emerging_rising = sorted(
-        [x for x in scored_terms if x["trajectory"] in {"EMERGING_FRONTIER", "RISING_EXPANSION"}],
-        key=lambda x: (-x["share_delta"], -x["recent_n"], -int(" " in x["canonical_theme"]), x["canonical_theme"]),
-    )[:8]
-    sustained = sorted(
-        [x for x in scored_terms if x["trajectory"] in {"SUSTAINED_CORE", "SINGLE_WINDOW_ACTIVE"}],
-        key=lambda x: (-x["total_records"], -int(" " in x["canonical_theme"]), x["canonical_theme"]),
-    )[:6]
-    declining = sorted(
-        [x for x in scored_terms if x["trajectory"] in {"DECLINING_OR_MATURED", "DECLINING_OR_SHIFTED"}],
-        key=lambda x: (x["share_delta"], -x["early_n"], x["canonical_theme"]),
-    )[:4]
+    # Apply Benjamini-Hochberg FDR across all candidate themes BEFORE labeling trajectories!
+    _apply_bh_fdr(scored_terms, p_key="fisher_exact_p_value")
+    for item in scored_terms:
+        early_n = item["early_n"]
+        recent_n = item["recent_n"]
+        early_share = item["phase_shares"].get(first_ph, 0.0)
+        recent_share = item["phase_shares"].get(last_ph, 0.0)
+        share_delta = item["share_delta"]
+        q_val = float(item.get("bh_fdr_q_value", 1.0))
+        fdr_sig = (q_val < 0.05) and (max(early_n, recent_n) >= 3)
+        item["statistically_notable"] = fdr_sig
+        item["significance_status"] = (
+            "SIGNIFICANT_BH_FDR" if fdr_sig else ("UNDERPOWERED_SPARSE" if max(early_n, recent_n) < 3 else "NOT_SIGNIFICANT_AFTER_FDR")
+        )
+        if len(phase_names) == 1:
+            traj = "SINGLE_WINDOW_ACTIVE"
+        elif early_n == 0 and recent_n >= 3 and fdr_sig:
+            traj = "EMERGING_FRONTIER"
+        elif early_n == 0 and recent_n >= 2:
+            traj = "CANDIDATE_EMERGING_UNADJUSTED"
+        elif early_n >= 3 and recent_n == 0 and fdr_sig:
+            traj = "DECLINING_OR_SHIFTED"
+        elif early_n >= 2 and recent_n == 0:
+            traj = "CANDIDATE_DECLINING_UNADJUSTED"
+        elif recent_n >= 2 and (share_delta >= 0.04 or recent_share >= early_share * 1.3):
+            traj = "RISING_EXPANSION" if fdr_sig else "RISING_OBSERVATIONAL_SIGNAL"
+        elif early_n >= 2 and (share_delta <= -0.05 and early_share >= recent_share * 1.35):
+            traj = "DECLINING_OR_MATURED"
+        else:
+            traj = "SUSTAINED_CORE"
+        item["trajectory"] = traj
 
-    selected: list[dict[str, Any]] = []
+    # Stratified selection: prefer substantive multi-word bigrams/concept_ids and deduplicate sub-phrases
+    def _pick_distinct(cands: list[dict[str, Any]], limit: int, already: set[str]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for item in cands:
+            t = item["canonical_theme"]
+            if t in already:
+                continue
+            if any((t in prev or prev in t) for prev in already):
+                continue
+            already.add(t)
+            out.append({k: v for k, v in item.items() if k not in {"early_n", "recent_n"}})
+            if len(out) >= limit:
+                break
+        return out
+
+    emerging_cands = sorted(
+        [x for x in scored_terms if x["trajectory"] in {"EMERGING_FRONTIER", "CANDIDATE_EMERGING_UNADJUSTED", "RISING_EXPANSION", "RISING_OBSERVATIONAL_SIGNAL"}],
+        key=lambda x: (-int(x["statistically_notable"]), -int(" " in x["canonical_theme"] or "_" in x["canonical_theme"]), -x["share_delta"], -x["recent_n"], x["canonical_theme"]),
+    )
+    sustained_cands = sorted(
+        [x for x in scored_terms if x["trajectory"] in {"SUSTAINED_CORE", "SINGLE_WINDOW_ACTIVE"}],
+        key=lambda x: (-int(" " in x["canonical_theme"] or "_" in x["canonical_theme"]), -x["total_records"], x["canonical_theme"]),
+    )
+    declining_cands = sorted(
+        [x for x in scored_terms if x["trajectory"] in {"DECLINING_OR_MATURED", "DECLINING_OR_SHIFTED", "CANDIDATE_DECLINING_UNADJUSTED"}],
+        key=lambda x: (-int(" " in x["canonical_theme"] or "_" in x["canonical_theme"]), x["share_delta"], -x["early_n"], x["canonical_theme"]),
+    )
+
     seen_t: set[str] = set()
-    for grp in (emerging_rising, sustained, declining):
-        for item in grp:
-            if item["canonical_theme"] not in seen_t:
-                seen_t.add(item["canonical_theme"])
-                selected.append({k: v for k, v in item.items() if k not in {"early_n", "recent_n"}})
+    selected: list[dict[str, Any]] = []
+    selected.extend(_pick_distinct(emerging_cands, 8, seen_t))
+    selected.extend(_pick_distinct(sustained_cands, 6, seen_t))
+    selected.extend(_pick_distinct(declining_cands, 4, seen_t))
 
     structural_shifts: list[dict[str, Any]] = []
     if len(phase_names) >= 2:
@@ -341,7 +460,15 @@ def select_stage_representatives(
             adopted = [bg for bg in r_bgs if sum(1 for lr in later_recs if bg in rec_bigrams.get(lr["record_id"], set())) >= 2]
             gen_methods = extract_general_methods_and_objects(f"{r.get('title', '')} {r.get('abstract', '')}")["methods"]
             is_long_tail = int(r.get("citations") or 0) <= max(median_cite, 25)
-            score = len(adopted) * 2 + len(gen_methods) * 2 + (4 if is_long_tail else 0) + (2 if is_fulltext_access(str(r.get("material_access") or "")) else 0)
+            rec_type_venue = f"{r.get('type', '')} {r.get('venue', '')} {r.get('url', '')} {r.get('doi', '')}".lower()
+            is_thesis = any(k in rec_type_venue for k in ("dissertation", "thesis", "chula", "repository", "etd"))
+            score = (
+                len(adopted) * 2
+                + len(gen_methods) * 2
+                + (4 if is_long_tail else 0)
+                + (2 if is_fulltext_access(str(r.get("material_access") or "")) else 0)
+                - (8 if is_thesis else 0)
+            )
             if adopted or gen_methods:
                 pioneer_scores.append((score, -yr, r, (gen_methods[:3] + sorted(adopted)[:3])[:4]))
         if pioneer_scores:
@@ -424,6 +551,9 @@ def extract_evidence_backed_gaps(canonical: list[dict[str, Any]], pagination_war
             "gap_id": "GAP-01",
             "gap_type": "repeatedly_reported_limitation",
             "evidence_count": len(lim_rows),
+            "claim_quote": lim_rows[0]["quote"],
+            "page_or_section": lim_rows[0]["locator"],
+            "supporting_record_ids": sorted({x["record_id"] for x in lim_rows[:6]}),
             "supporting_passages": lim_rows[:6],
             "exclusion_and_scope_note": "Extracted from genuine limitation passages in inspected local sources; does not assert absence of solutions outside this bounded snapshot.",
         })
@@ -431,14 +561,21 @@ def extract_evidence_backed_gaps(canonical: list[dict[str, Any]], pagination_war
         gaps.append({
             "gap_id": f"GAP-{len(gaps) + 1:02d}",
             "gap_type": "unresolved_directional_conflict",
+            "claim_quote": (lim_rows[1]["quote"] if len(lim_rows) > 1 else "Competing supportive and opposing/null empirical outcomes coexist across local sources."),
+            "page_or_section": (lim_rows[1]["locator"] if len(lim_rows) > 1 else "corpus_conflict_comparison"),
+            "supporting_record_ids": sorted(set(supp_ids[:3] + opp_ids[:3])),
             "supportive_records": sorted(set(supp_ids))[:6],
             "opposing_or_mixed_records": sorted(set(opp_ids))[:6],
             "exclusion_and_scope_note": "Opposing/null results coexist with positive claims within the bounded snapshot; controlled cross-condition reconciliation remains open.",
         })
     if pagination_warnings:
+        pw0 = pagination_warnings[0]
         gaps.append({
             "gap_id": f"GAP-{len(gaps) + 1:02d}",
             "gap_type": "denominator_pagination_boundary",
+            "claim_quote": f"Snapshot {pw0.get('source_file')} loaded {pw0.get('loaded_records')} of {pw0.get('total_hits')} total reported hits ({pw0.get('provider')}).",
+            "page_or_section": str(pw0.get("source_file") or "api_metadata"),
+            "supporting_record_ids": [str(pw.get("source_file")) for pw in pagination_warnings[:4]],
             "details": pagination_warnings,
             "exclusion_and_scope_note": "API snapshot is a paginated slice of total hits; apparent absences or sharp tail drops may reflect pagination truncation rather than true field decline.",
         })
@@ -555,14 +692,31 @@ def analyze_trends(
             if " " in t or len(t) >= 5:
                 topic_by_year[yi][t] += 1
 
-    sorted_years = sorted(by_year.keys())
+    sorted_obs_years = sorted(by_year.keys())
+    # Fill ALL calendar years across [min_year, max_year] so zero-record years are explicitly audited (OBSERVED_ZERO_IN_COVERED_WINDOW vs UNCOVERED)
+    full_span_years = list(range(sorted_obs_years[0], sorted_obs_years[-1] + 1)) if sorted_obs_years else []
+    sorted_years = full_span_years
     total_dated = sum(by_year.values())
+    abstract_missing_by_source_year: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "missing_abstract": 0})
+    numeric_evidence_matches: list[str] = []
+    num_ev_re = re.compile(r"\b\d+(?:\.\d+)?\s*(?:%|mv|ma\s*cm-2|ma/cm2|a\s*cm-2|h\b|hr|hours|days|months|years|nm|ev|mev|k\b|mg|kg|patients|studies|trials|records|papers)\b", re.I)
+    for rec in canonical:
+        src_lbl = str(rec.get("source") or "local")
+        yr_lbl = str(rec.get("year") or "missing_year")
+        key_sy = f"{src_lbl}|{yr_lbl}"
+        abstract_missing_by_source_year[key_sy]["total"] += 1
+        if not str(rec.get("abstract") or "").strip():
+            abstract_missing_by_source_year[key_sy]["missing_abstract"] += 1
+        blob_n = f"{rec.get('title', '')} {rec.get('abstract', '')}"
+        for nm in num_ev_re.findall(blob_n)[:4]:
+            numeric_evidence_matches.append(nm.strip())
+
     yearly_series: list[dict[str, Any]] = []
     turning_point = None
     prev_cnt = None
     max_delta = 0
     for y in sorted_years:
-        cnt = by_year[y]
+        cnt = by_year.get(y, 0)
         delta = (cnt - prev_cnt) if prev_cnt is not None else 0
         yoy_rate = round(delta / prev_cnt, 4) if (prev_cnt is not None and prev_cnt > 0) else None
         if prev_cnt is not None and abs(delta) > max_delta:
@@ -572,6 +726,7 @@ def analyze_trends(
         yearly_series.append({
             "year": y,
             "count": cnt,
+            "zero_year_status": "OBSERVED_NONZERO" if cnt > 0 else "OBSERVED_ZERO_IN_COVERED_WINDOW",
             "share": round(cnt / max(1, total_dated), 4),
             "yoy_delta": delta,
             "yoy_growth_rate": yoy_rate,
@@ -581,7 +736,7 @@ def analyze_trends(
 
     sensitivity_series = [
         {"year": y, "vor_preferred_count": by_year.get(y, 0), "preprint_first_count": preprint_first_year_series[y], "delta": preprint_first_year_series[y] - by_year.get(y, 0)}
-        for y in sorted(set(by_year.keys()) | set(preprint_first_year_series.keys()))
+        for y in sorted(set(full_span_years) | set(preprint_first_year_series.keys()))
     ]
 
     dated_recs = [r for r in canonical if r.get("year") is not None]
@@ -609,9 +764,13 @@ def analyze_trends(
         "records_raw_total": len(raw_records),
         "records_total": len(canonical),
         "duplicates_merged": len(dup_log),
+        "dedup_pairings": dup_log[:30],
         "preprint_vor_upgrades": preprint_vor_upgrades,
         "dated_records": len(dated_recs),
         "missing_year_records": missing_year_ids,
+        "abstract_missing_by_source_year": dict(sorted(abstract_missing_by_source_year.items())),
+        "numeric_evidence_count": len(numeric_evidence_matches),
+        "numeric_evidence_samples": numeric_evidence_matches[:20],
         "date_basis_breakdown": dict(sorted(date_basis_counts.items())),
         "date_basis_by_year": {str(year): dict(sorted(counts.items())) for year, counts in sorted(date_basis_by_year.items())},
         "yearly_distribution": yearly_series,
@@ -667,11 +826,13 @@ def render_trend_markdown(rep: dict[str, Any]) -> str:
         lines.append("- No synonym/acronym drift merges triggered.")
 
     lines.extend(["", "## 3. Topic Evolution Across Temporal Phases (Stratified: Emerging / Core / Declining)"])
-    lines.append("| Canonical Theme | Total Docs | Trajectory | Share Delta | Phase Counts | Example Records |")
+    lines.append("| Canonical Theme | Total Docs | Trajectory | Share Delta (z, p, 95% CI) | Phase Counts | Example Records |")
     lines.append("|---|---|---|---|---|---|")
     for te in (rep.get("topic_evolution") or []):
+        ci = te.get("ci95_delta") or [0.0, 0.0]
+        stat_str = f"{te.get('share_delta', 0):+.4f} (z={te.get('z_stat', 0):+.2f}, p={te.get('two_sided_p_value', 1.0):.4f}, CI [{ci[0]:+.2f},{ci[1]:+.2f}])"
         lines.append(
-            f"| {te['canonical_theme']} | {te['total_records']} | `{te['trajectory']}` | {te.get('share_delta', 0):+.4f} | `{json.dumps(te['phase_counts'], ensure_ascii=False)}` | {', '.join(te['example_record_ids'][:3])} |"
+            f"| {te['canonical_theme']} | {te['total_records']} | `{te['trajectory']}` | {stat_str} | `{json.dumps(te['phase_counts'], ensure_ascii=False)}` | {', '.join(te['example_record_ids'][:3])} |"
         )
     if rep.get("structural_shifts"):
         lines.append("")
@@ -795,6 +956,8 @@ def main(argv: list[str] | None = None) -> int:
             "stage_representatives": rep.get("stage_representatives", []),
             "research_gaps": rep.get("research_gaps", []),
             "missing_year_records": rep.get("missing_year_records", []),
+            "abstract_missing_by_source_year": rep.get("abstract_missing_by_source_year", {}),
+            "numeric_evidence_samples": rep.get("numeric_evidence_samples", []),
             "warnings": rep.get("warnings", []),
             "uncertainty": {
                 "bounded_scope": True,
@@ -810,7 +973,9 @@ def main(argv: list[str] | None = None) -> int:
                 "preprint_vor_upgrades": rep.get("preprint_vor_upgrades", 0),
                 "dated_records": rep.get("dated_records", 0),
                 "year_span_count": len(rep.get("yearly_distribution") or []),
-                "emerging_or_rising_theme_count": sum(1 for t in (rep.get("topic_evolution") or []) if t["trajectory"] in {"EMERGING_FRONTIER", "RISING_EXPANSION"}),
+                "emerging_or_rising_theme_count": sum(1 for t in (rep.get("topic_evolution") or []) if t["trajectory"] in {"EMERGING_FRONTIER", "RISING_EXPANSION", "CANDIDATE_EMERGING_UNADJUSTED", "RISING_OBSERVATIONAL_SIGNAL"}),
+                "fdr_significant_theme_count": sum(1 for t in (rep.get("topic_evolution") or []) if t.get("statistically_notable")),
+                "numeric_evidence_count": rep.get("numeric_evidence_count", 0),
                 "structural_shift_count": len(rep.get("structural_shifts") or []),
                 "representative_count": len(rep.get("stage_representatives") or []),
                 "research_gap_count": len(rep.get("research_gaps") or []),
@@ -823,6 +988,8 @@ def main(argv: list[str] | None = None) -> int:
                 "dated_records": f"{out_j.name}:dated_records",
                 "year_span_count": f"{out_j.name}:yearly_distribution",
                 "emerging_or_rising_theme_count": f"{out_j.name}:topic_evolution",
+                "fdr_significant_theme_count": f"{out_j.name}:topic_evolution.bh_fdr_q_value",
+                "numeric_evidence_count": f"{out_j.name}:numeric_evidence_samples",
                 "structural_shift_count": f"{out_j.name}:structural_shifts",
                 "representative_count": f"{out_j.name}:stage_representatives",
                 "research_gap_count": f"{out_j.name}:research_gaps",

@@ -17,6 +17,7 @@ Key guarantees:
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import re
@@ -121,11 +122,72 @@ def build_frozen_protocol(case_data: dict[str, Any], queries: list[Any], raw_rec
     y_max = proto.get("year_max")
     ft_req = proto.get("fulltext_required") is True
 
-    rq_terms = tokenize_terms(rq, include_bigrams=False)[:6]
-    concept_block = " OR ".join(f'"{t}"' for t in (req_terms or rq_terms[:3] or ["topic"]))
+    rq_terms = tokenize_terms(rq, include_bigrams=False)[:10]
+    pico = _extract_pico_from_rq(rq, proto, case_data, req_terms)
+    pop_terms = tokenize_terms(pico["population_or_object"], include_bigrams=False)[:4] or rq_terms[:2] or ["population"]
+    interv_terms = req_terms or tokenize_terms(pico["intervention_or_exposure"], include_bigrams=False)[:4] or rq_terms[:3] or ["intervention"]
+    out_terms = tokenize_terms(pico["outcome"], include_bigrams=False)[:4]
+    # Strict Concept-Group Modeling: OR within each concept group, AND across distinct concept groups!
+    concept_groups: list[dict[str, Any]] = [
+        {"group": "G1_intervention_or_exposure", "operator_within": "OR", "terms": interv_terms},
+    ]
+    pop_distinct = [t for t in pop_terms if t not in set(interv_terms)]
+    if pop_distinct:
+        concept_groups.append({"group": "G2_population_or_object", "operator_within": "OR", "terms": pop_distinct[:3]})
+    out_distinct = [t for t in out_terms if t not in set(interv_terms) and t not in set(pop_distinct)]
+    if out_distinct:
+        concept_groups.append({"group": "G3_outcome_anchor", "operator_within": "OR", "terms": out_distinct[:3]})
+
+    core_terms = interv_terms
+    group_exprs = ["(" + " OR ".join(f'"{t}"' for t in g["terms"]) + ")" for g in concept_groups if g["terms"]]
+    combined_group_expr = " AND ".join(group_exprs)
     excl_block = (" NOT (" + " OR ".join(f'"{t}"' for t in excl_terms[:4]) + ")") if excl_terms else ""
     year_clause = f" AND PY:[{y_min or '*'} TO {y_max or '*'}]" if (y_min or y_max) else ""
-    boolean_query = f"TIAB:({concept_block}){excl_block}{year_clause}"
+    boolean_query = f"TIAB:({combined_group_expr}){excl_block}{year_clause}"
+
+    # Database-specific syntax queries derived from concept groups (OR within group, AND across groups)
+    pubmed_groups = " AND ".join("(" + " OR ".join(f'"{t}"[tiab]' for t in g["terms"]) + ")" for g in concept_groups if g["terms"])
+    pubmed_excl = (" NOT (" + " OR ".join(f'"{t}"[tiab]' for t in excl_terms[:4]) + ")") if excl_terms else ""
+    pubmed_yr = f" AND ({y_min or 1900}:{y_max or 2026}[dp])" if (y_min or y_max) else ""
+    arxiv_groups = " AND ".join("(" + " OR ".join(f'all:"{t}"' for t in g["terms"]) + ")" for g in concept_groups if g["terms"])
+    database_queries = {
+        "pubmed_europepmc": f"{pubmed_groups}{pubmed_excl}{pubmed_yr}",
+        "openalex": f"title_and_abstract.search:({combined_group_expr})" + (f" | filter=publication_year:{y_min or '*'}-{y_max or '*'}" if (y_min or y_max) else ""),
+        "arxiv": f"{arxiv_groups}",
+        "crossref": f"query.bibliographic=({combined_group_expr})" + (f"&filter=from-pub-date:{y_min or 1900},until-pub-date:{y_max or 2026}" if (y_min or y_max) else ""),
+    }
+
+    # Offline local replay strictly reflects the loaded snapshot (semantic subset of live database APIs)
+    core_hits = 0
+    all_groups_hits = 0
+    excl_hits = 0
+    year_hits = 0
+    combined_hits = 0
+    for r in raw_records:
+        tiab = f"{r.get('title', '')} {r.get('abstract', '')}".lower()
+        c_ok = any(bool(re.search(rf"\b{re.escape(t.replace('_', ' '))}\b|\b{re.escape(t)}\b", tiab)) for t in core_terms)
+        g_ok = all(
+            any(bool(re.search(rf"\b{re.escape(t.replace('_', ' '))}\b|\b{re.escape(t)}\b", tiab)) for t in g["terms"])
+            for g in concept_groups
+        )
+        e_hit = any(bool(re.search(rf"\b{re.escape(t)}\b", tiab)) for t in excl_terms) if excl_terms else False
+        yr = r.get("year")
+        y_ok = True
+        if yr is not None:
+            if y_min is not None and int(yr) < int(y_min):
+                y_ok = False
+            if y_max is not None and int(yr) > int(y_max):
+                y_ok = False
+        if c_ok:
+            core_hits += 1
+        if g_ok:
+            all_groups_hits += 1
+        if e_hit:
+            excl_hits += 1
+        if y_ok:
+            year_hits += 1
+        if c_ok and not e_hit and y_ok:
+            combined_hits += 1
 
     clause_priority = [
         {"priority": 1, "clause_id": "EXC_OUT_OF_YEAR_WINDOW", "stage": "stage1_title_abstract", "rule": f"Year outside [{y_min}, {y_max}]"},
@@ -138,16 +200,35 @@ def build_frozen_protocol(case_data: dict[str, Any], queries: list[Any], raw_rec
     ]
 
     protocol_core = {
-        "protocol_version": str(proto.get("version") or "v2_frozen"),
+        "protocol_version": str(proto.get("version") or "v3_frozen_concept_groups"),
         "research_question": rq,
-        "pico_peco_framework": _extract_pico_from_rq(rq, proto, case_data, req_terms),
+        "pico_peco_framework": pico,
         "search_strategy": {
             "databases": databases,
             "fields_searched": ["title", "abstract", "keywords"],
+            "boolean_logic_topology": "OR_within_concept_group_AND_across_groups",
+            "concept_groups": concept_groups,
             "boolean_query": str(proto.get("boolean_query") or boolean_query),
+            "database_specific_queries": database_queries,
+            "local_query_replay": {
+                "replay_scope": "offline_local_subset_only (word-boundary TIAB simulation; does NOT emulate remote MeSH explosion or full pagination)",
+                "snapshot_raw_records": len(raw_records),
+                "core_concept_hits": core_hits,
+                "all_concept_groups_and_hits": all_groups_hits,
+                "exclusion_term_hits": excl_hits,
+                "in_year_window_hits": year_hits,
+                "combined_boolean_hits": combined_hits,
+            },
+            "resumable_export_manifest": {
+                "supports_cursor_resume": True,
+                "export_files_inspected": sorted({str(r.get("source_file") or "") for r in raw_records if r.get("source_file")})[:30],
+                "low_confidence_human_review_queue_field": "disagreement_and_human_review_queue",
+            },
             "query_blocks": [
-                {"block": "core_concept", "intent": "Capture target domain and intervention/exposure terms", "terms": req_terms or rq_terms[:4]},
-                {"block": "exclusion_filter", "intent": "Remove declared out-of-scope populations or document types", "terms": excl_terms},
+                {"block": "core_concept", "intent": "Capture target domain and intervention/exposure terms (OR within group)", "terms": core_terms},
+                {"block": "population_anchor", "intent": "Capture target population/object terms (ANDed with intervention)", "terms": pop_distinct[:3]},
+                {"block": "outcome_anchor", "intent": "Capture empirical outcome terms from PICO (ANDed with intervention)", "terms": out_distinct[:3]},
+                {"block": "exclusion_filter", "intent": "Remove declared out-of-scope populations or document types (NOT)", "terms": excl_terms},
             ],
             "search_date_snapshot": str(case_data.get("search_date") or "bounded_local_snapshot"),
         },
@@ -260,39 +341,42 @@ def appraise_study_five_domains(rec: dict[str, Any], has_full: bool) -> dict[str
         high_msg="High risk of bias or unadjusted confounding explicitly reported",
         missing_msg="No explicit bias/confounding safeguard detected in inspected passages.",
     )
-    d5 = {
-        "judgment": "LOW_RISK" if has_full else "HIGH_RISK",
+    # STRICT DECOUPLING: evidence_access (fulltext availability) is NEVER conflated with methodological Risk of Bias (RoB 2 / ROBINS-I)!
+    evidence_access_audit = {
+        "evidence_access_tier": access,
+        "fulltext_inspected": has_full,
+        "verifiability_status": "FULLTEXT_VERIFIABLE" if has_full else "UNASSESSABLE_NO_FULLTEXT",
         "locator": passages[0]["locator"] if passages else src_loc,
-        "rationale": f"Full-text access verified ({access})." if has_full else f"Limited to {access}; full methods/results not independently verifiable.",
+        "rationale": f"Full-text access verified ({access}); methodological RoB domains D1-D4 assessed from full text." if has_full else f"Limited to {access}; methodological RoB domains D2-D4 cannot be assumed HIGH_RISK and remain NOT_ASSESSABLE_FROM_ABSTRACT pending full-text retrieval.",
     }
-
-    domains = {
+    rob_domains = {
         "D1_study_design_and_protocol": d1,
         "D2_sample_and_inference_unit": d2,
         "D3_comparator_and_controls": d3,
         "D4_bias_confounding_and_transparency": d4,
-        "D5_fulltext_access_and_verifiability": d5,
     }
-    judgments = [d["judgment"] for d in domains.values()]
+    rob_judgments = [d["judgment"] for d in rob_domains.values()]
     if not has_full:
-        overall = "INCOMPLETE_ABSTRACT_ONLY"
-    elif "HIGH_RISK" in judgments:
+        overall = "UNASSESSABLE_ABSTRACT_ONLY"
+    elif "HIGH_RISK" in rob_judgments:
         overall = "LOW"
     elif is_secondary_review:
         overall = "SECONDARY_REVIEW_NOT_PRIMARY_TRIAL"
-    elif judgments.count("LOW_RISK") >= 4:
+    elif rob_judgments.count("LOW_RISK") >= 3:
         overall = "HIGH"
-    elif judgments.count("LOW_RISK") >= 2:
+    elif rob_judgments.count("LOW_RISK") >= 2:
         overall = "MODERATE"
     else:
         overall = "LOW"
 
     return {
         "instrument": APPRAISAL_INSTRUMENT,
-        "instrument_version": APPRAISAL_VERSION,
+        "instrument_version": "v3_decoupled_rob_and_access",
+        "rob_framework_alignment": "RoB 2 (randomized) / ROBINS-I (observational) methodological domains strictly decoupled from evidence_access",
         "is_secondary_review": is_secondary_review,
+        "evidence_access": evidence_access_audit,
         "overall_quality_tier": overall,
-        "domains": domains,
+        "domains": rob_domains,
     }
 
 
@@ -534,14 +618,18 @@ def render_systematic_review_report(
     disagreements: list[dict[str, Any]],
     conflicts: list[dict[str, Any]],
     sensitivity_note: str,
+    screening_ledger: list[dict[str, Any]] | None = None,
 ) -> str:
     q_tiers = Counter(a["quality_appraisal"]["overall_quality_tier"] for a in appraisals)
+    run_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines = [
         f"# Auditable Systematic Literature Review Report ({case_id})",
         "",
         f"**Research Question**: {proto['research_question']}",
-        f"**Frozen Protocol Lock**: `{proto['protocol_version']}` (SHA-256: `{proto['protocol_sha256']}`)",
+        f"**Frozen Protocol Lock**: `{proto['protocol_version']}` (SHA-256: `{proto['protocol_sha256']}`) | **Audit Timestamp (UTC)**: `{run_utc}`",
         f"**Search Query**: `{proto['search_strategy']['boolean_query']}` across `{', '.join(proto['databases'])}`",
+        f"**Database-Specific Queries**: `PubMed/EuropePMC`: `{proto['search_strategy'].get('database_specific_queries', {}).get('pubmed_europepmc', '')}` | `OpenAlex`: `{proto['search_strategy'].get('database_specific_queries', {}).get('openalex', '')}`",
+        f"**Local Query Replay Hits**: `{json.dumps(proto['search_strategy'].get('local_query_replay', {}), ensure_ascii=False)}`",
         "**Scope Boundary**: Bounded to the finite local snapshot; global literature completeness and completed prospective experiments are NOT claimed.",
         "",
         "## 1. PRISMA 2020 Flow Accounting (Conserved from Screening Ledger)",
@@ -555,21 +643,36 @@ def render_systematic_review_report(
         f"- Excluded at Full-Text (with clause reasons): **{prisma['n_elig_excl']}** (`{json.dumps(prisma.get('fulltext_exclusion_reason_counts', {}), ensure_ascii=False)}`)",
         f"- Studies included in synthesis: **{prisma['n_included']}** (PRISMA balanced=`{prisma['balanced']}`)",
         "",
-        "## 2. Five-Domain Study Quality Appraisal (`SLR-Appraisal-v2-MultiDomain`)",
+        "## 2. Methodological RoB Appraisal (RoB 2 / ROBINS-I Aligned, Decoupled from `evidence_access`)",
         f"- Quality Tier Distribution: `{json.dumps(dict(sorted(q_tiers.items())), ensure_ascii=False)}`",
         f"- **Sensitivity Impact on Synthesis**: {sensitivity_note}",
         "",
-        "| Record ID | Access | Quality Tier | D1 Design | D2 Sample/Unit | D3 Comparator | D4 Bias/Safeguards | D5 Verifiability | Direction |",
+        "| Record ID | Access | Quality Tier | D1 Design | D2 Sample/Unit | D3 Comparator | D4 Bias/Safeguards | Evidence Access (Decoupled) | Direction |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for a in appraisals[:35]:
         d = a["quality_appraisal"]["domains"]
+        ea = a["quality_appraisal"].get("evidence_access") or {}
         lines.append(
             f"| `{a['record_id']}` | `{a['material_access']}` | `{a['quality_appraisal']['overall_quality_tier']}` | "
             f"{d['D1_study_design_and_protocol']['judgment']} | {d['D2_sample_and_inference_unit']['judgment']} | "
             f"{d['D3_comparator_and_controls']['judgment']} | {d['D4_bias_confounding_and_transparency']['judgment']} | "
-            f"{d['D5_fulltext_access_and_verifiability']['judgment']} | {a['direction']} |"
+            f"`{ea.get('verifiability_status', 'UNASSESSABLE_NO_FULLTEXT')}` | {a['direction']} |"
         )
+
+    lines.extend(["", "### 2.1 Verbatim Per-Domain Appraisal Evidence & Locators"])
+    for a in appraisals[:20]:
+        d = a["quality_appraisal"]["domains"]
+        dom_notes = []
+        for dk, short in (
+            ("D1_study_design_and_protocol", "D1"),
+            ("D2_sample_and_inference_unit", "D2"),
+            ("D3_comparator_and_controls", "D3"),
+            ("D4_bias_confounding_and_transparency", "D4"),
+        ):
+            dv = d[dk]
+            dom_notes.append(f"{short}={dv['judgment']} (`{dv['locator']}`: {dv['rationale'][:75]})")
+        lines.append(f"- **`{a['record_id']}`** (`{a['quality_appraisal']['overall_quality_tier']}`): " + "; ".join(dom_notes))
 
     lines.extend(["", "## 3. Opposing / Mixed Evidence Preserved"])
     if conflicts:
@@ -578,14 +681,40 @@ def render_systematic_review_report(
     else:
         lines.append("- No direct empirical opposing/null passages detected among included studies.")
 
-    lines.extend(["", "## 4. Dual-Reviewer Disagreement / Borderline Queue"])
+    lines.extend(["", "## 4. Row-Level Screening Audit Sample (Stage 1 & Stage 2 Clauses)"])
+    lines.append("| Record ID | Stage 1 (TiAb) | Stage 2 (Full-Text) | Matched Clause | Rationale |")
+    lines.append("|---|---|---|---|---|")
+    ledger = screening_ledger or []
+    # Show balanced sample across included, excluded_fulltext, not_retrieved, and stage1 excluded
+    sample_rows: list[dict[str, Any]] = []
+    for bucket_fn, cap in (
+        (lambda r: r.get("stage2_fulltext") in {"included", "included_abstract_only_caveat"}, 6),
+        (lambda r: r.get("stage2_fulltext") == "excluded_fulltext", 4),
+        (lambda r: r.get("stage2_fulltext") == "not_retrieved", 4),
+        (lambda r: r.get("stage1_title_abstract") == "exclude", 6),
+    ):
+        cnt = 0
+        for row in ledger:
+            if bucket_fn(row):
+                sample_rows.append(row)
+                cnt += 1
+                if cnt >= cap:
+                    break
+    for row in sample_rows:
+        clause = row.get("stage2_reason_code") or row.get("stage1_reason_code") or "INCLUDED"
+        reason = row.get("stage2_exclusion_reason") or row.get("stage1_exclusion_reason") or "Meets all predeclared PICO eligibility clauses"
+        lines.append(
+            f"| `{row['record_id']}` | `{row['stage1_title_abstract']}` | `{row['stage2_fulltext']}` | `{clause}` | {str(reason)[:95]} |"
+        )
+
+    lines.extend(["", "## 5. Dual-Reviewer Disagreement / Borderline Queue"])
     if disagreements:
         for dg in disagreements[:15]:
             lines.append(f"- `{dg['record_id']}` ({dg['stage1_decision']}, `{dg['matched_clause']}`): {dg['note']}")
     else:
         lines.append("- Zero clause-conflict disagreements flagged.")
 
-    lines.extend(["", "## 5. Evidence-Grounded Research Gaps"])
+    lines.extend(["", "## 6. Evidence-Grounded Research Gaps"])
     if prisma["n_not_retrieved"] > 0:
         lines.append(f"- **Full-text retrieval gap**: {prisma['n_not_retrieved']} Stage-1 eligible record(s) lacked full text at this snapshot (`n_not_retrieved`).")
     low_q = sum(1 for a in appraisals if a["quality_appraisal"]["overall_quality_tier"] in {"LOW", "INCOMPLETE_ABSTRACT_ONLY", "SECONDARY_REVIEW_NOT_PRIMARY_TRIAL"})
@@ -683,7 +812,9 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
     bundle_path = output_dir / "systematic_review_bundle.json"
     result_guard.atomic_write_json(bundle_path, review_bundle)
 
-    report_md = render_systematic_review_report(case_id, proto, prisma, appraisals, disagreements, conflicts, sensitivity_note)
+    report_md = render_systematic_review_report(
+        case_id, proto, prisma, appraisals, disagreements, conflicts, sensitivity_note, screening_ledger=screening_ledger
+    )
     report_path = output_dir / "systematic_review_report.md"
     result_guard.atomic_write_text(report_path, report_md)
     report_check = verify_slr_report(report_path, review_bundle)

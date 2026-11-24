@@ -19,6 +19,7 @@ from typing import Any
 
 VALID_EVIDENCE_STATES = {"SUPPORTED", "PARTIAL", "REFUTED", "OUTDATED", "UNKNOWN"}
 FULLTEXT_ACCESS_TIERS = {"fulltext_pdf", "fulltext_xml", "fulltext_local_text", "captured_text"}
+SECONDARY_ACCESS_TIERS = {"secondary_note"}
 NON_EVIDENCE_ACCESS_TIERS = {"discovery_only", "blocked_or_unavailable"}
 
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b", re.I)
@@ -61,28 +62,93 @@ POS_SIGNAL_RE = re.compile(
     r"显著提高|显著改善|显著降低|显著优于|保护效应|正向相关",
     re.I,
 )
-# Strictly match genuine opposing/null/contradictory empirical results — NEVER bare degradation/limited by/in contrast/however!
+# Domain-general genuine opposing/null/contradictory/trade-off empirical cues — NEVER bare degradation/limited by/in contrast/however!
 NEG_SIGNAL_RE = re.compile(
     r"\b(?:no\s+(?:statistically\s+)?significant\s+(?:difference|effect|association|improvement|benefit|correlation|change|reduction|increase)|"
     r"did\s+not\s+(?:significantly\s+)?(?:improve|reduce|increase|differ|affect|confirm|reproduce|replicate|alter)|"
-    r"fail(?:ed|s)?\s+to\s+(?:reproduce|replicate|improve|show|confirm|demonstrate|generalize|outperform)|"
+    r"fail(?:ed|s)?\s+to\s+(?:reproduce|replicate|improve|show|confirm|demonstrate|generalize|outperform|sustain|maintain)|"
     r"null\s+(?:effect|result|finding|association)|statistically\s+insignificant|"
-    r"contradict(?:s|ed|ing|ory)\s+(?:prior|previous|earlier|reported)|"
+    r"contradict(?:s|ed|ing|ory)\s+(?:prior|previous|earlier|reported|existing|conventional)|"
+    r"inconsistent\s+with\s+(?:prior|previous|earlier|reported|existing|conventional)|"
     r"opposite\s+(?:direction|effect|trend|association)|"
-    r"worse\s+(?:outcomes?|performance|survival)|adverse\s+(?:events?|effects?|outcomes?)|"
+    r"worse\s+(?:outcomes?|performance|stability|survival)|adverse\s+(?:events?|effects?|outcomes?)|"
     r"ineffective\s+(?:in|for|at)|no\s+evidence\s+of\s+(?:benefit|effect|efficacy|association)|"
-    r"conflicting\s+(?:results?|findings?|evidence)\s+(?:were|have\s+been)\s+(?:observed|reported))\b|"
-    r"无显著差异|未见显著|未能复现|无统计学差异|与既往结论相反|未观察到显著改善|无效|不良事件",
+    r"conflicting\s+(?:results?|findings?|evidence|reports?|conclusions?)|"
+    r"remains?\s+(?:controversial|debated|disputed)|"
+    r"(?:activity[- ]stability|accuracy[- ]latency|efficacy[- ]toxicity|performance[- ]stability|cost[- ]performance|fundamental|inherent|intrinsic|severe)\s+trade[- ]?off|"
+    r"trade[- ]?off\s+between\b|"
+    r"poor\s+(?:stability|durability|reproducibility|selectivity|generalization|long-term\s+stability)|"
+    r"rapid(?:ly)?\s+(?:decay(?:s|ed|ing)?|declin(?:es?|ed|ing)|degrad(?:es?|ed|ing)|deteriorat(?:es?|ed|ing))|"
+    r"suffer(?:s|ed|ing)?\s+from\s+(?:severe|rapid|poor|high|low|instability|toxicity|overfitting|bias|degradation|dissolution|leaching|decay|loss)|"
+    r"inferior\s+(?:to|performance|stability|efficacy|accuracy)|underperform(?:s|ed|ing)?|"
+    r"severe\s+(?:instability|leaching|degradation|decay|loss|bias|toxicity)|"
+    r"at\s+the\s+expense\s+of|compromis(?:es?|ed|ing)\s+(?:stability|durability|specificity|safety|generalization|accuracy))\b|"
+    r"无显著差异|未见显著|未能复现|无统计学差异|与既往结论相反|未观察到显著改善|无效|不良事件|存在争议|权衡矛盾|稳定性差|快速衰减",
     re.I,
 )
-# Domain-general genuine limitation cues (no overpotential/dissolution overfitting!)
+HARD_REFUTE_RE = re.compile(
+    r"\b(?:no\s+(?:statistically\s+)?significant|did\s+not\s+(?:significantly\s+)?|fail(?:ed|s)?\s+to|"
+    r"contradict|inconsistent\s+with|opposite\s+(?:direction|effect|trend)|worse\s+|adverse\s+|"
+    r"ineffective|conflicting\s+|controversial|debated|disputed|inferior\s+|underperform)\b",
+    re.I,
+)
+POSITIVE_MITIGATION_GUARD_RE = re.compile(
+    r"\b(?:negligible|minimal|no|without|zero|suppress(?:es|ed|ing)?|prevent(?:s|ed|ing)?|avoid(?:s|ed|ing)?|"
+    r"mitigat(?:es|ed|ing)?|overcom(?:es?|ing)|eliminat(?:es?|ed|ing)|circumvent(?:s|ed|ing)?|break(?:s|ing)?\s+the)\s+"
+    r"(?:\w+\s+){0,3}(?:degradation|decay|dissolution|leaching|instability|loss|toxicity|trade[- ]?off)\b",
+    re.I,
+)
+# Explicit negation-scope guard for safety/adverse-event absence (must NOT become opposing_or_null!)
+NO_ADVERSE_SAFETY_RE = re.compile(
+    r"\b(?:no|zero|without|absence\s+of|free\s+of|neither)\s+"
+    r"(?:statistically\s+significant\s+|significant\s+|serious\s+|severe\s+|major\s+|treatment[- ]related\s+|observable\s+|detectable\s+){0,2}"
+    r"(?:adverse\s+(?:events?|effects?|reactions?|outcomes?)|side\s+effects?|toxicity|toxicities|safety\s+(?:signals?|concerns?|issues?)|"
+    r"complications?|harmful\s+effects?|mortality|deaths?|degradation|dissolution|leaching)\b|"
+    r"(?:未观察到|未见|无)(?:明显|严重|显著)?(?:不良事件|不良反应|副作用|毒性|并发症|溶出|衰减)",
+    re.I,
+)
+# Adverse / undesirable endpoints whose significant INCREASE is opposing/harmful (NOT supportive!)
+ADVERSE_ENDPOINT_RE = re.compile(
+    r"\b(?:mortality|all[- ]cause\s+mortality|death\s+rate|fatality|toxicity|hepatotoxicity|nephrotoxicity|neurotoxicity|"
+    r"adverse\s+(?:events?|effects?|outcomes?)|serious\s+adverse|error\s+rate|false[- ]positive\s+rate|failure\s+rate|"
+    r"relapse\s+rate|hospitali[sz]ation|complications?|bleeding|infection\s+rate|"
+    r"overpotential|dissolution\s+rate|corrosion\s+rate|degradation\s+rate|leaching\s+rate|capacity\s+fading|"
+    r"hallucination\s+rate|latency|loss\s+rate)\b|"
+    r"死亡率|病死率|毒性|不良事件|错误率|失败率|复发率|过电位|溶出速率|腐蚀速率|衰减率",
+    re.I,
+)
+INCREASE_DIRECTION_RE = re.compile(
+    r"\b(?:significant(?:ly)?\s+(?:increas(?:ed?|es|ing)|elevat(?:ed?|es|ing)|ris(?:es?|ing)|rose|higher|worsen(?:ed|s|ing)?|accelerat(?:ed?|es|ing)|exacerbat(?:ed?|es|ing))|"
+    r"(?:increas(?:ed?|es|ing)|elevat(?:ed?|es|ing)|higher|worsen(?:ed|s|ing)?|accelerat(?:ed?|es|ing))\s+(?:the\s+|in\s+)?(?:\w+\s+){0,3}(?:mortality|toxicity|adverse|error\s+rate|dissolution|degradation|overpotential|corrosion|leaching|failure|relapse|complications?)|"
+    r"(?:mortality|toxicity|adverse\s+events?|error\s+rate|dissolution|degradation|overpotential|corrosion|leaching|failure\s+rate)\s+(?:was|were|is|are)?\s*(?:significant(?:ly)?\s+)?(?:increas(?:ed?|es)|elevated|higher|rose|worsened|accelerated))\b|"
+    r"(?:显著|明显)(?:升高|上升|增加|恶化|加剧)",
+    re.I,
+)
+DECREASE_DIRECTION_RE = re.compile(
+    r"\b(?:significant(?:ly)?\s+(?:reduc(?:ed?|es|ing)|decreas(?:ed?|es|ing)|lower(?:ed?|s|ing)|suppress(?:ed?|es|ing)|inhibit(?:ed?|s|ing)|prevent(?:ed?|s|ing)|mitigat(?:ed?|es|ing)|attenuat(?:ed?|es|ing))|"
+    r"lower(?:ed|s)?\s+(?:the\s+)?(?:\w+\s+){0,2}(?:mortality|toxicity|overpotential|error\s+rate|dissolution|degradation|leaching|relapse|adverse))\b|"
+    r"(?:显著|明显)(?:降低|减少|下降|抑制|缓解)",
+    re.I,
+)
+# Prior/background attribution guard: quotes reporting earlier null/negative work in Introduction are NOT primary findings
+ATTRIBUTED_BACKGROUND_RE = re.compile(
+    r"\b(?:(?:previous|prior|earlier|historical|past|initial)\s+(?:studies|work|reports?|trials?|investigations?|analyses)\s+"
+    r"(?:reported|found|showed|observed|suggested|failed|indicated|demonstrated)\s+(?:that\s+)?(?:no\s+|little\s+|limited\s+|conflicting|inconsistent|null|negative|failed)|"
+    r"previously\s+(?:thought|believed|reported|assumed)\s+to\s+(?:have\s+no|be\s+ineffective|fail)|"
+    r"in\s+contrast\s+to\s+(?:earlier|previous|prior)\s+(?:reports?|studies)\s+(?:that|which)\s+(?:found|reported|failed)|"
+    r"historically,?\s+(?:studies|trials|work)\s+(?:failed|found\s+no))\b|"
+    r"(?:既往|早期|先前|此前)(?:研究|报道|试验)(?:曾)?(?:未见|未能|认为无|报告无)",
+    re.I,
+)
+# Domain-general genuine limitation & bottleneck cues (no single-domain overfitting!)
 LIMITATION_CUE_RE = re.compile(
     r"\b(?:main\s+limitation|key\s+limitation|limitations?\s+of\s+(?:this|our|current|existing)\s+(?:study|work|analysis|approach)|"
-    r"unresolved\s+(?:question|mechanism|challenge|issue)|remains?\s+(?:unclear|elusive|unresolved|poorly\s+understood)|"
+    r"unresolved\s+(?:question|mechanism|challenge|issue)|remains?\s+(?:unclear|elusive|unresolved|poorly\s+understood|a\s+(?:major\s+)?(?:challenge|bottleneck|obstacle|barrier))|"
+    r"major\s+bottleneck|hinder(?:s|ed|ing)\s+(?:practical|clinical|large-scale|real-world|widespread)|"
     r"small\s+sample\s+size|limited\s+sample\s+size|lack\s+of\s+(?:external\s+validation|longitudinal|randomized|control|standardized|reproducibility)|"
     r"confounding\s+(?:bias|factors?)|selection\s+bias|publication\s+bias|high\s+heterogeneity|"
     r"poor\s+generaliz(?:ability|ation)|further\s+(?:validation|studies|trials)\s+(?:is|are)\s+(?:needed|required))\b|"
-    r"主要局限|样本量较小|缺乏外部验证|混杂偏倚|异质性高|泛化能力不足|尚不清楚",
+    r"主要局限|样本量较小|缺乏外部验证|混杂偏倚|异质性高|泛化能力不足|尚不清楚|主要瓶颈",
     re.I,
 )
 INTRO_PITCH_RE = re.compile(
@@ -304,109 +370,405 @@ def split_sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if len(p.strip()) >= 25]
 
 
+def _extract_sentence_entity_endpoint(sent: str) -> tuple[str, str]:
+    """Extract lightweight normalized (entity, endpoint) pair for same-entity/same-endpoint conflict gating."""
+    low = (sent or "").lower()
+    obj_m = GENERAL_OBJECT_RE.search(low)
+    met_m = GENERAL_METRIC_RE.search(low)
+    adv_m = ADVERSE_ENDPOINT_RE.search(low)
+    entity = _canon_phrase(obj_m.group(0)) if obj_m else ""
+    endpoint = _canon_phrase(adv_m.group(0)) if adv_m else (_canon_phrase(met_m.group(0)) if met_m else "")
+    return entity, endpoint
+
+
+def _clip_full_sentence(sent: str, max_chars: int = 650) -> str:
+    """Keep full sentence without blind 280-char truncation; only bound extreme run-on blocks at word boundary."""
+    s = " ".join((sent or "").split()).strip()
+    if len(s) <= max_chars:
+        return s
+    cut = s[:max_chars].rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;:") + "..."
+
+
+def _classify_passage_polarity(sent: str) -> tuple[str, dict[str, Any]]:
+    """Classify sentence polarity with explicit negation scope, adverse-outcome inversion, and background guard."""
+    meta: dict[str, Any] = {
+        "negation_scope_resolved": False,
+        "adverse_outcome_inverted": False,
+        "background_attribution": False,
+        "is_limitation": False,
+        "is_prospective": False,
+    }
+    has_prosp = bool(PROSPECTIVE_CUE_RE.search(sent))
+    has_lim = bool(LIMITATION_CUE_RE.search(sent)) and not bool(INTRO_PITCH_RE.search(sent))
+    meta["is_prospective"] = has_prosp
+    meta["is_limitation"] = has_lim
+
+    # 1. Background / Introduction attributed prior null claims -> NEVER tag as primary study opposing finding!
+    if ATTRIBUTED_BACKGROUND_RE.search(sent):
+        meta["background_attribution"] = True
+        return "UNKNOWN", meta
+
+    # 2. Explicit safety / absence-of-adverse-events negation scope (e.g., "No adverse events were observed")
+    has_no_adverse = bool(NO_ADVERSE_SAFETY_RE.search(sent))
+    if has_no_adverse:
+        meta["negation_scope_resolved"] = True
+
+    # 3. Adverse endpoint polarity check (e.g., "mortality significantly increased" -> opposing_or_null, NOT supportive!)
+    has_adverse_ep = bool(ADVERSE_ENDPOINT_RE.search(sent))
+    adverse_increased = has_adverse_ep and bool(INCREASE_DIRECTION_RE.search(sent)) and not has_no_adverse
+    adverse_decreased = has_adverse_ep and bool(DECREASE_DIRECTION_RE.search(sent))
+
+    has_pos = bool(POS_SIGNAL_RE.search(sent))
+    has_neg = bool(NEG_SIGNAL_RE.search(sent)) and not bool(INTRO_PITCH_RE.search(sent))
+
+    if has_no_adverse:
+        # Remove false opposing match triggered by "adverse events" inside "No adverse events..."
+        stripped = NO_ADVERSE_SAFETY_RE.sub(" ", sent)
+        has_neg = bool(NEG_SIGNAL_RE.search(stripped)) and not bool(INTRO_PITCH_RE.search(stripped))
+        if not has_neg and not has_pos:
+            # Absence of adverse events is a favorable safety finding, NOT opposing_or_null
+            return "supportive", meta
+
+    if adverse_increased and not adverse_decreased:
+        meta["adverse_outcome_inverted"] = True
+        has_neg = True
+        # Only retain has_pos if a separate non-adverse improvement clause co-exists
+        non_adv = ADVERSE_ENDPOINT_RE.sub(" ", sent)
+        has_pos = bool(re.search(r"\b(?:improv(?:ed?|es)|enhanc(?:ed?|es)|outperform|superior|protective|beneficial)\b", non_adv, re.I))
+    elif adverse_decreased and not adverse_increased:
+        has_pos = True
+        if not HARD_REFUTE_RE.search(sent):
+            has_neg = False
+
+    if has_neg and POSITIVE_MITIGATION_GUARD_RE.search(sent) and not HARD_REFUTE_RE.search(sent) and not adverse_increased:
+        has_neg = False
+
+    if not (has_pos or has_neg or has_lim or has_prosp):
+        return "", meta
+    if has_prosp and not (has_pos or has_neg):
+        return "prospective", meta
+    if has_pos and has_neg:
+        return "mixed", meta
+    if has_neg:
+        return "opposing_or_null", meta
+    if has_pos:
+        return "supportive", meta
+    return "limitation", meta
+
+
 def extract_directional_passages(
     record: dict[str, Any],
     *,
-    max_per_record: int = 3,
+    max_per_record: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract verbatim body/abstract sentences with locators and empirical polarity, excluding PDF header noise."""
+    """Extract full verbatim body/abstract sentences with real page/section/paragraph locators and balanced polarity."""
     access = str(record.get("material_access") or "unknown")
     if is_non_evidence_access(access):
         return []
 
+    src_key = str(record.get("source_file") or record.get("record_id") or "record")
     passages = record.get("passages") or []
     candidates: list[tuple[str, str]] = []
     if passages:
-        for p in passages:
-            loc = str(p.get("locator") or "body")
+        for p_idx, p in enumerate(passages, start=1):
+            raw_loc = str(p.get("locator") or "").strip()
+            if not raw_loc or raw_loc.endswith("#body") or raw_loc == "body":
+                sec = str(p.get("section") or f"paragraph={p_idx}")
+                raw_loc = f"{src_key}#{sec}"
             txt = str(p.get("text") or "")
-            # Skip title/author block on page 1 if Abstract marker exists later on page 1
-            if loc.endswith("#page=1"):
+            if raw_loc.endswith("#page=1"):
                 am = re.search(r"\babstract\b[:.\s]*", txt, re.I)
                 if am and am.start() < 2500:
                     txt = txt[am.end():]
-            for sent in split_sentences(txt)[:45]:
+            for s_idx, sent in enumerate(split_sentences(txt)[:60], start=1):
                 if not is_header_or_affiliation_noise(sent):
-                    candidates.append((loc, sent))
+                    candidates.append((f"{raw_loc}:S{s_idx}", sent))
     else:
         if record.get("text"):
-            for sent in split_sentences(str(record["text"]))[:60]:
-                if not is_header_or_affiliation_noise(sent):
-                    candidates.append((f"{record.get('source_file') or record.get('record_id')}#body", sent))
+            paras = [pp.strip() for pp in re.split(r"\n\s*\n+", str(record["text"])) if pp.strip()]
+            if not paras:
+                paras = [str(record["text"])]
+            for p_idx, para in enumerate(paras[:40], start=1):
+                for s_idx, sent in enumerate(split_sentences(para)[:15], start=1):
+                    if not is_header_or_affiliation_noise(sent):
+                        candidates.append((f"{src_key}#para={p_idx}:S{s_idx}", sent))
         elif record.get("abstract"):
-            for sent in split_sentences(str(record["abstract"]))[:25]:
+            for s_idx, sent in enumerate(split_sentences(str(record["abstract"]))[:30], start=1):
                 if not is_header_or_affiliation_noise(sent):
-                    candidates.append((f"{record.get('source_file') or record.get('record_id')}#abstract", sent))
+                    candidates.append((f"{src_key}#abstract:S{s_idx}", sent))
 
+    # Balanced per-polarity quotas prevent sequential truncation from dropping later opposing/limitation findings!
+    polarity_caps = {
+        "supportive": 4,
+        "opposing_or_null": 4,
+        "mixed": 3,
+        "limitation": 3,
+        "prospective": 2,
+        "UNKNOWN": 2,
+    }
+    polarity_counts: Counter[str] = Counter()
     picked: list[dict[str, Any]] = []
     seen_quotes: set[str] = set()
+    hard_cap = max_per_record if (isinstance(max_per_record, int) and max_per_record > 0) else 14
+
     for loc, sent in candidates:
-        has_pos = bool(POS_SIGNAL_RE.search(sent))
-        has_neg = bool(NEG_SIGNAL_RE.search(sent))
-        has_lim = bool(LIMITATION_CUE_RE.search(sent)) and not bool(INTRO_PITCH_RE.search(sent))
-        has_prosp = bool(PROSPECTIVE_CUE_RE.search(sent))
-        if not (has_pos or has_neg or has_lim or has_prosp):
+        direction, pmeta = _classify_passage_polarity(sent)
+        if not direction:
             continue
-        norm_q = sent[:120].lower()
+        if polarity_counts[direction] >= polarity_caps.get(direction, 2):
+            continue
+        norm_q = sent[:140].lower()
         if norm_q in seen_quotes:
             continue
         seen_quotes.add(norm_q)
-        if has_prosp and not (has_pos or has_neg):
-            direction = "prospective"
-        elif has_pos and has_neg:
-            direction = "mixed"
-        elif has_neg:
-            direction = "opposing_or_null"
-        elif has_pos:
-            direction = "supportive"
-        else:
-            direction = "limitation"
+        entity, endpoint = _extract_sentence_entity_endpoint(sent)
+        polarity_counts[direction] += 1
         picked.append({
             "record_id": record.get("record_id"),
             "locator": loc,
             "material_access": access,
             "direction": direction,
-            "is_limitation": has_lim,
-            "is_prospective": has_prosp,
-            "quote": sent[:280],
+            "entity": entity or "unspecified_entity",
+            "endpoint": endpoint or "unspecified_endpoint",
+            "comparability_status": "comparable_entity_endpoint" if (entity and endpoint) else "unaligned_endpoint_or_ambiguous",
+            "negation_scope_resolved": pmeta["negation_scope_resolved"],
+            "adverse_outcome_inverted": pmeta["adverse_outcome_inverted"],
+            "background_attribution": pmeta["background_attribution"],
+            "is_limitation": pmeta["is_limitation"],
+            "is_prospective": pmeta["is_prospective"],
+            "quote": _clip_full_sentence(sent, max_chars=650),
         })
-        if len(picked) >= max_per_record:
+        if len(picked) >= hard_cap:
             break
 
     if not picked and candidates:
         loc, sent = candidates[0]
+        entity, endpoint = _extract_sentence_entity_endpoint(sent)
         picked.append({
             "record_id": record.get("record_id"),
             "locator": loc,
             "material_access": access,
             "direction": "descriptive",
+            "entity": entity or "unspecified_entity",
+            "endpoint": endpoint or "unspecified_endpoint",
+            "comparability_status": "descriptive_only",
+            "negation_scope_resolved": False,
+            "adverse_outcome_inverted": False,
+            "background_attribution": False,
             "is_limitation": False,
             "is_prospective": bool(PROSPECTIVE_CUE_RE.search(sent)),
-            "quote": sent[:280],
+            "quote": _clip_full_sentence(sent, max_chars=650),
         })
     return picked
 
 
+def build_comparable_conflict_edges(passages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build conflict edges ONLY between opposing passages sharing compatible entity and endpoint; else mark UNKNOWN."""
+    pos_list = [p for p in passages if p.get("direction") == "supportive"]
+    neg_list = [p for p in passages if p.get("direction") == "opposing_or_null"]
+    edges: list[dict[str, Any]] = []
+    unaligned_pairs: list[dict[str, Any]] = []
+    for pos in pos_list:
+        for neg in neg_list:
+            if pos.get("record_id") == neg.get("record_id"):
+                continue
+            pe, pep = str(pos.get("entity") or ""), str(pos.get("endpoint") or "")
+            ne, nep = str(neg.get("entity") or ""), str(neg.get("endpoint") or "")
+            same_endpoint = bool(pep and nep and pep != "unspecified_endpoint" and pep == nep)
+            same_entity = bool(pe and ne and pe != "unspecified_entity" and pe == ne)
+            if same_endpoint and (same_entity or pe == "unspecified_entity" or ne == "unspecified_entity"):
+                edges.append({
+                    "status": "COMPARABLE_CONFLICT",
+                    "entity": pe if pe != "unspecified_entity" else ne,
+                    "endpoint": pep,
+                    "supportive_record_id": pos.get("record_id"),
+                    "supportive_locator": pos.get("locator"),
+                    "opposing_record_id": neg.get("record_id"),
+                    "opposing_locator": neg.get("locator"),
+                })
+            else:
+                unaligned_pairs.append({
+                    "status": "UNKNOWN_CROSS_ENDPOINT_NONCOMPARABLE",
+                    "supportive_entity_endpoint": f"{pe}/{pep}",
+                    "opposing_entity_endpoint": f"{ne}/{nep}",
+                    "supportive_record_id": pos.get("record_id"),
+                    "opposing_record_id": neg.get("record_id"),
+                })
+    return {"comparable_conflict_edges": edges[:20], "noncomparable_unknown_pairs": unaligned_pairs[:20]}
+
+
+# Longest-phrase canonical scientific concept dictionary (abbreviation / plural / multi-word unification)
+CANONICAL_CONCEPT_PHRASES: list[tuple[str, str]] = sorted(
+    [
+        ("oxygen evolution reaction", "oxygen_evolution_reaction"),
+        ("oxygen evolution electrocatalysis", "oxygen_evolution_reaction"),
+        ("oxygen evolution", "oxygen_evolution_reaction"),
+        ("hydrogen evolution reaction", "hydrogen_evolution_reaction"),
+        ("proton exchange membrane water electrolysis", "pem_water_electrolysis"),
+        ("proton exchange membrane", "proton_exchange_membrane"),
+        ("anion exchange membrane", "anion_exchange_membrane"),
+        ("short-chain fatty acids", "short_chain_fatty_acid"),
+        ("short-chain fatty acid", "short_chain_fatty_acid"),
+        ("short chain fatty acids", "short_chain_fatty_acid"),
+        ("short chain fatty acid", "short_chain_fatty_acid"),
+        ("inflammatory bowel disease", "inflammatory_bowel_disease"),
+        ("ulcerative colitis", "ulcerative_colitis"),
+        ("gut microbiota", "gut_microbiota"),
+        ("intestinal microbiota", "gut_microbiota"),
+        ("high-entropy alloys", "high_entropy_alloy"),
+        ("high-entropy alloy", "high_entropy_alloy"),
+        ("high entropy alloy", "high_entropy_alloy"),
+        ("high-entropy oxides", "high_entropy_oxide"),
+        ("high-entropy oxide", "high_entropy_oxide"),
+        ("density functional theory", "density_functional_theory"),
+        ("single-atom catalysts", "single_atom_catalyst"),
+        ("single-atom catalyst", "single_atom_catalyst"),
+        ("graph neural networks", "graph_neural_network"),
+        ("graph neural network", "graph_neural_network"),
+        ("large language models", "large_language_model"),
+        ("large language model", "large_language_model"),
+        ("randomized controlled trials", "randomized_controlled_trial"),
+        ("randomized controlled trial", "randomized_controlled_trial"),
+        ("machine learning potentials", "machine_learning_potential"),
+        ("machine learning potential", "machine_learning_potential"),
+        ("spin-group symmetry", "spin_group_symmetry"),
+        ("band splitting", "altermagnetic_band_splitting"),
+        ("altermagnetic tunnel junction", "altermagnetic_tunnel_junction"),
+        ("tunnel magnetoresistance", "tunnel_magnetoresistance"),
+        ("water splitting", "water_splitting"),
+        ("noble metal", "noble_metal"),
+        ("transition metal", "transition_metal"),
+        ("iridium oxide", "iridium_oxide"),
+        ("ruthenium oxide", "ruthenium_oxide"),
+    ],
+    key=lambda kv: len(kv[0]),
+    reverse=True,
+)
+DEFAULT_ABBREV_CONCEPT_MAP: dict[str, str] = {
+    "oer": "oxygen_evolution_reaction",
+    "her": "hydrogen_evolution_reaction",
+    "scfa": "short_chain_fatty_acid",
+    "scfas": "short_chain_fatty_acid",
+    "ibd": "inflammatory_bowel_disease",
+    "hea": "high_entropy_alloy",
+    "heas": "high_entropy_alloy",
+    "heo": "high_entropy_oxide",
+    "dft": "density_functional_theory",
+    "sac": "single_atom_catalyst",
+    "sacs": "single_atom_catalyst",
+    "gnn": "graph_neural_network",
+    "gnns": "graph_neural_network",
+    "llm": "large_language_model",
+    "llms": "large_language_model",
+    "rct": "randomized_controlled_trial",
+    "rcts": "randomized_controlled_trial",
+    "pemwe": "pem_water_electrolysis",
+    "aem": "anion_exchange_membrane",
+    "tmr": "tunnel_magnetoresistance",
+}
+# Context-disambiguated homonyms (e.g., PEM = proton exchange membrane in electrochemistry vs post-exertional malaise in medicine)
+HOMONYM_CONTEXT_MAP: dict[str, list[tuple[re.Pattern[str], str]]] = {
+    "pem": [
+        (re.compile(r"\b(?:electrolys|catalyst|membrane|oer|her|iridium|anode|acidic)\b", re.I), "proton_exchange_membrane"),
+        (re.compile(r"\b(?:fatigue|malaise|cfs|patients?|symptom|clinical)\b", re.I), "post_exertional_malaise"),
+    ],
+}
+
+
+def normalize_concept_terms(
+    text: str,
+    *,
+    aliases: dict[str, str] | None = None,
+) -> tuple[str, list[dict[str, str]]]:
+    """Longest-phrase pre-tokenization canonical concept_id mapping with homonym disambiguation log."""
+    low = (text or "").lower()
+    mappings: list[dict[str, str]] = []
+    extra = sorted(
+        [(k.lower(), v.lower().replace(" ", "_")) for k, v in (aliases or {}).items() if " " in k],
+        key=lambda kv: len(kv[0]),
+        reverse=True,
+    )
+    for phrase, cid in extra + CANONICAL_CONCEPT_PHRASES:
+        if phrase in low:
+            pat = re.compile(r"(?<![a-z0-9-])" + re.escape(phrase) + r"(?![a-z0-9-])")
+            if pat.search(low):
+                low = pat.sub(cid, low)
+                mappings.append({"surface": phrase, "concept_id": cid, "rule": "longest_phrase"})
+    for hom, rules in HOMONYM_CONTEXT_MAP.items():
+        if re.search(rf"\b{hom}\b", low):
+            resolved = ""
+            for ctx_re, cid in rules:
+                if ctx_re.search(low):
+                    resolved = cid
+                    break
+            if resolved:
+                low = re.sub(rf"\b{hom}\b", resolved, low)
+                mappings.append({"surface": hom, "concept_id": resolved, "rule": "homonym_context"})
+    return low, mappings
+
+
 def tokenize_terms(text: str, *, include_bigrams: bool = True, aliases: dict[str, str] | None = None) -> list[str]:
-    """Extract normalized domain unigrams and optional bigrams with alias folding."""
-    raw_tokens = re.findall(r"[a-z][a-z0-9-]{2,}|[\u4e00-\u9fff]{2,6}", (text or "").lower())
-    alias_map = {k.lower(): v.lower() for k, v in (aliases or {}).items()}
+    """Extract normalized domain concept_ids, unigrams, and optional bigrams with longest-phrase & plural folding."""
+    folded_text, _ = normalize_concept_terms(text, aliases=aliases)
+    raw_tokens = re.findall(r"[a-z][a-z0-9_-]{2,}|[\u4e00-\u9fff]{2,6}", folded_text)
+    alias_map = dict(DEFAULT_ABBREV_CONCEPT_MAP)
+    for k, v in (aliases or {}).items():
+        alias_map[k.lower()] = v.lower().replace(" ", "_")
     unigrams: list[str] = []
     for tok in raw_tokens:
-        t = tok.strip("-")
+        t = tok.strip("-_")
         if len(t) < 3 or t in STOPWORDS or t.isdigit():
             continue
         t = alias_map.get(t, t)
+        if "_" not in t and len(t) > 4 and t.endswith("s") and not t.endswith(("ss", "us", "is", "ics")):
+            t = t[:-1]
+            t = alias_map.get(t, t)
+        if t in STOPWORDS:
+            continue
         unigrams.append(t)
     if not include_bigrams:
         return unigrams
     bigrams: list[str] = []
     for i in range(len(unigrams) - 1):
+        if "_" in unigrams[i] or "_" in unigrams[i + 1]:
+            continue
         bg = f"{unigrams[i]} {unigrams[i + 1]}"
         bg = alias_map.get(bg, bg)
         if unigrams[i] != unigrams[i + 1]:
             bigrams.append(bg)
     return unigrams + bigrams
+
+
+def run_polarity_regression_suite() -> dict[str, Any]:
+    """Built-in 4-case polarity/negation/comparability + concept-homonym regression verification."""
+    cases = [
+        ("no_adverse_events", "No serious adverse events were observed in patients receiving butyrate.", "supportive"),
+        ("mortality_increased", "All-cause mortality was significantly increased in the high-dose cohort (p=0.004).", "opposing_or_null"),
+        ("intro_prior_null", "Previous studies reported no significant effect of fiber supplementation on remission.", "UNKNOWN"),
+    ]
+    results = []
+    ok = True
+    for name, sent, expected in cases:
+        got, meta = _classify_passage_polarity(sent)
+        passed = got == expected
+        ok = ok and passed
+        results.append({"case": name, "expected": expected, "got": got, "passed": passed, "meta": meta})
+    # Case 4: cross-endpoint pseudo-conflict MUST NOT emit a comparable conflict edge!
+    cross = build_comparable_conflict_edges([
+        {"record_id": "R1", "locator": "r1#p2:S1", "direction": "supportive", "entity": "patient", "endpoint": "survival rate"},
+        {"record_id": "R2", "locator": "r2#p4:S2", "direction": "opposing_or_null", "entity": "patient", "endpoint": "toxicity"},
+    ])
+    case4_ok = len(cross["comparable_conflict_edges"]) == 0 and len(cross["noncomparable_unknown_pairs"]) == 1
+    ok = ok and case4_ok
+    results.append({"case": "cross_endpoint_pseudo_conflict", "expected": "0_edges_1_unknown", "passed": case4_ok})
+    # Case 5: concept_id longest-phrase & homonym disambiguation
+    t_elec = tokenize_terms("OER activity on PEM electrolyzer membrane", include_bigrams=False)
+    t_med = tokenize_terms("Patients with CFS reported PEM fatigue symptoms", include_bigrams=False)
+    case5_ok = ("oxygen_evolution_reaction" in t_elec and "proton_exchange_membrane" in t_elec and "post_exertional_malaise" in t_med)
+    ok = ok and case5_ok
+    results.append({"case": "concept_id_homonym_disambiguation", "passed": case5_ok})
+    return {"ok": ok, "cases": results}
 
 
 def build_tfidf_vectors(docs_tokens: list[list[str]]) -> list[dict[str, float]]:

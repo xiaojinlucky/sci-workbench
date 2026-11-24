@@ -184,18 +184,122 @@ def cluster_empirical_themes(
                 large[best_ci].append(si)
             clusters = large
 
+    # Hierarchical sub-clustering: split any monolithic mega-cluster (>=30% of corpus and >=12 studies)
+    # first by residual TF-IDF excluding >30% DF terms, then by 2D (functional_method x corpus_subtopic) if still >35%
+    refined_clusters: list[list[int]] = []
+    for idxs in clusters:
+        if len(idxs) >= max(12, int(len(unlabeled) * 0.30)):
+            df_in: Counter[str] = Counter()
+            for idx in idxs:
+                for t in set(vecs[idx].keys()):
+                    df_in[t] += 1
+            ubiq_in = {t for t, df in df_in.items() if df / len(idxs) > 0.30}
+            sub_vecs = [{t: w for t, w in vecs[idx].items() if t not in ubiq_in} for idx in idxs]
+            sub_clusters: list[list[int]] = []
+            sub_cents: list[dict[str, float]] = []
+            for local_i, svec in enumerate(sub_vecs):
+                orig_idx = idxs[local_i]
+                best_si, best_s = -1, -1.0
+                for si, scent in enumerate(sub_cents):
+                    sim = cosine_similarity(svec, scent)
+                    if sim > best_s:
+                        best_s, best_si = sim, si
+                if best_si >= 0 and best_s >= 0.14:
+                    sub_clusters[best_si].append(orig_idx)
+                    m_cent: dict[str, float] = defaultdict(float)
+                    for oi in sub_clusters[best_si]:
+                        for k, v in vecs[oi].items():
+                            if k not in ubiq_in:
+                                m_cent[k] += v / len(sub_clusters[best_si])
+                    sub_cents[best_si] = dict(m_cent)
+                elif len(sub_clusters) < 5:
+                    sub_clusters.append([orig_idx])
+                    sub_cents.append(dict(svec))
+                else:
+                    sub_clusters[best_si if best_si >= 0 else 0].append(orig_idx)
+            # Second-pass 2D problem x functional-method split if any single sub-cluster still exceeds 35% of corpus!
+            final_subs: list[list[int]] = []
+            for sc in sub_clusters:
+                if len(sc) >= max(14, int(len(unlabeled) * 0.35)):
+                    by_meth: dict[str, list[int]] = defaultdict(list)
+                    for oi in sc:
+                        r = unlabeled[oi]
+                        m_info = extract_general_methods_and_objects(f"{r.get('title', '')} {r.get('abstract', '')}")
+                        m_key = (m_info["methods"][0] if m_info["methods"] else (m_info["metrics"][0] if m_info["metrics"] else "mechanism_and_screening"))
+                        by_meth[m_key].append(oi)
+                    # Fold tiny method buckets into top 3 method strata
+                    sorted_m = sorted(by_meth.items(), key=lambda kv: -len(kv[1]))
+                    kept_m = [list(v) for _, v in sorted_m[:3]]
+                    for _, extra_v in sorted_m[3:]:
+                        kept_m[-1].extend(extra_v)
+                    if len([km for km in kept_m if len(km) >= 3]) >= 2:
+                        final_subs.extend(kept_m)
+                    else:
+                        final_subs.append(sc)
+                else:
+                    final_subs.append(sc)
+            non_tiny = [sc for sc in final_subs if len(sc) >= 2]
+            if len(non_tiny) >= 2:
+                refined_clusters.extend(final_subs)
+            else:
+                refined_clusters.append(idxs)
+        else:
+            refined_clusters.append(idxs)
+    clusters = refined_clusters
+
+    # Corpus-wide ubiquitous terms (>35% DF) deprioritized when naming sub-themes
+    corpus_df: Counter[str] = Counter()
+    for v in vecs:
+        for t in v:
+            corpus_df[t] += 1
+    corpus_ubiq = {t for t, df in corpus_df.items() if len(vecs) >= 10 and df / len(vecs) > 0.35}
+
     buckets: dict[str, list[dict[str, Any]]] = dict(explicit_buckets)
     used_names: set[str] = set(buckets.keys())
+    noisy_label_words = {
+        "processes", "process", "study", "studies", "method", "methods", "results",
+        "system", "systems", "analysis", "approach", "based", "using", "high", "low",
+        "lig", "precision", "correctness", "precision correctness", "evaluation",
+        "performance", "strategy", "strategies", "design", "mechanism", "mechanisms",
+        "application", "applications", "efficiency", "development", "advances", "progress",
+        "review", "overview", "novel", "proposed", "framework", "structure", "structures",
+        "property", "properties", "electrocatalytic", "catalytic", "material", "materials",
+        "catalyst", "catalysts", "reaction", "activity", "stability", "feature", "features",
+        "challenge", "challenges", "potential", "effect", "effects", "behavior", "surface",
+    }
     for ci, idxs in enumerate(clusters, 1):
         term_scores: Counter[str] = Counter()
         for idx in idxs:
             for term, weight in vecs[idx].items():
-                bonus = 1.35 if " " in term else 1.0
+                words = term.replace("_", " ").split()
+                if len(term) <= 3 or term in noisy_label_words or all(w in noisy_label_words for w in words):
+                    continue
+                if any(w in {"correctness", "lig", "precision"} for w in words):
+                    continue
+                bonus = 1.65 if (" " in term or "_" in term) else 1.0
+                if term in corpus_ubiq:
+                    bonus *= 0.25
                 term_scores[term] += weight * bonus
-        ranked_terms = [t for t, _ in term_scores.most_common(12)]
+        ranked_terms = [t for t, _ in term_scores.most_common(16)]
         picked_terms: list[str] = []
         for t in ranked_terms:
             if any(t in prev or prev in t for prev in picked_terms):
+                continue
+            # Merge overlapping adjacent bigrams like "oxygen evolution" + "evolution reaction" -> "oxygen evolution reaction"
+            merged_into_prev = False
+            t_words = t.split()
+            for pi, prev in enumerate(picked_terms):
+                p_words = prev.split()
+                if len(p_words) >= 2 and len(t_words) >= 2:
+                    if p_words[-1] == t_words[0]:
+                        picked_terms[pi] = " ".join(p_words + t_words[1:])
+                        merged_into_prev = True
+                        break
+                    if t_words[-1] == p_words[0]:
+                        picked_terms[pi] = " ".join(t_words + p_words[1:])
+                        merged_into_prev = True
+                        break
+            if merged_into_prev:
                 continue
             picked_terms.append(t)
             if len(picked_terms) >= 2:
@@ -238,12 +342,22 @@ def build_horizontal_method_matrix(included: list[dict[str, Any]]) -> list[dict[
             if (methods and is_fulltext_access(access))
             else ("abstract_only_unverified_methods" if methods else "methods_not_reported_in_available_text")
         )
+        passages_rec = extract_directional_passages(rec, max_per_record=6)
+        primary_dir = passages_rec[0]["direction"] if passages_rec else "UNKNOWN"
+        cond_m = re.search(r"\b(?:acidic|alkaline|neutral|ph\s*[=<>]?\s*\d+(?:\.\d+)?|\d+\s*m\s*(?:koh|h2so4|hclo4)|in\s+vivo|in\s+vitro|randomized|placebo[- ]controlled|double[- ]blind)\b", blob, re.I)
+        comp_m = re.search(r"\b(?:versus|vs\.?|compared\s+(?:with|to)|benchmark(?:ed)?\s+against|relative\s+to)\s+([a-z0-9\-/\s]{3,40})", blob, re.I)
         rows.append({
             "record_id": rec["record_id"],
             "title": rec.get("title") or rec["record_id"],
             "year": rec.get("year"),
             "date_basis": rec.get("date_basis", "unknown"),
             "material_access": access,
+            "entity": objects[0] if objects else "unspecified_entity",
+            "intervention": methods[0] if methods else "not_explicitly_extracted",
+            "comparator": comp_m.group(1).strip(" .,;:") if comp_m else "not_explicitly_reported",
+            "endpoint": metrics[0] if metrics else "not_explicitly_extracted",
+            "condition": cond_m.group(0).strip() if cond_m else "condition_not_specified",
+            "direction": primary_dir if is_fulltext_access(access) else (f"{primary_dir}_abstract_only" if primary_dir not in {"UNKNOWN", "descriptive"} else "UNKNOWN"),
             "study_objects": objects or ["not_explicitly_extracted"],
             "functional_methods_detected": methods or ["not_explicitly_extracted"],
             "evaluation_metrics_detected": metrics or ["not_explicitly_extracted"],
@@ -533,11 +647,20 @@ def verify_review_draft(draft_path: Path, included: list[dict[str, Any]], exclud
     ungrounded: list[str] = []
     non_ev_cited: list[str] = []
     hedging_violations: list[str] = []
+    citation_content_mismatches: list[str] = []
+    # Precompute source term sets for sentence-level claim->source content grounding check
+    rec_content_terms: dict[str, set[str]] = {}
+    for r in included:
+        src_blob = f"{r.get('title', '')} {r.get('abstract', '')} {str(r.get('text') or '')[:12000]}"
+        rec_content_terms[str(r["record_id"]).lower()] = set(tokenize_terms(src_blob, include_bigrams=False))
+
     for line in txt.splitlines():
         low_line = line.lower()
         is_exclusion_note = any(k in low_line for k in ("excluded", "discovery_only", "blocked_or_unavailable", "not cited"))
+        is_table_or_legend = line.lstrip().startswith("|") or "citation legend" in low_line
         strong = bool(STRONG_HEDGING_RE.search(line))
         line_had_cite = False
+        line_terms = set(tokenize_terms(line, include_bigrams=False))
         for m in CITE_RE.finditer(line):
             raw = (m.group(1) or m.group(2) or "").strip()
             tok = raw.lower()
@@ -554,6 +677,13 @@ def verify_review_draft(draft_path: Path, included: list[dict[str, Any]], exclud
                 rec = inc_by_tok[tok]
                 if strong and not is_fulltext_access(str(rec.get("material_access") or "")):
                     hedging_violations.append(f"{raw}: strong fulltext wording used on {rec.get('material_access')} record")
+                # Sentence-level claim -> source excerpt/content check (catch valid-ID misattribution!)
+                if not is_exclusion_note and not is_table_or_legend and len(line_terms) >= 5:
+                    src_terms = rec_content_terms.get(str(rec["record_id"]).lower(), set())
+                    if src_terms and len(line_terms & src_terms) == 0:
+                        citation_content_mismatches.append(
+                            f"{raw}: zero lexical overlap between cited sentence and source text ({line.strip()[:100]})"
+                        )
             else:
                 # Reject ANY unknown bracketed citation ID (e.g., [FAKE-999], [W999999], [Smith2025], [PMC999999]) or DOI!
                 ungrounded.append(raw)
@@ -569,14 +699,59 @@ def verify_review_draft(draft_path: Path, included: list[dict[str, Any]], exclud
         errors.append(f"Ungrounded citation identifier(s) in draft: {sorted(set(ungrounded))}")
     if hedging_violations:
         errors.append(f"Hedging/certainty violation(s): {hedging_violations}")
+    if citation_content_mismatches:
+        errors.append(f"Citation-to-source content mismatch(es): {citation_content_mismatches[:5]}")
+    stripped_tail = txt.rstrip()
+    if stripped_tail.endswith(("(", "（", "[", ":", "：", "—", "-")) and not stripped_tail.endswith("---"):
+        errors.append("Draft appears structurally truncated mid-sentence or with an unclosed delimiter.")
     return {
         "passed": len(errors) == 0,
         "overclaims": overclaims,
         "non_evidence_cited": sorted(set(non_ev_cited)),
         "ungrounded_citations": sorted(set(ungrounded)),
         "hedging_violations": hedging_violations,
+        "citation_content_mismatches": citation_content_mismatches,
         "errors": errors,
     }
+
+
+def _extract_rq_facets(research_question: str, included: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract key sub-question facets from research_question and map coverage or explicit gaps."""
+    rq = (research_question or "").strip()
+    if not rq:
+        return []
+    raw_chunks = re.split(r"[,;、]|(?:\band\b|\bvs\.?\b|\bversus\b|\bor\b)", rq, flags=re.I)
+    facets: list[str] = []
+    seen_f: set[str] = set()
+    for ch in raw_chunks:
+        cleaned = re.sub(r"^(?:how|what|why|where|do|does|did|are|is|in|on|for|the|a|an)\s+", "", ch.strip(" ?."), flags=re.I).strip()
+        toks = [w for w in re.findall(r"[A-Za-z0-9/-]{3,}", cleaned) if w.lower() not in {"how", "what", "where", "balance", "compare", "across", "studies", "mechanisms", "diverge", "the", "and", "with", "from"}]
+        if not toks:
+            continue
+        label = " ".join(toks[:4])
+        key = label.lower()
+        if key not in seen_f:
+            seen_f.add(key)
+            facets.append(label)
+    rows: list[dict[str, Any]] = []
+    for fac in facets[:6]:
+        fac_toks = [t.lower() for t in re.findall(r"[A-Za-z0-9]{2,}", fac) if len(t) >= 2]
+        matched: list[str] = []
+        ft_matched = 0
+        for rec in included:
+            hay = f"{rec.get('title', '')} {rec.get('abstract', '')} {str(rec.get('text') or '')[:3000]}".lower()
+            if fac_toks and any(re.search(rf"\b{re.escape(t)}\b", hay) for t in fac_toks):
+                matched.append(str(rec["record_id"]))
+                if is_fulltext_access(str(rec.get("material_access") or "")):
+                    ft_matched += 1
+        rows.append({
+            "facet": fac,
+            "matched_count": len(matched),
+            "fulltext_matched_count": ft_matched,
+            "status": "COVERED_WITH_FULLTEXT" if ft_matched > 0 else ("ABSTRACT_ONLY_COVERAGE" if matched else "FACET_COVERAGE_GAP"),
+            "sample_record_ids": matched[:5],
+        })
+    return rows
 
 
 def render_review_markdown(
@@ -589,6 +764,7 @@ def render_review_markdown(
     prospective_items: list[dict[str, Any]],
     method_matrix: list[dict[str, Any]],
     evidence_gaps: list[dict[str, Any]],
+    facet_coverage: list[dict[str, Any]] | None = None,
 ) -> str:
     lines = [
         f"# Grounded Literature Review Synthesis ({case_id})",
@@ -596,16 +772,27 @@ def render_review_markdown(
         f"**Research Question**: {research_question}",
         f"**Pre-Writing Screening & Scope Boundary**: Identified {prisma['n_identified']} raw records -> {prisma['n_dedup']} duplicates merged -> {prisma['n_screened']} screened -> {prisma['n_included']} included for synthesis ({prisma['n_screen_excl']} excluded prior to writing). Global completeness/novelty is NOT claimed; `abstract_only` findings are hedged as suggestive (`PARTIAL`), and prospective protocols are separated from completed experiments.",
         "",
-        "## 1. Citation Legend (Verifiable Source Mapping)",
+        "## 1. Citation Legend (Verifiable Source Mapping — 1 Row per Record)",
         "| Record ID | Year (Basis) | Material Access | Source File | Title |",
         "|---|---|---|---|---|",
         *[
-            f"| `{m['record_id']}` | {m['year'] or 'NA'} ({m['date_basis']}) | `{m['material_access']}` | `{m['source_file']}` | {str(m['title'])[:95]} |"
+            f"| `{m['record_id']}` | {m['year'] or 'NA'} ({m['date_basis']}) | `{m['material_access']}` | `{m['source_file']}` | {str(m['title']).replace('|', '/')[:95]} |"
             for m in method_matrix[:35]
         ],
         "",
-        "## 2. Empirical Theme Synthesis (Data-Driven Clusters)",
     ]
+    if facet_coverage:
+        lines.extend([
+            "## 1.5 Research-Question Facet Coverage Audit",
+            "| Research Question Facet | Matched Studies | Full-Text Studies | Coverage Status | Sample Record IDs |",
+            "|---|---|---|---|---|",
+        ])
+        for fc in facet_coverage:
+            lines.append(
+                f"| {fc['facet']} | {fc['matched_count']} | {fc['fulltext_matched_count']} | `{fc['status']}` | {', '.join(f'`{r}`' for r in fc['sample_record_ids']) or 'none'} |"
+            )
+        lines.append("")
+    lines.append("## 2. Empirical Theme Synthesis (Data-Driven Hierarchical Clusters)")
     for th in themes:
         lines.append(
             f"### Theme: {th['theme']} ({th['study_count']} studies: {th['fulltext_study_count']} fulltext, {th['abstract_only_study_count']} abstract-only; status=`{th['theme_epistemic_status']}`)"
@@ -660,7 +847,7 @@ def render_review_markdown(
 
     lines.extend(["", "## 5. Concrete Evidence-Anchored Research Gaps"])
     for g in evidence_gaps:
-        lines.append(f"- `{g['gap_type']}` ({g['theme']}): {g['detail']}")
+        lines.append(f"- `{g.get('gap_type', 'evidence_gap')}` ({g.get('theme', 'corpus')}): {g.get('detail', '')}")
     return "\n".join(lines) + "\n"
 
 
@@ -703,8 +890,23 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
     method_matrix = build_horizontal_method_matrix(included)
     evidence_gaps = derive_evidence_gaps(themes, conflicts, screening_log)
 
+    facet_coverage = _extract_rq_facets(rq, included)
+    for fc in facet_coverage:
+        if fc["status"] == "FACET_COVERAGE_GAP":
+            evidence_gaps.append({
+                "gap_id": f"GAP-{len(evidence_gaps) + 1:02d}",
+                "gap_type": "research_question_facet_unaddressed",
+                "facet": fc["facet"],
+                "basis": f"Zero included local records matched research-question facet '{fc['facet']}'.",
+                "bounded_scope_note": "Reflects local corpus coverage gap; requires targeted retrieval rather than silent omission.",
+            })
     md_path = output_dir / "review_synthesis_draft.md"
-    md_text = render_review_markdown(case_id, rq, prisma, themes, consensus, conflicts, prospective_items, method_matrix, evidence_gaps)
+    md_text = (
+        render_review_markdown(
+            case_id, rq, prisma, themes, consensus, conflicts, prospective_items, method_matrix, evidence_gaps, facet_coverage=facet_coverage
+        )
+        + "\n---\n*End of Grounded Literature Review Draft (bounded to verified local corpus).*\n"
+    )
     result_guard.atomic_write_text(md_path, md_text)
     draft_check = verify_review_draft(md_path, included, excluded_non_ev)
 
@@ -750,6 +952,9 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
 
     fulltext_n = sum(1 for r in included if is_fulltext_access(str(r.get("material_access") or "")))
     abstract_n = len(included) - fulltext_n
+    all_ev_rows = [e for th in themes for e in th["evidence_records"]]
+    anchored_loc_n = sum(1 for e in all_ev_rows if "#" in str(e.get("locator") or e.get("pdf_locator") or ""))
+    numeric_ev_n = sum(1 for e in all_ev_rows if re.search(r"\b\d+(?:\.\d+)?\s*(?:%|mv|ma|h\b|hr|hours?|ev|p\s*[<=>]|ci\b|nm|um|mg|kg|mol)", str(e.get("quote") or ""), re.I))
     patch = {
         "artifacts": ["result.json", "review_synthesis_draft.md", "review_evidence_matrix.json"],
         "sources": [
@@ -757,6 +962,7 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
             for r in included
         ],
         "prisma_flow": prisma,
+        "facet_coverage": facet_coverage,
         "themes": themes,
         "method_comparison_matrix": method_matrix,
         "consensus_findings": consensus,
@@ -783,6 +989,8 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
             "consensus_theme_count": len(consensus),
             "conflict_count": len(conflicts),
             "prospective_item_count": len(prospective_items),
+            "anchored_locator_count": anchored_loc_n,
+            "numeric_evidence_count": numeric_ev_n,
             "prisma_balanced": 1 if prisma["balanced"] else 0,
         },
         "metric_provenance": {
@@ -795,6 +1003,8 @@ def run_pipeline(input_dir: Path, output_dir: Path, work_dir: Path) -> dict[str,
             "consensus_theme_count": "review_evidence_matrix.json:consensus_findings",
             "conflict_count": "review_evidence_matrix.json:conflicting_evidence",
             "prospective_item_count": "review_evidence_matrix.json:prospective_or_uncompleted",
+            "anchored_locator_count": "review_evidence_matrix.json:themes[].evidence_records[].locator",
+            "numeric_evidence_count": "review_evidence_matrix.json:themes[].evidence_records[].quote",
             "prisma_balanced": "review_evidence_matrix.json:prisma_flow.balanced",
         },
         "findings": [

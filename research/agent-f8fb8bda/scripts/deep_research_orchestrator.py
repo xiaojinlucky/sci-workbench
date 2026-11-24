@@ -206,7 +206,7 @@ def build_evidence_and_conflicts(
         access_note = ACCESS_NOTES.get(access, "Local record read; check exact access tier before generalizing.")
         blob = f"{rec.get('title', '')} {rec.get('abstract', '')} {str(rec.get('text') or '')[:4000]}"
         is_retracted = bool(RETRACTION_CUE_RE.search(blob))
-        passages = extract_directional_passages(rec, max_per_record=3)
+        passages = extract_directional_passages(rec)
 
         dirs = {p["direction"] for p in passages}
         if is_non_evidence_access(access):
@@ -222,8 +222,10 @@ def build_evidence_and_conflicts(
         else:
             polarity = "descriptive_or_neutral"
 
-        # Execute sub-question matching combining retrieval query term hit ratio + TF-IDF cosine
+        # Execute sub-question matching combining retrieval query term hit ratio + TF-IDF cosine with relevance gate!
         matched_sqs: list[str] = []
+        max_relevance = 0.0
+        scope_relevance = "in_scope"
         if not is_non_evidence_access(access) and subqs:
             rec_term_set = set(rec_tokens[idx - 1])
             scores = []
@@ -231,9 +233,17 @@ def build_evidence_and_conflicts(
                 q_terms = set(sq.get("query_terms") or [])
                 q_hit = (len(q_terms & rec_term_set) / max(1, len(q_terms))) if q_terms else 0.0
                 cos = cosine_similarity(rec_vecs[idx - 1], sq_vecs[j])
-                scores.append((0.6 * cos + 0.4 * q_hit, sq["sq_id"]))
+                scores.append((round(0.6 * cos + 0.4 * q_hit, 4), sq["sq_id"]))
             scores.sort(reverse=True)
-            matched_sqs = [sid for sc, sid in scores if sc >= 0.06][:2] or [scores[0][1]]
+            max_relevance = scores[0][0] if scores else 0.0
+            matched_sqs = [sid for sc, sid in scores if sc >= 0.06][:2]
+            if not matched_sqs:
+                if max_relevance >= 0.04:
+                    matched_sqs = [scores[0][1]]
+                else:
+                    # Off-topic / low-relevance record (e.g. unrelated sensor or sleep review): do NOT attach to SQ-1 as supportive!
+                    scope_relevance = "out_of_scope_background"
+                    polarity = "out_of_scope_background"
 
         src_row = {
             "source_id": src_id,
@@ -249,13 +259,15 @@ def build_evidence_and_conflicts(
             "material_access": access,
             "access_note": access_note,
             "polarity": polarity,
+            "scope_relevance": scope_relevance,
+            "max_sq_relevance": max_relevance,
             "is_retracted_or_erratum": is_retracted,
             "matched_sub_questions": matched_sqs,
             "version_upgrade": rec.get("version_upgrade"),
         }
         sources_matrix.append(src_row)
 
-        if is_non_evidence_access(access):
+        if is_non_evidence_access(access) or scope_relevance == "out_of_scope_background":
             continue
 
         for p in passages:
@@ -655,7 +667,29 @@ def run_pipeline(
     audit_file = eff_work_dir / "audit_log.json"
     init_audit_log(audit_file, run_label="deep-research-orchestrator")
 
-    gaps = list(bundle["ingest_gaps"])
+    acc_counts = dict(sorted(Counter(s["material_access"] for s in sources_matrix).items()))
+    discovery_n = acc_counts.get("discovery_only", 0)
+    raw_disc_n = sum(1 for r in raw_records if str(r.get("material_access") or "") == "discovery_only")
+    out_of_scope_n = sum(1 for s in sources_matrix if s.get("scope_relevance") == "out_of_scope_background")
+    # Single-source-of-truth gap reconciliation: replace raw discovery_only gap with canonical post-dedup count!
+    gaps = [g for g in bundle["ingest_gaps"] if "discovery_only" not in str(g.get("code", "")).lower() and "discovery_only" not in str(g.get("message", "")).lower()]
+    if discovery_n > 0:
+        gaps.append({
+            "code": "DISCOVERY_ONLY_EXCLUDED",
+            "severity": "info",
+            "source": "deep_research_orchestrator",
+            "canonical_count": discovery_n,
+            "raw_count": raw_disc_n,
+            "message": f"{discovery_n} canonical deduplicated source(s) (deduplicated from {raw_disc_n} raw records) are discovery_only and strictly excluded from synthesis evidence.",
+        })
+    if out_of_scope_n > 0:
+        gaps.append({
+            "code": "OUT_OF_SCOPE_LOW_RELEVANCE_FILTERED",
+            "severity": "info",
+            "source": "deep_research_orchestrator",
+            "count": out_of_scope_n,
+            "message": f"{out_of_scope_n} source(s) scored below sub-question relevance threshold (<0.04) and were quarantined as out_of_scope_background rather than attached to sub-questions.",
+        })
     if bundle["access_log"]:
         gaps.append({
             "code": "ACCESS_BARRIER_SOURCES_LOGGED",
@@ -674,11 +708,42 @@ def run_pipeline(
     verification = verify_synthesis_report(out_md, sources_matrix, conflicts, access_log=bundle["access_log"]) if (out_md is not None and out_md.is_file()) else {"passed": True, "errors": []}
     passed = len(sources_matrix) > 0 and verification["passed"]
 
-    acc_counts = dict(sorted(Counter(s["material_access"] for s in sources_matrix).items()))
+    anchored_locator_n = sum(1 for e in evidence_matrix if "#" in str(e.get("locator") or "") and not str(e.get("locator") or "").endswith("#body"))
+    # Output-contract completeness gate: ensure core sub-questions (including SQ-1) are answered & record-level denominator lineages exist
+    sq_evidence_counts: dict[str, int] = {sq["sq_id"]: 0 for sq in subqs}
+    for e in evidence_matrix:
+        for sid in (e.get("matched_sub_questions") or [e.get("sub_question_id")]):
+            if sid in sq_evidence_counts:
+                sq_evidence_counts[sid] += 1
+    unanswered_sqs = [sid for sid, cnt in sq_evidence_counts.items() if cnt == 0]
+    discovery_only_ids = [s["record_id"] for s in sources_matrix if s.get("material_access") == "discovery_only"]
+    out_of_scope_ids = [s["record_id"] for s in sources_matrix if s.get("scope_relevance") == "out_of_scope_background"]
+    output_contract_audit = {
+        "sq_evidence_counts": sq_evidence_counts,
+        "sq1_answered": sq_evidence_counts.get("SQ-1", 0) > 0,
+        "unanswered_sub_questions": unanswered_sqs,
+        "denominator_record_lineage": {
+            "raw_total": len(raw_records),
+            "canonical_total": len(sources_matrix),
+            "discovery_only_ids": discovery_only_ids,
+            "out_of_scope_ids": out_of_scope_ids,
+            "blocked_sources_count": len(bundle["access_log"]),
+        },
+        "contract_complete": (len(unanswered_sqs) == 0 and verification["passed"] and len(sources_matrix) > 0),
+    }
+    if unanswered_sqs:
+        gaps.append({
+            "code": "OUTPUT_CONTRACT_UNANSWERED_SQ",
+            "severity": "warning",
+            "source": "deep_research_orchestrator",
+            "message": f"Sub-question(s) without direct grounded evidence in local corpus: {unanswered_sqs}; status marked partial_with_gaps.",
+        })
+    ledger_status = "completed" if (not gaps and output_contract_audit["contract_complete"]) else "partial_with_gaps"
     ledger: dict[str, Any] = {
         "case_id": case_id,
         "passed": passed,
-        "status": "partial" if gaps else "completed",
+        "status": ledger_status,
+        "output_contract_audit": output_contract_audit,
         "corpus_scope": f"bounded_local_corpus ({len(raw_records)} raw -> {len(sources_matrix)} canonical sources)",
         "block_index_summary": bundle.get("block_index_summary", {}),
         "identified_by_source": by_source,
@@ -719,6 +784,7 @@ def run_pipeline(
             "corpus_scope": ledger["corpus_scope"],
             "access_tier_breakdown": acc_counts,
             "sub_questions_dag": subqs,
+            "output_contract_audit": output_contract_audit,
             "evidence_matrix_preview": evidence_matrix[:30],
             "conflict_ledger": conflicts,
             "research_gaps": research_gaps,
@@ -744,6 +810,8 @@ def run_pipeline(
                 "discovery_only_excluded_count": discovery_n,
                 "sub_question_count": len(subqs),
                 "grounded_passage_count": len(evidence_matrix),
+                "anchored_locator_count": anchored_locator_n,
+                "out_of_scope_filtered_count": out_of_scope_n,
                 "conflict_count": len(conflicts),
                 "research_gap_count": len(research_gaps),
             },
@@ -756,6 +824,8 @@ def run_pipeline(
                 "discovery_only_excluded_count": f"{out_json.name}:access_tier_breakdown",
                 "sub_question_count": f"{out_json.name}:sub_questions_dag",
                 "grounded_passage_count": f"{out_json.name}:evidence_matrix",
+                "anchored_locator_count": f"{out_json.name}:evidence_matrix.locator",
+                "out_of_scope_filtered_count": f"{out_json.name}:sources_matrix.scope_relevance",
                 "conflict_count": f"{out_json.name}:conflict_ledger",
                 "research_gap_count": f"{out_json.name}:research_gaps",
             },

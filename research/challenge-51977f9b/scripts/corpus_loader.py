@@ -216,7 +216,7 @@ def _infer_material_access(raw: dict[str, Any], *, text_blob: str, abstract: str
     declared_access = str(raw.get("access_status") or raw.get("material_access") or "").strip().lower()
     if declared_access in BLOCKED_ACCESS_STATUSES or str(raw.get("http_status") or "") in {"403", "429", "401"}:
         return "blocked_or_unavailable"
-    if declared_access in {"fulltext_pdf", "fulltext_xml", "fulltext_local_text", "captured_text", "abstract_only", "discovery_only", "blocked_or_unavailable"}:
+    if declared_access in {"fulltext_pdf", "fulltext_xml", "fulltext_local_text", "captured_text", "secondary_note", "abstract_only", "discovery_only", "blocked_or_unavailable"}:
         return declared_access
     if default_access:
         return default_access
@@ -298,14 +298,35 @@ def normalize_record_dict(
     arxiv_id = normalize_arxiv_id(str(raw.get("arxiv_id") or raw.get("arXiv") or ""))
     pmid = str(raw.get("pmid") or raw.get("PMID") or "").strip()
     pmcid = str(raw.get("pmcid") or raw.get("PMCID") or "").strip().upper()
-    if not doi or not arxiv_id:
-        ids = extract_identifiers(f"{title_str} {abstract} {text_blob[:3000]}")
-        if not doi and ids["doi"]:
-            doi = ids["doi"][0]
-        if not arxiv_id and ids["arxiv"]:
-            arxiv_id = ids["arxiv"][0]
-        if not pmcid and ids["pmc"]:
-            pmcid = ids["pmc"][0]
+    # Explicit metadata dict fields (e.g. OpenAlex ids / Semantic Scholar externalIds) only
+    if isinstance(raw.get("ids"), dict):
+        if not doi and raw["ids"].get("doi"):
+            doi = normalize_doi(str(raw["ids"]["doi"]))
+        if not pmid and raw["ids"].get("pmid"):
+            pmid = re.sub(r"\D+", "", str(raw["ids"]["pmid"]))
+        if not pmcid and raw["ids"].get("pmcid"):
+            pmcid = str(raw["ids"]["pmcid"]).strip().upper()
+    # Front-matter header ONLY (strictly before Abstract/Introduction/References) for raw local PDF/text
+    header_zone = ""
+    if default_source in {"local_pdf", "local_text"} and text_blob:
+        cut_m = re.search(r"\b(?:abstract|introduction|background|references|bibliography)\b", text_blob[:2200], re.I)
+        header_zone = text_blob[: cut_m.start() if cut_m else 900]
+    if not doi or not arxiv_id or not pmcid:
+        header_ids = extract_identifiers(f"{raw.get('url') or ''} {title_str} {header_zone}")
+        if not doi and header_ids["doi"]:
+            doi = header_ids["doi"][0]
+        if not arxiv_id and header_ids["arxiv"]:
+            arxiv_id = header_ids["arxiv"][0]
+        if not pmcid and header_ids["pmc"]:
+            pmcid = header_ids["pmc"][0]
+    # Body/abstract IDs are NEVER promoted to the current paper's identity; track them separately as cited_candidate_ids!
+    body_ids = extract_identifiers(f"{abstract} {text_blob[:12000]}")
+    cited_candidate_ids = {
+        "doi": [x for x in body_ids["doi"] if x != doi],
+        "arxiv": [x for x in body_ids["arxiv"] if x != arxiv_id],
+        "pmid": [x for x in body_ids["pmid"] if x != pmid],
+        "pmc": [x for x in body_ids["pmc"] if x != pmcid],
+    }
 
     venue_raw = raw.get("venue") or raw.get("journal") or raw.get("journalTitle") or raw.get("container-title") or ""
     if not venue_raw and isinstance(raw.get("primary_location"), dict):
@@ -350,6 +371,8 @@ def normalize_record_dict(
         "arxiv_id": arxiv_id,
         "pmid": pmid,
         "pmcid": pmcid,
+        "cited_candidate_ids": cited_candidate_ids,
+        "identity_source": "explicit_metadata_or_header_only",
         "type": str(raw.get("type") or raw.get("pubType") or ("preprint" if date_basis == "preprint" else "")),
         "venue": _strip_html(str(venue_raw)),
         "citations": citations,
@@ -589,7 +612,7 @@ def parse_markdown_review_note(raw: str, source_file: str) -> dict[str, Any] | N
         (line.lstrip("# ").strip() for line in lines if line.startswith("# ")),
         Path(source_file).stem,
     )
-    return normalize_record_dict(
+    rec = normalize_record_dict(
         {
             "record_id": metadata.get("record_id") or Path(source_file).stem,
             "title": title,
@@ -599,12 +622,16 @@ def parse_markdown_review_note(raw: str, source_file: str) -> dict[str, Any] | N
             "note_file": source_file,
             "claim_spans": claim_spans,
             "text": raw,
+            "access_status": "secondary_note",
         },
         default_id=Path(source_file).stem,
         source_file=source_file,
         default_source="markdown_note",
-        default_access="fulltext_local_text",
+        default_access="secondary_note",
     )
+    rec["secondary_note_requires_primary_verification"] = True
+    rec["primary_verified_excerpts"] = []
+    return rec
 
 
 def _extract_pdf_header_metadata(pages: list[str], rel: str, stem: str) -> dict[str, Any]:

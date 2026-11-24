@@ -132,6 +132,23 @@ def discover_input_dir(input_dir: Path) -> dict[str, Any]:
     }
 
 
+def _is_substantive_contract_value(val: Any) -> bool:
+    """Return True only when a contract field holds real non-placeholder content."""
+    if val is None:
+        return False
+    if isinstance(val, str):
+        return bool(val.strip())
+    if isinstance(val, dict):
+        if not val:
+            return False
+        if val.get("status") == "not_provided_by_upstream_payload" or val.get("placeholder") is True:
+            return False
+        return True
+    if isinstance(val, list):
+        return len(val) > 0
+    return True
+
+
 def seal_result_contract(
     *,
     case_json_path: Path | None,
@@ -168,20 +185,20 @@ def seal_result_contract(
     merged["task_id"] = task_id
     merged["status"] = status
     merged["sealed_at_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    merged["artifacts"] = sorted(set(list(merged.get("artifacts") or []) + list(artifacts or [])))
-    merged["sources"] = sorted(set(list(merged.get("sources") or []) + list(sources or [])))
-    merged["uncertainty"] = list(dict.fromkeys(list(merged.get("uncertainty") or []) + list(uncertainty or [])))
-    merged["gaps"] = list(dict.fromkeys(list(merged.get("gaps") or []) + list(gaps or [])))
-    merged["change_records"] = list(dict.fromkeys(list(merged.get("change_records") or []) + list(change_records or [])))
+    merged["artifacts"] = sorted(set(list(artifacts or []))) if artifacts is not None else sorted(set(list(merged.get("artifacts") or [])))
+    merged["sources"] = sorted(set(list(sources or []))) if sources is not None else sorted(set(list(merged.get("sources") or [])))
+    merged["uncertainty"] = list(dict.fromkeys(list(uncertainty or []))) if uncertainty is not None else list(dict.fromkeys(list(merged.get("uncertainty") or [])))
+    merged["gaps"] = list(dict.fromkeys(list(gaps or []))) if gaps is not None else list(dict.fromkeys(list(merged.get("gaps") or [])))
+    merged["change_records"] = list(dict.fromkeys(list(change_records or []))) if change_records is not None else list(dict.fromkeys(list(merged.get("change_records") or [])))
 
     if payload:
         merged["analysis_summary"] = payload
         # Promote matching keys directly if requested by output_contract
         for f in contract_fields:
-            if f in payload and f not in merged:
+            if f in payload and not _is_substantive_contract_value(merged.get(f)):
                 merged[f] = payload[f]
 
-    # Ensure every output_contract field is explicitly populated (honestly marked if absent)
+    # Ensure every output_contract field is explicitly populated; distinguish substantive values from placeholders
     contract_backfilled: list[str] = []
     alias_map = {
         "result": payload or merged.get("analysis_summary") or {},
@@ -200,28 +217,41 @@ def seal_result_contract(
         "queries": payload.get("queries") or [],
     }
     for f in contract_fields:
-        if f not in merged or merged[f] is None:
-            if f in alias_map:
+        if f not in merged or not _is_substantive_contract_value(merged.get(f)):
+            if f in alias_map and _is_substantive_contract_value(alias_map[f]):
                 merged[f] = alias_map[f]
-            else:
-                merged[f] = {"status": "not_provided_by_upstream_payload", "field": f}
-                merged["gaps"].append(f"output_contract field {f!r} had no direct metric mapping; marked explicitly")
-            contract_backfilled.append(f)
+                contract_backfilled.append(f)
+            elif f not in merged or merged[f] is None:
+                merged[f] = {"status": "not_provided_by_upstream_payload", "placeholder": True, "field": f}
+                gap_msg = f"output_contract field {f!r} had no substantive upstream value; marked as placeholder gap"
+                if gap_msg not in merged["gaps"]:
+                    merged["gaps"].append(gap_msg)
+                contract_backfilled.append(f)
+
+    substantive_fields = [f for f in contract_fields if _is_substantive_contract_value(merged.get(f))]
+    missing_or_placeholder = [f for f in contract_fields if f not in substantive_fields]
+    all_substantive = len(missing_or_placeholder) == 0
 
     merged["output_contract_verification"] = {
         "required_fields": contract_fields,
-        "all_present": all(f in merged for f in contract_fields),
+        "substantive_fields": substantive_fields,
+        "missing_or_placeholder_fields": missing_or_placeholder,
+        "all_present": all_substantive,
         "backfilled_fields": contract_backfilled,
     }
+    if not all_substantive and merged["status"] == "ok":
+        merged["status"] = "partial"
 
     result_json_path.parent.mkdir(parents=True, exist_ok=True)
     result_json_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return {
-        "ok": bool(merged["output_contract_verification"]["all_present"]),
+        "ok": all_substantive,
         "result_json": str(result_json_path),
         "case_id": case_id,
-        "status": status,
+        "status": merged["status"],
         "contract_fields_verified": contract_fields,
+        "substantive_fields": substantive_fields,
+        "missing_or_placeholder_fields": missing_or_placeholder,
         "backfilled_fields": contract_backfilled,
     }
 

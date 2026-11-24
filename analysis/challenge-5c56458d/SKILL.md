@@ -187,6 +187,14 @@ GROUP BY age_stratum
 ORDER BY age_stratum;
 ```
 
+### Zero-Manual One-Command Entrypoint (`auto_sqlite_analyzer.py`)
+
+For any `/input` directory containing a SQLite database (multi-table 1:N star schema like Wine/HPLC or normalized `studies -> patients -> lab_assays`, single-table categorical like Iris, or continuous single-table like Concrete 1030), run the zero-manual orchestrator to automatically inspect schema, parse parameterized `WHERE` / `ORDER BY` / `LIMIT` directives from `task.md` (`?` parameter binding), synthesize inflation-free CTE / stratified SQL + mirrored Python reconciliation specs, execute read-only, verify `max_abs_diff < 1e-9`, compute exact pure-stdlib One-Way ANOVA / Welch ANOVA / Kruskal-Wallis $p$-values + pairwise Welch $t$ (Holm-Bonferroni + Hedges' $g$) + automatic Wilson score 95% CIs for binary 0/1 proportions (`ci_method: "wilson_score_95"`), and seal `/app/output/result.json`:
+
+```bash
+python3 "$SCRIPTS/auto_sqlite_analyzer.py" --input-dir /input --out-dir /app/output --stem sql_analysis
+```
+
 ### Independent Python Reconciliation & Output Contract Sealing
 
 Include a `reconcile` dictionary inside each primary aggregate query so `sql_cross_table_runner.py` independently recalculates every group from raw base tables in pure Python and asserts:

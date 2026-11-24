@@ -16,6 +16,7 @@ import hashlib
 import json
 import sys
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from dirty_table_fault_scanner import (
     _lookup_metric_rule,
     _resolve_numeric_targets,
     _resolve_pk_cols,
+    _resolve_pk_cols_with_audit,
     _unit_key,
     detect_encoding_and_read,
     normalize_storage_text,
@@ -36,13 +38,50 @@ from dirty_table_fault_scanner import (
 )
 
 
-def _format_num(val: float) -> str:
-    if val == 0.0:
+def _infer_si_unit_factor(from_u: str, to_u: str) -> float | None:
+    """Deterministic SI prefix conversion for standard mass/volume/concentration units when not in workorder."""
+    mass = {"kg": 1e3, "g": 1.0, "mg": 1e-3, "ug": 1e-6, "μg": 1e-6, "µg": 1e-6, "ng": 1e-9, "pg": 1e-12}
+    vol = {"l": 1.0, "dl": 1e-1, "ml": 1e-3, "ul": 1e-6, "μl": 1e-6, "µl": 1e-6}
+    length = {"m": 1.0, "cm": 1e-2, "mm": 1e-3, "um": 1e-6, "μm": 1e-6, "nm": 1e-9}
+    fu, tu = from_u.strip().lower(), to_u.strip().lower()
+    if fu == tu:
+        return 1.0
+    for tbl in (mass, vol, length):
+        if fu in tbl and tu in tbl:
+            return tbl[fu] / tbl[tu]
+    if "/" in fu and "/" in tu:
+        f_num, f_den = [x.strip() for x in fu.split("/", 1)]
+        t_num, t_den = [x.strip() for x in tu.split("/", 1)]
+        if f_num in mass and t_num in mass and f_den in vol and t_den in vol:
+            return (mass[f_num] / mass[t_num]) / (vol[f_den] / vol[t_den])
+    return None
+
+
+def _format_num(val: float | Decimal, decimal_str: str | None = None, factor: float = 1.0) -> str:
+    """Lossless Decimal-preserving formatter: never rounds small non-zero values (e.g. 1e-9) to '0'."""
+    try:
+        if decimal_str is not None:
+            d = Decimal(decimal_str)
+            if abs(factor - 1.0) > 1e-15:
+                d = d * Decimal(str(factor))
+        elif isinstance(val, Decimal):
+            d = val
+        else:
+            d = Decimal(str(val))
+    except InvalidOperation:
+        d = Decimal(str(val))
+    if d == 0:
         return "0"
-    rounded = round(val, 8)
-    if rounded == int(rounded) and abs(rounded) < 1e12:
-        return str(int(rounded))
-    return f"{rounded:.8f}".rstrip("0").rstrip(".")
+    norm = d.normalize()
+    # Keep scientific notation for extreme magnitudes (<1e-4 or >=1e12), else exact stripped decimal
+    exp = norm.as_tuple().exponent
+    abs_d = abs(norm)
+    if abs_d < Decimal("1e-4") or abs_d >= Decimal("1e12"):
+        return format(norm, "g")
+    if isinstance(exp, int) and exp >= 0:
+        return str(int(norm))
+    s = format(norm, "f")
+    return s.rstrip("0").rstrip(".") if "." in s else s
 
 
 def clean_table_by_workorder(
@@ -67,16 +106,17 @@ def clean_table_by_workorder(
     rows = raw_info["rows"]
 
     sentinel_lookup = _build_sentinel_lookup(workorder)
-    pk_cols = _resolve_pk_cols(cols, workorder)
+    pk_cols, pk_audit = _resolve_pk_cols_with_audit(cols, workorder)
+    pk_missing = pk_audit.get("status") == "MISSING_DECLARED_PK"
     num_cols, metric_col = _resolve_numeric_targets(cols, pk_cols, workorder)
     unit_col = str(workorder.get("unit_column") or workorder.get("unit_col") or "").strip() or None
     dup_policy = workorder.get("duplicate_policy") or {}
     conflict_mode = str(dup_policy.get("key_conflict", "quarantine_do_not_silently_overwrite"))
 
-    # Group rows by leading-zero-preserving primary key (whitespace trimmed at edges only)
+    # Group rows by leading-zero-preserving primary key; refuse silent PK shrinkage when declared PK columns are missing
     pk_occurrences: dict[tuple[str, ...], list[tuple[int, dict[str, str]]]] = defaultdict(list)
     for ridx, row in enumerate(rows, start=2):
-        pk_sig = tuple(row.get(c, "").strip() for c in pk_cols)
+        pk_sig = (f"__row_{ridx}__",) if pk_missing else tuple(row.get(c, "").strip() for c in pk_cols)
         pk_occurrences[pk_sig].append((ridx, row))
 
     conflicting_pks: set[tuple[str, ...]] = set()
@@ -94,6 +134,7 @@ def clean_table_by_workorder(
     duplicate_audit: list[dict[str, Any]] = []
     unit_conversion_log: list[dict[str, Any]] = []
     qc_alerts: list[dict[str, Any]] = []
+    precision_preservation_log: list[dict[str, Any]] = []
 
     seen_nonconflict_pks: dict[tuple[str, ...], int] = {}
     status_counts: dict[str, int] = defaultdict(int)
@@ -102,7 +143,7 @@ def clean_table_by_workorder(
     storage_repaired_cells = 0
 
     for ridx, row in enumerate(rows, start=2):
-        pk_sig = tuple(row.get(c, "").strip() for c in pk_cols)
+        pk_sig = (f"__row_{ridx}__",) if pk_missing else tuple(row.get(c, "").strip() for c in pk_cols)
 
         # Handle conflicting duplicate primary keys: quarantine ALL rows sharing that conflicted key
         if pk_sig in conflicting_pks and conflict_mode == "quarantine_do_not_silently_overwrite":
@@ -192,8 +233,10 @@ def clean_table_by_workorder(
             eff_u = inline_u or col_u or target_u
             factor_used = 1.0
             if eff_u and target_u:
-                if eff_u in factors:
-                    factor_used = factors[eff_u]
+                si_factor = None if eff_u in factors else _infer_si_unit_factor(eff_u, target_u)
+                if eff_u in factors or si_factor is not None:
+                    factor_used = factors[eff_u] if eff_u in factors else float(si_factor)  # type: ignore[arg-type]
+                    source_tag = "workorder" if eff_u in factors else "si_prefix_builtin"
                     converted = val * factor_used
                     if eff_u != target_u or abs(factor_used - 1.0) > 1e-12 or inline_u:
                         unit_conversion_log.append({
@@ -204,6 +247,7 @@ def clean_table_by_workorder(
                             "from_unit": eff_u,
                             "to_unit": target_u,
                             "factor": factor_used,
+                            "factor_source": source_tag,
                             "converted_value": round(converted, 8),
                         })
                     val = converted
@@ -235,7 +279,17 @@ def clean_table_by_workorder(
                     "action": "retained_with_flag_for_expert_review",
                 })
 
-            out_r[nc] = _format_num(val)
+            formatted = _format_num(val, decimal_str=parsed.get("decimal_str"), factor=factor_used)
+            if val != 0.0 and abs(val) < 1e-4:
+                precision_preservation_log.append({
+                    "line": ridx,
+                    "column": nc,
+                    "raw_value": raw_cell,
+                    "preserved_value": formatted,
+                    "reason": "sub_1e-4_nonzero_decimal_preserved_without_zeroing",
+                })
+                row_flags.append(f"{nc}:small_nonzero_decimal_preserved")
+            out_r[nc] = formatted
 
         out_r["value_state"] = row_value_state
         out_r["audit_flags"] = ";".join(row_flags) if row_flags else "none"
@@ -273,7 +327,10 @@ def clean_table_by_workorder(
         "quarantine_csv": quarantine_p.name,
         "detected_encoding": scan["detected_encoding"],
         "detected_delimiter": scan["detected_delimiter"],
+        "embedded_newline_cells": raw_info.get("embedded_newline_cells", 0),
         "primary_key_columns": pk_cols,
+        "primary_key_audit": pk_audit,
+        "precision_preservation_log": precision_preservation_log,
         "leading_zero_preserved": True,
         "imputation_performed": False,
         "population_inference_performed": False,
@@ -312,12 +369,14 @@ def clean_table_by_workorder(
     repro_code = (
         "#!/usr/bin/env python3\n"
         f'"""Linear reproduction script for cleaning {input_path.name} under explicit workorder."""\n\n'
-        "import json, subprocess, sys\n"
+        "import json, os, subprocess, sys\n"
         "from pathlib import Path\n\n"
         f'RAW_TABLE = Path("{input_path.name}")  # adjust relative to your case directory\n'
         'WORKORDER = Path("workorder.json")\n'
         f'OUT_DIR = Path(".")\n'
-        f'SCRIPTS = Path("/skills/weekly-skill/scripts")\n\n'
+        'SCRIPTS = Path(os.environ.get("SKILL_SCRIPTS_DIR") or (Path(__file__).resolve().parent / "scripts"))\n'
+        'if not (SCRIPTS / "reversible_table_cleaner.py").is_file():\n'
+        '    raise SystemExit("Set SKILL_SCRIPTS_DIR to the skill scripts/ folder before running this reproduction script.")\n\n'
         "# Step 1: Read-only fault scan (encoding, leading-zero IDs, sentinels, units, duplicates)\n"
         'subprocess.run([sys.executable, "-B", str(SCRIPTS / "dirty_table_fault_scanner.py"), "--input", str(RAW_TABLE), "--workorder", str(WORKORDER), "--out", str(OUT_DIR / "fault_scan.json")], check=True)\n\n'
         "# Step 2: Reversible cleaning with zero imputation and conflict quarantine\n"

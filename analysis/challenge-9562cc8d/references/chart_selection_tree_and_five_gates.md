@@ -10,6 +10,7 @@
 | 分类 × 连续（`categorical_continuous`） | 分布形态（`distribution`） | `boxplot_points` | 中位数、四分位距、须线与全部原始观测点同时可见 | 纯误差棒折线图（暗示连续顺序）；仅均数 ± SD（偏态分布下均数失真） |
 | 有序时间/剂量 × 连续（`time_series`） | 趋势/轨迹（`trend` / `trajectory`） | `line_with_band` | 折线斜率与连续阴影带直观表达单调变化与不确定性 | 并列柱状图（割裂连续时间轴并引入大量冗余柱墨迹） |
 | 连续 × 连续（`bivariate_continuous`） | 相关性/回归（`correlation`） | `scatter_regression` | 二维笛卡尔位置直接揭示线性度、杠杆点与分群结构 | 离散分箱柱状图（损失连续信息并制造人为断点） |
+| 多自变量连续（`multivariate_continuous`） | 多元回归与偏效应（`multivariable_regression`） | `multivariate_ols` | 左面板（a）标准化系数森林图含 95% HC3 CI 与 VIF + 右面板（b）Observed vs. Predicted 含 $R^2_{\text{adj}}$ 与 JB/BP 假设注记 | 仅挑单个自变量画双变量散点（遗漏混杂控制与共线性诊断） |
 | 多变量数值矩阵（`matrix`） | 相关性/模式（`correlation` / `pattern`） | `heatmap` | 均匀单调色阶或零中心发散色阶 + 单元格精确数值标注 | 雷达图/蜘蛛图（多边形面积随变量排序剧烈畸变）；`jet`/`rainbow` 伪彩（亮度非单调产生虚假边界） |
 
 ## 2. PlotAgent 五项候选 Gate（全部通过方可交付）
@@ -31,9 +32,9 @@
    - 物理宽度锁定 `85 / 114 / 174 mm`，字号 `7–12 pt`，`bbox_inches=None`（禁用 `tight` 破坏物理尺寸）；
    - 标题采用常规字重、相对 panel 绘图区水平居中（`loc="center"`）；
    - 图面零后端词泄露（严禁 `selected_flag`、`pass_filter`、`qc_branch`、`route_enum` 或后端名称上画布）。
-5. **Gate 5 — 源数据到视觉元素逐项对账（Source-to-Visual Reconciliation）**：
-   - 渲染后自动核对 `plotted_points_count == clean_source_points`、`points_clipped_outside_ylim == 0`、`all_error_bars_within_ylim == true` 与每组/每单元格数值 `max_abs_diff == 0.0`；
-   - 同步输出独立可读的 `<stem>_caption.md` 与线性复现脚本 `reproduce_figure.py`。
+5. **Gate 5 — 源数据到视觉元素逐项回读对账（Source-to-Visual Reconciliation）**：
+   - 渲染落盘后从磁盘重新解析已写出的 `<stem>.svg` 几何坐标或单元格文本，反解回数据单位并与清洗源数据逐项比对计算真实 `max_abs_diff`（严禁硬编码 `0.0`），核对 `plotted_points_count == clean_source_points`、`points_clipped_outside_ylim == 0`、`all_error_bars_within_ylim == true`；
+   - 同步输出独立可读的 `<stem>_caption.md` 与支持 CSV/JSON/只读 SQLite 的线性复现脚本 `reproduce_figure.py`。
 
 ## 3. A / B / C 三事实面契约
 

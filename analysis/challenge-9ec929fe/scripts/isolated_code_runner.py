@@ -27,6 +27,7 @@ if str(HERE) not in sys.path:
 
 from code_contract_checker import audit_script_contract
 from env_lock_auditor import audit_environment
+from numeric_crosscheck import crosscheck_summary
 
 _NONFINITE_TOKENS = {"nan", "+nan", "-nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"}
 
@@ -107,6 +108,7 @@ def _classify_failure(
     invariant_violations: list[str],
     fresh_count: int,
     min_artifacts: int,
+    crosscheck_ok: bool = True,
 ) -> str:
     if not static_audit["ok"]:
         return "STATIC_CONTRACT_BLOCKER"
@@ -124,6 +126,8 @@ def _classify_failure(
         return "RUNTIME_EXECUTION_ERROR"
     if fresh_count < min_artifacts:
         return "NO_FRESH_ARTIFACTS_PRODUCED"
+    if not crosscheck_ok:
+        return "NUMERIC_CROSSCHECK_MISMATCH"
     if invariant_violations:
         return "NUMERIC_OR_STRUCTURAL_INVARIANT_FAILURE"
     return "NONE"
@@ -139,23 +143,24 @@ def _render_stdlib_svg(
     gates: list[tuple[str, bool, str]],
 ) -> None:
     """Render a crisp, editable pure-stdlib SVG execution verification summary."""
-    w, h = 680, 290
-    bar_x = 185
-    bar_max_w = 340
     row_h = 34
     start_y = 66
+    w = 700
+    h = max(290, start_y + len(gates) * row_h + 24)
+    bar_x = 205
+    bar_max_w = 340
     status_color = "#2E7D6B" if status == "ok" else "#C65A4F"
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
         '<rect width="100%" height="100%" fill="#FFFFFF"/>',
-        '<rect x="12" y="12" width="656" height="266" rx="6" fill="#FAFBFD" stroke="#D8E0E8" stroke-width="1"/>',
+        f'<rect x="12" y="12" width="{w - 24}" height="{h - 24}" rx="6" fill="#FAFBFD" stroke="#D8E0E8" stroke-width="1"/>',
         f'<text x="28" y="38" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1F2937">'
         f'Isolated Execution Gate: {html.escape(script_name)}</text>',
         f'<text x="28" y="54" font-family="DejaVu Sans, Arial, sans-serif" font-size="10.5" fill="#4B5563">'
         f'Status: {html.escape(status.upper())} | Elapsed: {elapsed_s:.3f}s | PYTHONHASHSEED={seed}</text>',
-        f'<rect x="546" y="22" width="108" height="24" rx="4" fill="{status_color}"/>',
-        f'<text x="600" y="38" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#FFFFFF">'
+        f'<rect x="{w - 134}" y="22" width="108" height="24" rx="4" fill="{status_color}"/>',
+        f'<text x="{w - 80}" y="38" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#FFFFFF">'
         f'{html.escape("PASS" if status == "ok" else "STALE/FAIL")}</text>',
     ]
 
@@ -224,6 +229,21 @@ def _try_render_matplotlib_png(
     return True
 
 
+def _sanitize_cmd_for_report(cmd: list[str]) -> list[str]:
+    """Strip host-specific absolute directory prefixes from logged command tokens."""
+    sanitized: list[str] = []
+    for i, tok in enumerate(cmd):
+        if i == 0:
+            sanitized.append(Path(tok).name)
+        elif tok.startswith("-") or not any(sep in tok for sep in ("/", "\\")):
+            sanitized.append(tok)
+        elif tok.startswith(("/input/", "/app/", "/skills/")):
+            sanitized.append(tok)
+        else:
+            sanitized.append(Path(tok).name)
+    return sanitized
+
+
 def run_isolated(
     script_path: Path,
     work_dir: Path,
@@ -233,17 +253,21 @@ def run_isolated(
     seed: int = 42,
     timeout_s: int = 120,
     input_csv: Path | None = None,
+    input_db: Path | None = None,
     expected_rows: int | None = None,
+    expected_query_rows: int | None = None,
     min_artifacts: int = 1,
     script_args: list[str] | None = None,
     allow_static_warnings: bool = True,
+    crosscheck_tol: float = 1e-9,
 ) -> dict[str, Any]:
-    """Execute script in isolated work_dir with full snapshot hashing, invariant checks, and anti-stale guard."""
+    """Execute script in isolated work_dir with full snapshot hashing, invariant checks, Gate 7 numeric cross-check, and anti-stale guard."""
     script_abs = script_path.resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     script_sha = _sha256_file(script_abs)
+    db_sha_before = _sha256_file(input_db) if (input_db and input_db.is_file()) else None
     static_audit = audit_script_contract(script_abs, input_csv=input_csv, strict=not allow_static_warnings)
     env_audit = audit_environment(script_path=script_abs)
     pre_snapshot = _snapshot_dir(work_dir)
@@ -313,9 +337,16 @@ def run_isolated(
             unchanged_preexisting_files.append(meta)
 
     fresh_artifacts = created_files + modified_files
+    fresh_rel_set = {f["rel"] for f in fresh_artifacts}
 
     # Numeric & structural invariants on FRESH artifacts only (never count stale files as passing outputs!)
     invariant_violations: list[str] = []
+    if db_sha_before is not None and input_db and input_db.is_file():
+        db_sha_after = _sha256_file(input_db)
+        if db_sha_after != db_sha_before:
+            invariant_violations.append(f"{input_db.name}: read-only SQLite SHA-256 mutated during execution")
+
+    query_row_verified = False
     for item in fresh_artifacts:
         fpath = work_dir / item["rel"]
         if item["bytes"] == 0:
@@ -327,11 +358,68 @@ def run_isolated(
                 raw_txt = fpath.read_text(encoding="utf-8-sig")
                 parsed = json.loads(raw_txt)
                 invariant_violations.extend(_scan_json_finite(parsed, item["rel"]))
+                if expected_query_rows is not None and isinstance(parsed, dict):
+                    sj = parsed.get("safe_join_audit")
+                    if isinstance(sj, dict) and "joined_sample_rows" in sj:
+                        query_row_verified = True
+                        if int(sj["joined_sample_rows"]) != expected_query_rows:
+                            invariant_violations.append(
+                                f"{item['rel']}: safe_join_audit.joined_sample_rows={sj['joined_sample_rows']} != expected_query_rows={expected_query_rows}"
+                            )
             except Exception as exc:
                 invariant_violations.append(f"{item['rel']}: invalid JSON ({exc})")
         elif suf == ".csv":
-            invariant_violations.extend(_verify_csv_invariants(fpath, expected_rows=expected_rows))
+            exp_r = expected_rows
+            if expected_query_rows is not None and ("joined" in fpath.stem.lower() or "query" in fpath.stem.lower()):
+                exp_r = expected_query_rows
+                query_row_verified = True
+            invariant_violations.extend(_verify_csv_invariants(fpath, expected_rows=exp_r))
+        elif suf == ".svg":
+            svg_txt = fpath.read_text(encoding="utf-8", errors="replace").strip()
+            if not (svg_txt.startswith("<svg") and svg_txt.endswith("</svg>")):
+                invariant_violations.append(f"{item['rel']}: malformed SVG XML root element")
 
+    if expected_query_rows is not None and not query_row_verified and executed and exit_code == 0:
+        # Fallback: verify at least one fresh CSV has expected_query_rows
+        csv_fresh = [work_dir / f["rel"] for f in fresh_artifacts if f["rel"].lower().endswith(".csv")]
+        matched_any = False
+        for cp in csv_fresh:
+            with cp.open("r", encoding="utf-8-sig", newline="") as fh:
+                n_data = max(sum(1 for _ in csv.reader(fh)) - 1, 0)
+            if n_data == expected_query_rows:
+                matched_any = True
+                break
+        if not matched_any:
+            invariant_violations.append(
+                f"SQLite/query row-count check: no fresh output matched expected_query_rows={expected_query_rows}"
+            )
+
+    # Gate 7: Independent Numeric Cross-Check (recomputes raw rows/means/SD/OLS R^2/group eta^2 independently)
+    summary_fresh = work_dir / "analysis_summary.json"
+    if executed and exit_code == 0 and (input_csv or input_db) and "analysis_summary.json" in fresh_rel_set:
+        crosscheck_rep = crosscheck_summary(
+            summary_fresh,
+            input_csv=input_csv,
+            input_db=input_db,
+            tolerance=crosscheck_tol,
+            expected_query_rows=expected_query_rows,
+        )
+        if not crosscheck_rep["ok"]:
+            for mm in crosscheck_rep.get("mismatches") or []:
+                invariant_violations.append(f"Gate7_CrossCheck: {mm}")
+    else:
+        crosscheck_rep = {
+            "ok": True,
+            "skipped": True,
+            "reason": "no fresh analysis_summary.json or no --input-csv/--db supplied",
+            "tolerance": crosscheck_tol,
+            "checks_total": 0,
+            "checks_passed": 0,
+            "max_rel_err": None,
+            "mismatches": [],
+        }
+
+    crosscheck_ok = bool(crosscheck_rep.get("ok", True))
     failure_class = _classify_failure(
         static_audit=static_audit,
         env_audit=env_audit,
@@ -341,6 +429,7 @@ def run_isolated(
         invariant_violations=invariant_violations,
         fresh_count=len(fresh_artifacts),
         min_artifacts=min_artifacts,
+        crosscheck_ok=crosscheck_ok,
     )
 
     all_ok = (
@@ -351,6 +440,7 @@ def run_isolated(
         and exit_code == 0
         and len(fresh_artifacts) >= min_artifacts
         and len(invariant_violations) == 0
+        and crosscheck_ok
     )
 
     status = "ok" if all_ok else ("timeout" if timed_out else "stale_or_failed")
@@ -385,6 +475,13 @@ def run_isolated(
             encoding="utf-8",
         )
 
+    if crosscheck_rep.get("skipped"):
+        g7_detail = "skipped (no summary+input)"
+    else:
+        g7_err = crosscheck_rep.get("max_rel_err")
+        err_str = f"{g7_err:.2e}" if isinstance(g7_err, (int, float)) else "n/a"
+        g7_detail = f"{crosscheck_rep['checks_passed']}/{crosscheck_rep['checks_total']} max_err={err_str}"
+
     gates = [
         ("1. Static Contract", static_audit["ok"], f"blockers={static_audit['blocker_count']} warn={static_audit['warning_count']}"),
         ("2. Offline Env Lock", env_audit["ok"], f"gaps={len(env_audit['offline_dependency_gaps'])}"),
@@ -392,6 +489,7 @@ def run_isolated(
         ("4. Fresh Artifacts", len(fresh_artifacts) >= min_artifacts, f"fresh={len(fresh_artifacts)} stale={len(unchanged_preexisting_files)}"),
         ("5. Numeric Invariants", len(invariant_violations) == 0, f"violations={len(invariant_violations)}"),
         ("6. Anti-Stale Guard", all_ok, "verified" if all_ok else "stale_or_failed_locked"),
+        ("7. Numeric Cross-Check", crosscheck_ok, g7_detail),
     ]
 
     svg_p = out_dir / f"{stem}_gate_summary.svg"
@@ -406,7 +504,7 @@ def run_isolated(
         "failure_classification": failure_class,
         "script": script_abs.name,
         "script_sha256": script_sha,
-        "command": [Path(cmd[0]).name] + cmd[1:],
+        "command": _sanitize_cmd_for_report(cmd),
         "seed": seed,
         "timeout_s": timeout_s,
         "environment_lock": {
@@ -435,6 +533,14 @@ def run_isolated(
             "stale_preexisting_files_flagged": [] if all_ok else [f["rel"] for f in unchanged_preexisting_files],
         },
         "invariant_violations": invariant_violations,
+        "numeric_crosscheck": {
+            k: v for k, v in crosscheck_rep.items() if k != "comparisons"
+        } | {"checks_sample": (crosscheck_rep.get("comparisons") or [])[:12]},
+        "sqlite_audit": {
+            "db": input_db.name if input_db else None,
+            "immutability_verified": (db_sha_before is not None and len([v for v in invariant_violations if "SQLite SHA-256 mutated" in v]) == 0) if input_db else None,
+            "expected_query_rows": expected_query_rows,
+        },
         "visual_artifacts": {
             "svg": svg_p.name,
             "matplotlib_png_generated": png_ok,
@@ -457,6 +563,7 @@ def run_isolated(
         f"- **Exit Code**: `{exit_code}` | **Elapsed**: `{elapsed_s}s` | **Seed**: `{seed}`",
         f"- **Script SHA-256**: `{script_sha[:16]}...` | **Env Fingerprint**: `{env_audit['environment_fingerprint_sha256'][:16]}...`",
         f"- **Fresh Artifacts**: `{len(fresh_artifacts)}` | **Stale Pre-existing Files**: `{len(unchanged_preexisting_files)}` | **Invariant Violations**: `{len(invariant_violations)}`",
+        f"- **Gate 7 Numeric Cross-Check**: `{'PASS' if crosscheck_ok else 'FAIL'}` ({g7_detail})",
         f"- **Visuals**: `{svg_p.name}` (Matplotlib PNG: `{png_p.name if png_ok else 'not_installed'}`)",
         "",
         "## Gate Summary",
@@ -487,8 +594,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stem", default="exec_verification", help="Filename prefix for generated verification reports.")
     parser.add_argument("--seed", type=int, default=42, help="Deterministic PYTHONHASHSEED value.")
     parser.add_argument("--timeout", type=int, default=120, help="Subprocess timeout in seconds.")
-    parser.add_argument("--input-csv", default=None, help="Optional input CSV for leading-zero contract check.")
+    parser.add_argument("--input-csv", default=None, help="Optional input CSV for leading-zero contract & Gate 7 numeric cross-check.")
+    parser.add_argument("--db", default=None, help="Optional input SQLite DB for read-only immutability & Gate 7 cross-check.")
     parser.add_argument("--expected-rows", type=int, default=None, help="Optional expected row count for generated CSV outputs.")
+    parser.add_argument("--expected-query-rows", type=int, default=None, help="Optional expected row count for SQLite query/joined outputs.")
     parser.add_argument("--min-artifacts", type=int, default=1, help="Minimum number of fresh artifacts expected.")
     parser.add_argument("--strict-static", action="store_true", help="Treat static warnings as blockers.")
     parser.add_argument("script_args", nargs="*", help="Optional extra arguments passed to the target script after '--'.")
@@ -502,7 +611,9 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         timeout_s=args.timeout,
         input_csv=Path(args.input_csv) if args.input_csv else None,
+        input_db=Path(args.db) if args.db else None,
         expected_rows=args.expected_rows,
+        expected_query_rows=args.expected_query_rows,
         min_artifacts=args.min_artifacts,
         script_args=args.script_args,
         allow_static_warnings=not args.strict_static,
@@ -517,6 +628,8 @@ def main(argv: list[str] | None = None) -> int:
                 "fresh_artifacts": len(rep["snapshot_audit"]["fresh_artifacts"]),
                 "stale_preexisting_files": len(rep["snapshot_audit"]["stale_preexisting_files_flagged"]),
                 "invariant_violations": len(rep["invariant_violations"]),
+                "numeric_crosscheck_ok": rep["numeric_crosscheck"]["ok"],
+                "numeric_crosscheck_max_rel_err": rep["numeric_crosscheck"]["max_rel_err"],
                 "svg": rep["visual_artifacts"]["svg"],
                 "png": rep["visual_artifacts"]["png"],
             },

@@ -198,16 +198,16 @@ python3 "$SCRIPTS/case_contract_sealer.py" discover --input-dir /input --out /ap
 python3 "$SCRIPTS/result_guard.py" --init --case-id "<CASE_ID>" --task-id "challenge-c0e1e220"
 python3 "$SCRIPTS/block_indexer.py" --scan /input --out /app/work/input_blocks.json
 
-# Run assumption_diagnostics.py and inference_effect_ci_runner.py (independent/paired/correlation/contingency/ols_regression) ...
+# Run zero-manual end-to-end orchestrator (auto-discovers /input CSV/SQLite + task.md + case.json,
+# routes independent / ols_regression / contingency automatically, and seals result.json):
+python3 "$SCRIPTS/auto_stats_orchestrator.py" \
+  --input-dir /input \
+  --out-dir /app/output \
+  --stem stats_report
+
+# Or run modular assumption_diagnostics.py + inference_effect_ci_runner.py explicitly for custom contrasts ...
 
 python3 "$SCRIPTS/budget_guard.py" --tick "finalize"
-python3 "$SCRIPTS/case_contract_sealer.py" seal \
-  --case-json /input/case.json \
-  --result-json /app/output/result.json \
-  --task-id "challenge-c0e1e220" \
-  --status ok \
-  --payload-json /app/output/stats_report.json \
-  --artifacts "stats_report.json,stats_report.md,stats_report_plot.svg,reproduce_stats.py"
 python3 "$SCRIPTS/result_guard.py" --path /app/output/result.json --validate
 python3 "$SCRIPTS/gap_gate.py" --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
 python3 "$SCRIPTS/final_audit.py" --dir /app/output --result-file result.json --require stats_report.json --require stats_report.md

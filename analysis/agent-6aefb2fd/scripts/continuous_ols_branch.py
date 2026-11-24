@@ -107,14 +107,36 @@ def _invert_matrix(mat: list[list[float]]) -> list[list[float]] | None:
     return [row[n:] for row in aug]
 
 
-def infer_column_roles(intake: dict[str, Any], *, group_col: str | None = None, value_col: str | None = None) -> dict[str, Any]:
-    """Automatically infer group_comparison vs continuous_multivariate mode from intake profile."""
+def infer_column_roles(
+    intake: dict[str, Any],
+    *,
+    group_col: str | None = None,
+    value_col: str | None = None,
+    task_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Infer group_comparison vs continuous_multivariate mode with explicit evidence; fail closed on ambiguity."""
     cols = intake.get("columns") or []
     col_names = [c["column"] for c in cols]
-    if group_col and value_col:
-        return {"mode": "group_comparison", "group_col": group_col, "value_col": value_col, "x_cols": [], "inferred": False}
+    ctx = task_context or {}
+    t_cands = list(ctx.get("target_candidates") or [])
+    g_cands = list(ctx.get("group_candidates") or [])
+    p_cands = list(ctx.get("predictor_candidates") or [])
+    mentions = dict(ctx.get("mentions") or {})
 
-    group_hints = ("species", "cultivar", "group", "treatment", "cohort", "condition", "class", "category", "arm")
+    evidence: dict[str, Any] = {"target": None, "group": None, "predictors": [], "ambiguity_checked": True}
+
+    if group_col and value_col:
+        evidence["group"] = {"column": group_col, "source": "cli_explicit", "anchor": "--group-col"}
+        evidence["target"] = {"column": value_col, "source": "cli_explicit", "anchor": "--target-col/--value-col"}
+        return {
+            "mode": "group_comparison",
+            "group_col": group_col,
+            "value_col": value_col,
+            "x_cols": [],
+            "inferred": False,
+            "column_role_evidence": evidence,
+        }
+
     cat_candidates = [
         c for c in cols
         if (not c["is_numeric_continuous"])
@@ -122,27 +144,136 @@ def infer_column_roles(intake: dict[str, Any], *, group_col: str | None = None, 
         and 2 <= int(c["unique_count"]) <= 12
         and (not c["column"].lower().endswith("_id"))
     ]
-    # Prefer named categorical columns over coded integers
-    named_cats = [c for c in cat_candidates if not c["coded_categorical_integer"]]
-    hinted_cats = [c for c in cat_candidates if any(h in c["column"].lower() for h in group_hints)]
+    cat_names = [c["column"] for c in cat_candidates]
+    named_cats = [c["column"] for c in cat_candidates if not c["coded_categorical_integer"]]
     num_cont = [
         c["column"] for c in cols
         if c["is_numeric_continuous"] and (not c["column"].lower().endswith("_id")) and c["column"].lower() != "mix_id"
     ]
 
-    if group_col and group_col in col_names and num_cont:
-        target_y = value_col if (value_col and value_col in col_names) else num_cont[-1]
-        return {"mode": "group_comparison", "group_col": group_col, "value_col": target_y, "x_cols": [], "inferred": True}
+    # 1. Resolve target (value_col) strictly via CLI -> task.md/case.json -> single continuous column (NEVER blind num_cont[-1]!)
+    chosen_target: str | None = None
+    if value_col and value_col in col_names:
+        chosen_target = value_col
+        evidence["target"] = {"column": chosen_target, "source": "cli_explicit", "anchor": "--target-col/--value-col"}
+    else:
+        valid_t = [tc for tc in t_cands if tc["column"] in num_cont]
+        unique_t_cols = list(dict.fromkeys(tc["column"] for tc in valid_t))
+        if len(unique_t_cols) == 1:
+            tc0 = valid_t[0]
+            chosen_target = tc0["column"]
+            evidence["target"] = {
+                "column": chosen_target,
+                "source": "task_context_explicit",
+                "anchor": tc0["anchor"],
+                "reason": tc0.get("reason", "task_md"),
+            }
+        elif len(unique_t_cols) == 0:
+            # Check if exactly one continuous column is mentioned in task.md
+            mentioned_num = [c for c in num_cont if c in mentions]
+            if len(mentioned_num) == 1:
+                c0 = mentioned_num[0]
+                chosen_target = c0
+                evidence["target"] = {
+                    "column": c0,
+                    "source": "task_context_unique_mention",
+                    "anchor": mentions[c0][0]["anchor"],
+                    "reason": "only_continuous_column_referenced_in_task",
+                }
+            elif len(num_cont) == 1:
+                chosen_target = num_cont[0]
+                evidence["target"] = {
+                    "column": chosen_target,
+                    "source": "single_continuous_candidate_schema",
+                    "anchor": "schema_unique",
+                    "reason": "only_one_continuous_column_in_table",
+                }
 
-    if (named_cats or hinted_cats) and num_cont:
-        chosen_g = (hinted_cats[0] if hinted_cats else named_cats[0])["column"]
-        target_y = value_col if (value_col and value_col in col_names) else num_cont[-1]
-        return {"mode": "group_comparison", "group_col": chosen_g, "value_col": target_y, "x_cols": [], "inferred": True}
+    if chosen_target is None:
+        raise ValueError(
+            "Ambiguous target column: multiple continuous numeric candidates exist "
+            f"({num_cont}) and neither CLI (--target-col/--value-col) nor task.md/case.json uniquely specifies the outcome column. "
+            "Refusing silent fallback to last column; pass --target-col <col> (and --group-col <col> if grouped) explicitly."
+        )
 
+    # 2. Resolve group column strictly via CLI -> task.md/case.json -> single non-coded categorical candidate (fail closed on multiple!)
+    chosen_group: str | None = None
+    if group_col and group_col in col_names:
+        chosen_group = group_col
+        evidence["group"] = {"column": chosen_group, "source": "cli_explicit", "anchor": "--group-col"}
+    else:
+        valid_g = [gc for gc in g_cands if gc["column"] in cat_names]
+        unique_g_cols = list(dict.fromkeys(gc["column"] for gc in valid_g))
+        if len(unique_g_cols) == 1:
+            gc0 = valid_g[0]
+            chosen_group = gc0["column"]
+            evidence["group"] = {
+                "column": chosen_group,
+                "source": "task_context_explicit",
+                "anchor": gc0["anchor"],
+                "reason": gc0.get("reason", "task_md"),
+            }
+        elif len(unique_g_cols) > 1:
+            raise ValueError(
+                f"Ambiguous group column: multiple grouping candidates referenced ({unique_g_cols}). "
+                "Pass --group-col <col> explicitly."
+            )
+        elif cat_names:
+            mentioned_cats = [c for c in cat_names if c in mentions]
+            if len(mentioned_cats) == 1:
+                cg0 = mentioned_cats[0]
+                chosen_group = cg0
+                evidence["group"] = {
+                    "column": cg0,
+                    "source": "task_context_unique_mention",
+                    "anchor": mentions[cg0][0]["anchor"],
+                    "reason": "only_categorical_column_referenced_in_task",
+                }
+            elif len(named_cats) == 1 and not p_cands:
+                chosen_group = named_cats[0]
+                evidence["group"] = {
+                    "column": chosen_group,
+                    "source": "single_categorical_candidate_schema",
+                    "anchor": "schema_unique",
+                    "reason": "only_one_named_categorical_column_in_table",
+                }
+            elif len(named_cats) > 1 and not p_cands:
+                raise ValueError(
+                    f"Ambiguous group column: multiple categorical candidates exist ({named_cats}) "
+                    "and neither CLI (--group-col) nor task.md uniquely specifies one. Pass --group-col <col> explicitly."
+                )
+
+    if chosen_group is not None:
+        return {
+            "mode": "group_comparison",
+            "group_col": chosen_group,
+            "value_col": chosen_target,
+            "x_cols": [],
+            "inferred": True,
+            "column_role_evidence": evidence,
+        }
+
+    # 3. Continuous multivariate branch
     if len(num_cont) >= 2:
-        target_y = value_col if (value_col and value_col in num_cont) else num_cont[-1]
-        x_cols = [c for c in num_cont if c != target_y]
-        return {"mode": "continuous_multivariate", "group_col": None, "value_col": target_y, "x_cols": x_cols, "inferred": True}
+        x_cols = [c for c in num_cont if c != chosen_target]
+        pred_anchors = {pc["column"]: pc["anchor"] for pc in p_cands}
+        evidence["predictors"] = [
+            {
+                "column": xc,
+                "source": "task_context_explicit" if xc in pred_anchors else "schema_remaining_continuous",
+                "anchor": pred_anchors.get(xc, "schema_continuous"),
+            }
+            for xc in x_cols
+        ]
+        evidence["group"] = {"column": None, "source": "continuous_multivariate_no_group_column", "anchor": "schema_check"}
+        return {
+            "mode": "continuous_multivariate",
+            "group_col": None,
+            "value_col": chosen_target,
+            "x_cols": x_cols,
+            "inferred": True,
+            "column_role_evidence": evidence,
+        }
 
     raise ValueError(f"Cannot automatically infer analysis roles from columns: {col_names}")
 

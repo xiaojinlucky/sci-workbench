@@ -20,10 +20,9 @@
 1. **格式与物理尺寸**：
    - 纯标准库环境必产可编辑矢量 `<stem>.svg`（含明确 `width="...mm" height="...mm"` 与完整 `viewBox`）；
    - 安装 Matplotlib 时同步产出 `300 dpi` `<stem>.png`、可编辑字体 `<stem>.pdf`（`pdf.fonttype=42`）与 `<stem>.svg`（`svg.fonttype="none"`），三者共享同一物理尺寸与同一组 `actual_ylim`。
-2. **源到图逐项对账（`<stem>_audit.json`）**：
-   - 核对 `source_to_visual_reconciliation.reconciled == true`；
-   - 核对 `plotted_points_count == clean_source_points`；
-   - 核对 `points_clipped_outside_ylim == 0` 且 `all_error_bars_within_ylim == true`。
-3. **视觉读回与诚实边界**：
-   - 在支持读图的宿主环境中打开导出 PNG/SVG 核查标签防重叠、标题居中、图例净距与信息密度；
-   - 在纯终端无视觉读回能力的离线容器中，如实记录“已完成确定性几何、对账与 WCAG/CVD 校验，但未执行人工/视觉模型目检”，不伪造视觉目检通过。
+2. **源到图逐项回读对账（`<stem>_audit.json`）**：
+   - 核对 `source_to_visual_reconciliation.reconciled == true` 与 `readback_ok == true`；
+   - 核对 `readback_method` 为落盘 SVG 几何/文本二次反解（禁止硬编码 `max_abs_diff == 0.0`），且实测 `max_abs_diff <= readback_tolerance`；
+   - 核对 `plotted_points_count == clean_source_points`、`points_clipped_outside_ylim == 0` 且 `all_error_bars_within_ylim == true`。
+3. **视觉读回、降级与诚实边界**：
+   - 有 Matplotlib 时记录 `export_tier: "matplotlib_300dpi_png_pdf_svg"`；无 Matplotlib 时记录 `export_tier: "stdlib_vector_svg_fallback"` 并自动向 `result.json` 的 `gaps` 与 `uncertainty` 写入降级记录（`status: "partial_with_gaps"`），绝不留 `gaps: []` 掩盖缺口。

@@ -298,13 +298,30 @@ def _stdlib_shapiro_francia(values: list[float]) -> tuple[float, float, str]:
     den_x = sum((xi - m) ** 2 for xi in xs)
     w_prime = (num * num) / max(den_m * den_x, 1e-30)
     w_prime = max(0.0, min(1.0, w_prime))
-    if n < 5:
-        # For n=3,4 exact Shapiro-Francia/Wilk approximation via skewness/order ratio
+    if n == 3:
+        # Exact analytical Shapiro-Wilk (1965) CDF for n=3: W in [0.75, 1.0]
+        if w_prime <= 0.75:
+            return w_prime, 0.0, "stdlib_shapiro_wilk_exact_n3"
         if w_prime >= 0.999999:
-            return w_prime, 1.0, "stdlib_shapiro_francia_small_n"
-        # Conservative monotone mapping for n=3..4 calibrated to Shapiro criticals
-        p_approx = max(0.0, min(1.0, (w_prime - 0.75) / 0.25))
-        return w_prime, p_approx, "stdlib_shapiro_francia_small_n"
+            return w_prime, 1.0, "stdlib_shapiro_wilk_exact_n3"
+        p_exact = (6.0 / math.pi) * (math.asin(math.sqrt(w_prime)) - math.asin(math.sqrt(0.75)))
+        return w_prime, max(0.0, min(1.0, p_exact)), "stdlib_shapiro_wilk_exact_n3"
+    if n == 4:
+        # Royston (1995) AS R94 tabulated Shapiro-Wilk critical quantiles for n=4
+        q_table = [
+            (0.6870, 0.01), (0.7190, 0.02), (0.7480, 0.05), (0.7920, 0.10),
+            (0.8580, 0.25), (0.9350, 0.50), (0.9720, 0.75), (0.9870, 0.90),
+            (0.9920, 0.95), (0.9970, 0.99),
+        ]
+        if w_prime <= q_table[0][0]:
+            return w_prime, 0.005, "stdlib_shapiro_royston1995_table_n4"
+        if w_prime >= q_table[-1][0]:
+            return w_prime, 0.995, "stdlib_shapiro_royston1995_table_n4"
+        for (w0, p0), (w1, p1) in zip(q_table, q_table[1:]):
+            if w0 <= w_prime <= w1:
+                frac = (w_prime - w0) / max(w1 - w0, 1e-12)
+                return w_prime, p0 + frac * (p1 - p0), "stdlib_shapiro_royston1995_table_n4"
+        return w_prime, 0.5, "stdlib_shapiro_royston1995_table_n4"
     u = math.log(n)
     v_log = math.log(u) - u
     mu = -1.2725 + 1.0521 * v_log

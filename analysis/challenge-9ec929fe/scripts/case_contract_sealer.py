@@ -10,9 +10,86 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_HOST_ABS_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/][^\s'\"<>|]+|/(?:mnt/[a-zA-Z]|home|Users|root|tmp|var)/[^\s'\"<>|]+)"
+)
+
+
+def _sanitize_host_paths(obj: Any) -> Any:
+    """Recursively scrub local host absolute paths to relative basenames while preserving /input and /app paths."""
+    if isinstance(obj, str):
+        if obj.startswith(("/input/", "/app/", "/skills/")):
+            return obj
+        def _repl(m: re.Match[str]) -> str:
+            token = m.group(0)
+            parts = re.split(r"[\\/]", token.rstrip("\\/"))
+            return parts[-1] if parts else token
+        return _HOST_ABS_PATH_RE.sub(_repl, obj)
+    if isinstance(obj, list):
+        return [_sanitize_host_paths(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _sanitize_host_paths(v) for k, v in obj.items()}
+    return obj
+
+
+def _collect_payload_diagnostics(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Auto-harvest honest uncertainty and gaps from runner & scientific analysis payloads."""
+    auto_unc: list[str] = []
+    auto_gaps: list[str] = []
+    if not isinstance(payload, dict):
+        return auto_unc, auto_gaps
+
+    env_lock = payload.get("environment_lock") or {}
+    for g in env_lock.get("offline_dependency_gaps") or []:
+        mod = g.get("module") if isinstance(g, dict) else str(g)
+        auto_gaps.append(f"Offline dependency gap: {mod}")
+    avail_pkgs = env_lock.get("available_scientific_packages")
+    if isinstance(avail_pkgs, list) and len(avail_pkgs) == 0:
+        auto_unc.append(
+            "Offline sandbox has no third-party scientific packages (numpy/pandas/scipy/matplotlib); executed verified pure-stdlib statistical & SVG pipeline."
+        )
+
+    st = payload.get("static_audit") or {}
+    for w in st.get("warnings") or []:
+        auto_unc.append(f"Static audit warning: {w}")
+    for b in st.get("blockers") or []:
+        auto_gaps.append(f"Static audit blocker: {b}")
+
+    for v in payload.get("invariant_violations") or []:
+        auto_gaps.append(f"Invariant violation: {v}")
+
+    for g in payload.get("gaps") or []:
+        if isinstance(g, dict):
+            code = g.get("code", "GAP")
+            detail = g.get("detail") or g.get("message") or str(g)
+            auto_gaps.append(f"[{code}] {detail}")
+        else:
+            auto_gaps.append(str(g))
+
+    for u in payload.get("uncertainty") or []:
+        auto_unc.append(str(u))
+
+    nc = payload.get("numeric_crosscheck") or {}
+    if isinstance(nc, dict) and not nc.get("skipped", True):
+        for mm in nc.get("mismatches") or []:
+            auto_gaps.append(f"Numeric cross-check mismatch: {mm}")
+
+    sci = payload.get("scientific_analysis") or payload
+    if isinstance(sci, dict):
+        for dw in sci.get("diagnostics_warnings") or []:
+            auto_unc.append(str(dw))
+        for subkey in ("regression_ols", "group_comparison"):
+            sub = sci.get(subkey)
+            if isinstance(sub, dict):
+                for dw in sub.get("diagnostics_warnings") or []:
+                    auto_unc.append(str(dw))
+
+    return list(dict.fromkeys(auto_unc)), list(dict.fromkeys(auto_gaps))
 
 DATA_EXTS = {".csv", ".tsv", ".json", ".jsonl"}
 DB_EXTS = {".sqlite", ".sqlite3", ".db"}
@@ -144,6 +221,7 @@ def seal_result_contract(
     uncertainty: list[str] | None = None,
     gaps: list[str] | None = None,
     change_records: list[str] | None = None,
+    fresh: bool = False,
 ) -> dict[str, Any]:
     """Merge analysis outputs and seal result.json with case_id and all case.json output_contract fields."""
     case_obj: dict[str, Any] = {}
@@ -153,7 +231,7 @@ def seal_result_contract(
     contract_fields = extract_contract_fields(case_obj)
 
     existing: dict[str, Any] = {}
-    if result_json_path.is_file():
+    if not fresh and result_json_path.is_file():
         try:
             existing = json.loads(result_json_path.read_text(encoding="utf-8-sig"))
         except Exception:
@@ -163,34 +241,62 @@ def seal_result_contract(
     if payload_path and payload_path.is_file():
         payload = json.loads(payload_path.read_text(encoding="utf-8-sig"))
 
-    merged = dict(existing)
+    auto_unc, auto_gaps = _collect_payload_diagnostics(payload)
+
+    merged = {} if fresh else dict(existing)
     merged["case_id"] = case_id
     merged["task_id"] = task_id
     merged["status"] = status
     merged["sealed_at_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    merged["artifacts"] = sorted(set(list(merged.get("artifacts") or []) + list(artifacts or [])))
-    merged["sources"] = sorted(set(list(merged.get("sources") or []) + list(sources or [])))
-    merged["uncertainty"] = list(dict.fromkeys(list(merged.get("uncertainty") or []) + list(uncertainty or [])))
-    merged["gaps"] = list(dict.fromkeys(list(merged.get("gaps") or []) + list(gaps or [])))
-    merged["change_records"] = list(dict.fromkeys(list(merged.get("change_records") or []) + list(change_records or [])))
+    merged["artifacts"] = sorted(set(([] if fresh else list(merged.get("artifacts") or [])) + list(artifacts or [])))
+    merged["sources"] = sorted(set(([] if fresh else list(merged.get("sources") or [])) + list(sources or [])))
+    merged["uncertainty"] = list(dict.fromkeys(([] if fresh else list(merged.get("uncertainty") or [])) + list(uncertainty or []) + auto_unc))
+    merged["gaps"] = list(dict.fromkeys(([] if fresh else list(merged.get("gaps") or [])) + list(gaps or []) + auto_gaps))
+    merged["change_records"] = list(dict.fromkeys(([] if fresh else list(merged.get("change_records") or [])) + list(change_records or [])))
 
     if payload:
         merged["analysis_summary"] = payload
-        # Promote matching keys directly if requested by output_contract
+        # Promote matching keys directly if requested by output_contract (always refresh from current payload)
         for f in contract_fields:
-            if f in payload and f not in merged:
+            if f in payload and payload[f] is not None:
                 merged[f] = payload[f]
 
     # Ensure every output_contract field is explicitly populated (honestly marked if absent)
     contract_backfilled: list[str] = []
+    sci_block = payload.get("scientific_analysis") if isinstance(payload, dict) else None
+    compact_results = (
+        {
+            "execution_status": payload.get("status"),
+            "gates_passed": payload.get("ok"),
+            "scientific_analysis": sci_block,
+            "numeric_crosscheck": payload.get("numeric_crosscheck"),
+        }
+        if sci_block
+        else (payload or merged.get("analysis_summary") or {})
+    )
+    compact_metrics = (
+        payload.get("metrics")
+        or (sci_block.get("key_metrics") if isinstance(sci_block, dict) else None)
+        or (sci_block.get("regression_ols") if isinstance(sci_block, dict) else None)
+        or (sci_block.get("group_comparison") if isinstance(sci_block, dict) else None)
+        or payload.get("omnibus_test")
+        or payload.get("row_accounting")
+        or payload
+    )
     alias_map = {
-        "result": payload or merged.get("analysis_summary") or {},
-        "results": payload or merged.get("analysis_summary") or {},
-        "summary": payload or merged.get("analysis_summary") or {},
-        "metrics": payload.get("metrics") or payload.get("omnibus_test") or payload.get("row_accounting") or payload,
-        "findings": merged.get("findings") or [f"Completed {task_id} for {case_id} with status={status}."],
+        "result": compact_results,
+        "results": compact_results,
+        "summary": compact_results,
+        "metrics": compact_metrics,
+        "findings": merged.get("findings") or (payload.get("findings") if isinstance(payload, dict) else None) or [f"Completed {task_id} for {case_id} with status={status}."],
         "evidence": merged["sources"],
-        "provenance": {"sources": merged["sources"], "artifacts": merged["artifacts"]},
+        "provenance": {
+            "sources": merged["sources"],
+            "artifacts": merged["artifacts"],
+            "script_sha256": payload.get("script_sha256") if isinstance(payload, dict) else None,
+            "environment_fingerprint_sha256": (payload.get("environment_lock") or {}).get("fingerprint_sha256") if isinstance(payload, dict) else None,
+            "seed": payload.get("seed") if isinstance(payload, dict) else None,
+        },
         "warnings": merged["uncertainty"],
         "limitations": merged["uncertainty"],
         "errors": merged["gaps"],
@@ -214,11 +320,14 @@ def seal_result_contract(
         "backfilled_fields": contract_backfilled,
     }
 
+    # Scrub any host absolute paths before sealing to disk
+    merged = _sanitize_host_paths(merged)
+
     result_json_path.parent.mkdir(parents=True, exist_ok=True)
     result_json_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return {
         "ok": bool(merged["output_contract_verification"]["all_present"]),
-        "result_json": str(result_json_path),
+        "result_json": result_json_path.name,
         "case_id": case_id,
         "status": status,
         "contract_fields_verified": contract_fields,
@@ -238,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
     p_seal.add_argument("--case-json", default=None, help="Path to /input/case.json.")
     p_seal.add_argument("--result-json", required=True, help="Path to /app/output/result.json.")
     p_seal.add_argument("--task-id", required=True, help="Challenge/task identifier.")
-    p_seal.add_argument("--status", default="ok", choices=["ok", "partial", "error"], help="Honest execution status.")
+    p_seal.add_argument("--status", default="ok", choices=["ok", "partial", "partial_with_gaps", "error"], help="Honest execution status.")
     p_seal.add_argument("--payload-json", default=None, help="Optional analysis JSON artifact to link/promote.")
     p_seal.add_argument("--artifacts", default="", help="Comma-separated output artifact filenames.")
     p_seal.add_argument("--sources", default="", help="Comma-separated input source identifiers.")

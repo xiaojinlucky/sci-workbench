@@ -31,10 +31,10 @@ Run `dataset_intake_profiler.py` (or Stage 1 inside `multistep_pipeline_engine.p
 - Auto-discover `/input` files via `case_contract_sealer.py discover` (or `--input-dir /input`), reading `/input/case.json`, `task.md`, and any delivered data dictionary before choosing columns.
 - Load CSV/JSON/SQLite strictly read-only (`file:<db>?mode=ro`) as raw strings so leading zeros (`0001`, `00123`) are preserved verbatim.
 - Record raw input SHA-256, row/column dimensions, exact duplicate count, missingness rates, zero-variance columns, and IQR outlier counts.
-- **Automatic Column-Role & Mode Routing (`infer_column_roles`)**:
-  - When `--group-col` and `--value-col` are omitted, automatically inspect schema and cardinality:
-  - Tables with a non-ID categorical grouping column (`2 <= unique <= 12`, e.g., Iris `species`, Wine `cultivar_name`) route to `group_comparison`.
-  - Purely continuous multivariable tables without natural groups (e.g., UCI Concrete 1030) automatically route to `continuous_multivariate` (descriptive summaries + Pearson/Spearman correlation matrix + pure-stdlib multivariable OLS regression with 95% CIs, F-test, and Jarque-Bera residual diagnostics + Observed-vs-Predicted SVG plot).
+- **Automatic Column-Role & Mode Routing (`infer_column_roles` with Fail-Closed Ambiguity Guard)**:
+  - Before choosing columns, parse `task.md`, `case.json`, and any discovered data dictionary/workorder, recording explicit `column_role_evidence` with `task.md#L<n>` line anchors and extracted units.
+  - Never silently fall back to the last numeric column (`num_cont[-1]`): if multiple continuous or grouping candidates exist and neither CLI (`--target-col`/`--value-col`, `--group-col`) nor `task.md`/`case.json` uniquely specifies the role, **fail loudly at `S1_intake`** requesting explicit CLI parameters.
+  - Purely continuous multivariable tables without natural groups (e.g., UCI Concrete 1030 with explicit target in `task.md`) route to `continuous_multivariate` (descriptive summaries + Pearson/Spearman + pure-stdlib multivariable OLS + Observed-vs-Predicted SVG).
 - **Coded-Integer Blocker**: Automatically detect low-cardinality integer identifier/category columns (`cultivar_code`, `species_code`, `status`, `batch_id`). **Refuse** to run continuous mean/ANOVA aggregation on a coded categorical column unless overridden by an explicit data dictionary.
 - Persist `<stem>_s1_intake.json` + SHA-256 into `<stem>_checkpoint.json`.
 
@@ -42,8 +42,10 @@ Run `dataset_intake_profiler.py` (or Stage 1 inside `multistep_pipeline_engine.p
 - Apply explicit, ordered cleaning steps recorded in `<stem>_s2_ledger.json`:
   1. `raw_intake_snapshot` (immutable raw count)
   2. `deduplicate_exact` (keep earliest occurrence, log exact dropped count)
-  3. `filter_missing_analysis_fields` (explicitly drop missing/sentinel/unparseable rows on the active analysis columns; **zero silent imputation**, `imputation_performed: false`)
-- Verify row conservation (`rows_raw == rows_cleaned + exact_duplicates + excluded_missing_or_unparseable`) and persist `<stem>_s2_cleaned.csv` + `<stem>_s2_ledger.json` + SHA-256.
+  3. `audit_primary_key_near_duplicates` (flag same-PK records with differing non-key values for manual review without silent overwrite)
+  4. `filter_missing_analysis_fields` (explicitly drop missing/sentinel/unparseable rows on active analysis columns; **zero silent imputation**, `imputation_performed: false`)
+  5. `audit_iqr_outliers` (compute 1.5x IQR fences per active numeric column and record explicit retention/flagging policy for Stage 3 robust routing)
+- Verify row conservation and persist `<stem>_s2_cleaned.csv` + `<stem>_s2_ledger.json` + SHA-256.
 
 ### Stage 3 (`S3_stats`) — Assumption-Verified Statistical Inference
 - Inspect every group before selecting an inference method:
@@ -64,11 +66,12 @@ Run `dataset_intake_profiler.py` (or Stage 1 inside `multistep_pipeline_engine.p
 - When Matplotlib is installed, simultaneously export 300 dpi `.png` and editable vector `.pdf` (`pdf.fonttype=42`, `bbox_inches=None`).
 - Persist chart files + `<stem>_s4_viz_audit.json` + SHA-256.
 
-### Stage 5 (`S5_report`) — Single-Source Backfill & Reconciliation
+### Stage 5 (`S5_report`) & Stage 6 (`S6_seal`) — Single-Source Backfill, Contract Sealing & Verified Resume
 - Re-read `<stem>_s2_cleaned.csv` from disk and verify exact numeric identity across `disk_cleaned_rows == stats.rows_analyzed == ledger.rows_cleaned`.
 - Populate `<stem>.md` **exclusively** from persisted `S1..S4` JSON metrics (zero manual prose re-typing that could drift from tables/charts).
-- Present findings in **Result -> Methodological Context -> Boundary** order using clean domain language (no internal variable/filter-branch leakage and no bloated boilerplate disclaimers; state only limits that genuinely affect interpretation).
+- Present findings in **Result -> Methodological Context -> Boundary** order using clean domain language.
 - Emit linear imperative reproduction script `reproduce_<stem>.py` and `<stem>_reconciliation.json`.
+- Seal `/app/output/result.json` in **`S6_seal`** and record its SHA-256 + `S3_stats` payload SHA-256 in `<stem>_checkpoint.json`. On `--resume`, if `result.json` is missing or modified on disk, `S6_seal` automatically re-runs and restores a verified contract. `case_contract_sealer.py` marks `all_present: true` **only** when every required `output_contract` field holds substantive non-placeholder content (placeholders/empty dicts set `all_present: false` and log explicit gaps).
 
 ---
 

@@ -168,11 +168,11 @@ def seal_result_contract(
     merged["task_id"] = task_id
     merged["status"] = status
     merged["sealed_at_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    merged["artifacts"] = sorted(set(list(merged.get("artifacts") or []) + list(artifacts or [])))
-    merged["sources"] = sorted(set(list(merged.get("sources") or []) + list(sources or [])))
-    merged["uncertainty"] = list(dict.fromkeys(list(merged.get("uncertainty") or []) + list(uncertainty or [])))
-    merged["gaps"] = list(dict.fromkeys(list(merged.get("gaps") or []) + list(gaps or [])))
-    merged["change_records"] = list(dict.fromkeys(list(merged.get("change_records") or []) + list(change_records or [])))
+    merged["artifacts"] = sorted(set(list(artifacts or []))) if artifacts is not None else sorted(set(list(merged.get("artifacts") or [])))
+    merged["sources"] = sorted(set(list(sources or []))) if sources is not None else sorted(set(list(merged.get("sources") or [])))
+    merged["uncertainty"] = list(dict.fromkeys(list(uncertainty or []))) if uncertainty is not None else list(dict.fromkeys(list(merged.get("uncertainty") or [])))
+    merged["gaps"] = list(dict.fromkeys(list(gaps or []))) if gaps is not None else list(dict.fromkeys(list(merged.get("gaps") or [])))
+    merged["change_records"] = list(dict.fromkeys(list(change_records or []))) if change_records is not None else list(dict.fromkeys(list(merged.get("change_records") or [])))
 
     if payload:
         merged["analysis_summary"] = payload

@@ -202,9 +202,26 @@ def audit_script_contract(
     has_explicit_seed = "PYTHONHASHSEED" in src
     stochastic_lines: list[int] = []
     groupby_lines: list[int] = []
+    groupby_variants: list[tuple[int, str]] = []
+    sql_groupby_lines: list[int] = []
     has_dedup_check = False
     checkpoint_count = 0
     has_data_io = False
+
+    def _call_chain_contains_groupby(expr: ast.AST) -> bool:
+        cur: ast.AST | None = expr
+        while cur is not None:
+            if isinstance(cur, ast.Call):
+                if isinstance(cur.func, ast.Attribute) and cur.func.attr == "groupby":
+                    return True
+                cur = cur.func
+            elif isinstance(cur, ast.Attribute):
+                cur = cur.value
+            elif isinstance(cur, ast.Subscript):
+                cur = cur.value
+            else:
+                break
+        return False
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -215,7 +232,7 @@ def audit_script_contract(
             if node.module.split(".")[0] == "sqlite3":
                 sqlite_imported = True
 
-        # String literal checks for host paths and SQL write statements
+        # String literal checks for host paths, SQL write statements, and SQL GROUP BY
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             val = node.value
             ln = int(getattr(node, "lineno", 1))
@@ -236,6 +253,21 @@ def audit_script_contract(
                     "SQLite write/DDL statement detected in string literal.",
                     "Open input SQLite databases strictly read-only (file:<db>?mode=ro) and write derived outputs to /app/work.",
                 )
+            if sqlite_imported and re.search(r"\bGROUP\s+BY\b", val, re.IGNORECASE):
+                sql_groupby_lines.append(ln)
+            if re.search(r"\bSELECT\s+DISTINCT\b", val, re.IGNORECASE):
+                has_dedup_check = True
+
+        # f-string SQL GROUP BY detection
+        if isinstance(node, ast.JoinedStr) and sqlite_imported:
+            joined_txt = "".join(
+                part.value for part in node.values if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            )
+            ln = int(getattr(node, "lineno", 1))
+            if re.search(r"\bGROUP\s+BY\b", joined_txt, re.IGNORECASE):
+                sql_groupby_lines.append(ln)
+            if re.search(r"\bSELECT\s+DISTINCT\b", joined_txt, re.IGNORECASE):
+                has_dedup_check = True
 
         # Swallowed exception handlers
         if isinstance(node, ast.ExceptHandler) and _is_swallowed_handler(node):
@@ -258,6 +290,12 @@ def audit_script_contract(
                 checkpoint_count += 1
             if node.attr in {"drop_duplicates", "duplicated", "is_unique"}:
                 has_dedup_check = True
+
+        # Stdlib deduplication variable/set awareness (seen = set(), exact_dups_removed, etc.)
+        if isinstance(node, ast.Name) and node.id.lower() in {
+            "seen", "seen_keys", "seen_rows", "dups_removed", "exact_dups_removed", "dedup_rows", "unique_keys"
+        }:
+            has_dedup_check = True
 
         if isinstance(node, ast.Call):
             ln = int(getattr(node, "lineno", 1))
@@ -366,9 +404,12 @@ def audit_script_contract(
                 uses_stochastic = True
                 stochastic_lines.append(ln)
 
-            # Groupby deduplication awareness
+            # Groupby deduplication awareness (including .transform / .filter / .agg / .apply / .pipe chains)
             if func_name == "groupby":
                 groupby_lines.append(ln)
+            elif func_name in {"transform", "filter", "agg", "aggregate", "apply", "pipe"} and isinstance(node.func, ast.Attribute):
+                if _call_chain_contains_groupby(node.func.value):
+                    groupby_variants.append((ln, func_name))
 
     # Post-walk checks
     if uses_stochastic and not has_explicit_seed:
@@ -390,14 +431,32 @@ def audit_script_contract(
                 "Open input scientific SQLite snapshots with sqlite3.connect(f'file:{db}?mode=ro', uri=True) to guarantee zero mutation.",
             )
 
-    if groupby_lines and not has_dedup_check and "set(" not in src and "distinct" not in src.lower():
-        add_finding(
-            "CONTRACT_UNCHECKED_GROUPBY",
-            "WARNING",
-            groupby_lines[0],
-            "groupby() aggregation detected without an explicit duplicate-row or primary-key uniqueness check.",
-            "Verify exact duplicates and primary-key uniqueness before aggregating, and log pre/post row counts.",
-        )
+    if (groupby_lines or groupby_variants or sql_groupby_lines) and not has_dedup_check and "set(" not in src and "distinct" not in src.lower():
+        if groupby_variants:
+            ln0, var_name = groupby_variants[0]
+            add_finding(
+                "CONTRACT_UNCHECKED_GROUPBY",
+                "WARNING",
+                ln0,
+                f"groupby().{var_name}() aggregation detected without an explicit duplicate-row or primary-key uniqueness check.",
+                "Verify exact duplicates and primary-key uniqueness (drop_duplicates / set / DISTINCT) before groupby transform/filter/agg, and log pre/post row counts.",
+            )
+        elif groupby_lines:
+            add_finding(
+                "CONTRACT_UNCHECKED_GROUPBY",
+                "WARNING",
+                groupby_lines[0],
+                "groupby() aggregation detected without an explicit duplicate-row or primary-key uniqueness check.",
+                "Verify exact duplicates and primary-key uniqueness before aggregating, and log pre/post row counts.",
+            )
+        elif sql_groupby_lines:
+            add_finding(
+                "CONTRACT_UNCHECKED_GROUPBY",
+                "WARNING",
+                sql_groupby_lines[0],
+                "SQL GROUP BY query detected without visible primary-key cardinality or DISTINCT deduplication verification.",
+                "Pre-aggregate 1:N child tables or check COUNT(*) vs COUNT(DISTINCT key) before joining/grouping.",
+            )
 
     if has_data_io and len(lines) >= 20 and checkpoint_count == 0:
         add_finding(

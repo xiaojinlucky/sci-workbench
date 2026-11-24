@@ -31,7 +31,14 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from dataset_intake_profiler import _MISSING_TOKENS, _quantile_sorted, load_records_ro, profile_loaded
+from dataset_intake_profiler import (
+    _MISSING_TOKENS,
+    _quantile_sorted,
+    audit_primary_key_near_duplicates,
+    load_records_ro,
+    parse_task_and_dictionary_context,
+    profile_loaded,
+)
 
 try:
     from scipy import stats as _SCIPY_STATS
@@ -46,7 +53,7 @@ except Exception:
     _PLT = None
 
 CELL_PALETTE = ["#547FA3", "#D77C70", "#4E9187", "#D19A45", "#967A9C", "#66A9B4"]
-STAGES = ("S1_intake", "S2_clean", "S3_stats", "S4_viz", "S5_report")
+STAGES = ("S1_intake", "S2_clean", "S3_stats", "S4_viz", "S5_report", "S6_seal")
 
 
 def _now_iso() -> str:
@@ -469,9 +476,12 @@ def _load_or_init_checkpoint(cp_path: Path, case_id: str, input_sha: str, group_
             and old.get("value_col") == value_col
         ):
             old["resume_invocations"] = int(old.get("resume_invocations", 0)) + 1
+            old.setdefault("stages", {})
+            for st in STAGES:
+                old["stages"].setdefault(st, {"status": "PENDING", "artifacts": {}, "error": None})
             return old
     return {
-        "schema_version": "2.1",
+        "schema_version": "2.2",
         "case_id": case_id,
         "input_sha256": input_sha,
         "group_col": group_col,
@@ -509,8 +519,10 @@ def run_multistep_pipeline(
     resume: bool = False,
     fail_at_stage: str | None = None,
     case_json_path: Path | None = None,
+    task_md_path: Path | None = None,
+    dictionary_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
-    """Execute 5-stage checkpointed pipeline (auto-routing grouped vs continuous-multivariate)."""
+    """Execute 6-stage checkpointed pipeline (S1_intake..S6_seal) with explicit role evidence and verified resume."""
     from continuous_ols_branch import infer_column_roles, render_ols_svg, run_continuous_multivariate_stats
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -528,11 +540,12 @@ def run_multistep_pipeline(
         if fail_at_stage == stage:
             raise RuntimeError(f"Simulated interruption injected at {stage} before artifact persistence")
 
-    # ---- Stage 1: Read-Only Intake Profiling & Auto Role Inference ----
+    # ---- Stage 1: Read-Only Intake Profiling & Evidence-Backed Role Inference ----
     s1_file = out_dir / f"{stem}_s1_intake.json"
     if resume and _stage_verified_on_disk(cp, "S1_intake", out_dir):
         intake = json.loads(s1_file.read_text(encoding="utf-8"))
         roles = intake.get("inferred_roles") or {"mode": "group_comparison", "group_col": group_col, "value_col": value_col, "x_cols": []}
+        task_ctx = intake.get("task_context") or {}
         resumed_stages.append("S1_intake")
     else:
         cp["stages"]["S1_intake"] = {"status": "RUNNING", "started_at": _now_iso(), "artifacts": {}, "error": None}
@@ -549,8 +562,16 @@ def run_multistep_pipeline(
                 raise ValueError(
                     f"Refused continuous aggregation on coded categorical integer column {value_col!r}; confirm field dictionary."
                 )
-            roles = infer_column_roles(intake, group_col=group_col, value_col=value_col)
+            task_ctx = parse_task_and_dictionary_context(
+                loaded["columns"],
+                task_md_path=task_md_path,
+                case_json_path=case_json_path,
+                dictionary_paths=dictionary_paths,
+            )
+            roles = infer_column_roles(intake, group_col=group_col, value_col=value_col, task_context=task_ctx)
+            intake["task_context"] = task_ctx
             intake["inferred_roles"] = roles
+            intake["column_role_evidence"] = roles.get("column_role_evidence") or {}
             sha1 = _write_json(s1_file, intake)
             cp["stages"]["S1_intake"].update({"status": "COMPLETED", "completed_at": _now_iso(), "artifacts": {s1_file.name: sha1}})
             executed_stages.append("S1_intake")
@@ -567,8 +588,10 @@ def run_multistep_pipeline(
     eff_x_cols = list(roles.get("x_cols") or [])
     group_col = eff_group_col
     value_col = eff_value_col
+    if not unit and isinstance(task_ctx.get("units"), dict) and eff_value_col in task_ctx["units"]:
+        unit = str(task_ctx["units"][eff_value_col])
 
-    # ---- Stage 2: Rule-Logged Non-Silent Cleaning ----
+    # ---- Stage 2: Rule-Logged Non-Silent Cleaning + IQR Outlier & PK Near-Dup Audit ----
     s2_csv = out_dir / f"{stem}_s2_cleaned.csv"
     s2_ledger = out_dir / f"{stem}_s2_ledger.json"
     if resume and _stage_verified_on_disk(cp, "S2_clean", out_dir):
@@ -583,6 +606,8 @@ def run_multistep_pipeline(
             maybe_inject_fail("S2_clean")
             loaded = load_records_ro(input_path, table=table)
             cols, raw_rows = loaded["columns"], loaded["rows"]
+            wo_rules = (task_ctx.get("workorder_rules") or {})
+            active_missing_tokens = set(_MISSING_TOKENS) | {str(t).lower() for t in (wo_rules.get("extra_sentinel_tokens") or [])}
             ledger: list[dict[str, Any]] = []
             ledger.append({"step": "raw_intake_snapshot", "rows_before": len(raw_rows), "rows_after": len(raw_rows), "affected": 0, "rule": "read-only string load preserving leading zeros"})
 
@@ -596,13 +621,27 @@ def run_multistep_pipeline(
                 dedup_rows.append(r)
             ledger.append({"step": "deduplicate_exact", "rows_before": len(raw_rows), "rows_after": len(dedup_rows), "affected": len(raw_rows) - len(dedup_rows), "rule": "drop exact duplicate rows keeping first occurrence"})
 
+            # Audit same-PK near-duplicates (same primary key, differing non-key values)
+            pk_near_dup_audit = audit_primary_key_near_duplicates(
+                dedup_rows,
+                cols,
+                explicit_pk=list(wo_rules.get("primary_key") or []),
+            )
+            ledger.append({
+                "step": "audit_primary_key_near_duplicates",
+                "rows_before": len(dedup_rows),
+                "rows_after": len(dedup_rows),
+                "affected": int(pk_near_dup_audit.get("total_conflicting_rows", 0)),
+                "rule": f"PK near-duplicate audit on {pk_near_dup_audit.get('pk_columns') or 'none'}: decision={pk_near_dup_audit.get('decision')}",
+            })
+
             cleaned_rows = []
             excluded_rows: list[dict[str, Any]] = []
             req_num_cols = ([eff_value_col] + eff_x_cols) if analysis_mode == "continuous_multivariate" else [eff_value_col]
             for idx, r in enumerate(dedup_rows, start=2):
                 if analysis_mode == "group_comparison":
                     gv = r.get(eff_group_col, "").strip()  # type: ignore[arg-type]
-                    if gv.lower() in _MISSING_TOKENS:
+                    if gv.lower() in active_missing_tokens:
                         excluded_rows.append({"row_index": idx, "reason": "missing_group", "group": gv})
                         continue
                 clean_r = dict(r)
@@ -611,7 +650,7 @@ def run_multistep_pipeline(
                 bad_num = False
                 for nc in req_num_cols:
                     rv = r.get(nc, "").strip()
-                    if rv.lower() in _MISSING_TOKENS:
+                    if rv.lower() in active_missing_tokens:
                         excluded_rows.append({"row_index": idx, "reason": f"missing_or_sentinel:{nc}", "value_raw": rv})
                         bad_num = True
                         break
@@ -637,6 +676,43 @@ def run_multistep_pipeline(
             if not cleaned_rows:
                 raise ValueError("Zero valid rows remain after explicit missing/numeric filtering")
 
+            # Explicit IQR outlier decision ledger (retain & flag for robust S3 routing rather than silent trimming)
+            iqr_outlier_audit: list[dict[str, Any]] = []
+            total_iqr_flagged = 0
+            for nc in req_num_cols:
+                vals_idx = [(row_i, float(r[nc])) for row_i, r in enumerate(cleaned_rows, start=2)]
+                svals = sorted(v for _, v in vals_idx)
+                q1 = _quantile_sorted(svals, 0.25)
+                q3 = _quantile_sorted(svals, 0.75)
+                iqr = q3 - q1
+                lo_f = q1 - 1.5 * iqr
+                hi_f = q3 + 1.5 * iqr
+                outliers = [(ri, v) for ri, v in vals_idx if iqr > 0 and (v < lo_f or v > hi_f)]
+                total_iqr_flagged += len(outliers)
+                iqr_outlier_audit.append({
+                    "column": nc,
+                    "q1": round(q1, 6),
+                    "q3": round(q3, 6),
+                    "iqr": round(iqr, 6),
+                    "fence_low": round(lo_f, 6),
+                    "fence_high": round(hi_f, 6),
+                    "outlier_count": len(outliers),
+                    "outlier_row_samples": [{"row_index": ri, "value": round(v, 6)} for ri, v in outliers[:10]],
+                    "decision": "retained_and_flagged_with_robust_inference",
+                    "rationale": (
+                        "Extreme values retained without silent trimming; Stage 3 assumption check routes non-normal or heavy-tailed groups to Kruskal-Wallis / Mann-Whitney U / Cliff's delta."
+                        if outliers
+                        else "No observations outside 1.5*IQR fences."
+                    ),
+                })
+            ledger.append({
+                "step": "audit_iqr_outliers",
+                "rows_before": len(cleaned_rows),
+                "rows_after": len(cleaned_rows),
+                "affected": total_iqr_flagged,
+                "rule": "IQR 1.5x outlier audit across active numeric columns; policy=retained_and_flagged_with_robust_inference (zero silent winsorization/dropping)",
+            })
+
             with s2_csv.open("w", encoding="utf-8", newline="") as fh:
                 w = csv.DictWriter(fh, fieldnames=cols)
                 w.writeheader()
@@ -646,6 +722,9 @@ def run_multistep_pipeline(
                 "rows_raw": len(raw_rows),
                 "rows_cleaned": len(cleaned_rows),
                 "imputation_performed": False,
+                "workorder_rules_applied": wo_rules,
+                "iqr_outlier_audit": iqr_outlier_audit,
+                "primary_key_near_duplicate_audit": pk_near_dup_audit,
                 "steps": ledger,
                 "excluded_records": excluded_rows[:50],
             }
@@ -875,172 +954,218 @@ def run_multistep_pipeline(
     s5_md = out_dir / f"{stem}.md"
     s5_rec = out_dir / f"{stem}_reconciliation.json"
     s5_repro = out_dir / f"reproduce_{stem}.py"
-    cp["stages"]["S5_report"] = {"status": "RUNNING", "started_at": _now_iso(), "artifacts": {}, "error": None}
-    save_cp()
-    try:
-        maybe_inject_fail("S5_report")
-        with s2_csv.open("r", encoding="utf-8") as fh:
-            disk_rows = list(csv.DictReader(fh))
-        row_match = len(disk_rows) == stats_obj["rows_analyzed"] == ledger_obj["rows_cleaned"]
-        rec_obj = {
-            "ok": bool(row_match and viz_audit.get("value_range_covered")),
-            "analysis_mode": analysis_mode,
-            "disk_cleaned_rows": len(disk_rows),
-            "stats_rows_analyzed": stats_obj["rows_analyzed"],
-            "ledger_rows_cleaned": ledger_obj["rows_cleaned"],
-            "row_counts_reconciled": row_match,
-            "viz_range_covered": bool(viz_audit.get("value_range_covered")),
-            "resumed_stages": resumed_stages,
-            "executed_stages": executed_stages + ["S5_report"],
-            "input_sha256": input_sha,
-        }
-
-        if analysis_mode == "continuous_multivariate":
-            ols = stats_obj["ols_model"]
-            md = [
-                f"# Multi-Step Scientific Analysis Report: Multivariable Regression of {eff_value_col}",
-                "",
-                "## 1. Key Findings & Statistical Scope",
-                "",
-                f"- Source dataset: `{intake['source_file']}` (SHA-256 `{input_sha[:16]}...`, raw rows: **{intake['rows_raw']}**, analyzed rows: **{stats_obj['rows_analyzed']}**; auto-routed to `continuous_multivariate` with zero silent imputation).",
-                f"- OLS fit: **R^2 = {ols['r_squared']}**, **Adj. R^2 = {ols['adj_r_squared']}**, F({ols['df_model']}, {ols['df_resid']}) = {ols['f_statistic']} (`p={ols['f_p_value']}`), RMSE = {ols['rmse']}, residual Jarque-Bera `p={ols['jarque_bera_p']}`.",
-                f"- Visualization artifact: `{s4_svg.name}` (`{viz_audit['width_mm']} x {viz_audit['height_mm']} mm`).",
-                "- Interpretation boundary: Regression coefficients capture conditional linear associations within the observed covariate range and do not establish causality.",
-                "",
-                "## 2. Data Cleaning Audit Ledger (Single-Source)",
-                "",
-                "| Step | Rows Before | Rows After | Affected | Rule |",
-                "| --- | ---: | ---: | ---: | --- |",
-            ]
-            for st in ledger_obj["steps"]:
-                md.append(f"| `{st['step']}` | {st['rows_before']} | {st['rows_after']} | {st['affected']} | {st['rule']} |")
-            md.extend(["", "## 3. Bivariate Correlations with Outcome", "", "| Predictor | Pearson r | Pearson p | Spearman rho | Spearman p |", "| --- | ---: | ---: | ---: | ---: |"])
-            for cr in stats_obj["correlations"]:
-                md.append(f"| `{cr['predictor']}` | {cr['pearson_r']} | {cr['pearson_p']} | {cr['spearman_rho']} | {cr['spearman_p']} |")
-            md.extend(["", "## 4. Multivariable OLS Coefficients", "", "| Term | Estimate | SE | 95% CI | t | p-value |", "| --- | ---: | ---: | --- | ---: | ---: |"])
-            for cf in ols["coefficients"]:
-                md.append(f"| `{cf['term']}` | {cf['estimate']} | {cf['se']} | {cf['ci95']} | {cf['t_stat']} | {cf['p_value']} |")
-        else:
-            omni = stats_obj["omnibus_test"]
-            md = [
-                f"# Multi-Step Scientific Analysis Report: {value_col} by {group_col}",
-                "",
-                "## 1. Key Findings & Statistical Scope",
-                "",
-                f"- Source dataset: `{intake['source_file']}` (SHA-256 `{input_sha[:16]}...`, raw rows: **{intake['rows_raw']}**, analyzed rows: **{stats_obj['rows_analyzed']}**; zero silent imputation).",
-                f"- Selected statistical route: `{omni.get('route')}` -> omnibus `{omni.get('test')}` (`stat={omni.get('statistic')}`, `p={omni.get('p_value')}`)",
-                f"- Visualization artifact: `{s4_svg.name}` (`{viz_audit['width_mm']} x {viz_audit['height_mm']} mm`, full range covered: `{viz_audit['value_range_covered']}`).",
-                "- Interpretation boundary: Observed group differences reflect distributional shifts within this dataset; observational or unrandomized comparisons do not by themselves establish causality.",
-                "",
-                "## 2. Data Cleaning Audit Ledger (Single-Source)",
-                "",
-                "| Step | Rows Before | Rows After | Affected | Rule |",
-                "| --- | ---: | ---: | ---: | --- |",
-            ]
-            for st in ledger_obj["steps"]:
-                md.append(f"| `{st['step']}` | {st['rows_before']} | {st['rows_after']} | {st['affected']} | {st['rule']} |")
-            md.extend(["", "## 3. Group Descriptive Summary", "", "| Group | n | Mean | SD | 95% CI | Median | IQR |", "| --- | ---: | ---: | ---: | --- | ---: | ---: |"])
-            for d in stats_obj["descriptive"]:
-                md.append(f"| {d['group']} | {d['n']} | {d['mean']} | {d['sd']} | [{d['ci95_low']}, {d['ci95_high']}] | {d['median']} | {d['iqr']} |")
-            md.extend(["", "## 4. Pairwise Comparisons (Holm-Bonferroni Adjusted)", "", "| Pair | Test | Mean Diff | Hodges-Lehmann Shift | Hedges' g | Cliff's delta | p_raw | p_holm |", "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"])
-            for pw in stats_obj["pairwise_comparisons"]:
-                md.append(f"| {pw['pair']} | {pw['test']} | {pw['diff_mean']} | {pw['hodges_lehmann_median_shift']} | {pw['hedges_g']} | {pw['cliffs_delta']} | {pw['p_raw']} | {pw['p_holm']} |")
-
-        if stats_obj.get("assumption_warnings"):
-            md.extend(["", "## 5. Assumption Diagnostics & Methodological Limits", ""])
-            for w in stats_obj["assumption_warnings"]:
-                md.append(f"- {w}")
-
-        md.extend([
-            "",
-            "## 6. Stage Checkpoint & Reconciliation Provenance",
-            "",
-            f"- Row count reconciliation across cleaned CSV, ledger, and stats JSON: **{'PASS' if row_match else 'FAIL'}**",
-            f"- Stages reused from verified disk checkpoints: `{resumed_stages}` | Stages executed this run: `{executed_stages + ['S5_report']}`",
-        ])
-        s5_md.write_text("\n".join(md) + "\n", encoding="utf-8")
-
-        repro_args = [f'"--input", str(INPUT_FILE)', f'"--out-dir", str(OUT_DIR)', f'"--stem", "{stem}"']
-        if group_col:
-            repro_args.append(f'"--group-col", "{group_col}"')
-        if value_col:
-            repro_args.append(f'"--value-col", "{value_col}"')
-        repro_lines = [
-            "#!/usr/bin/env python3",
-            f'"""Linear reproduction script for multi-step analysis of {input_path.name}."""',
-            "",
-            "import subprocess, sys",
-            "from pathlib import Path",
-            "",
-            f'INPUT_FILE = Path("{input_path.name}")',
-            'OUT_DIR = Path(".")',
-            'SCRIPTS = Path("/skills/weekly-skill/scripts")',
-            "",
-            'cmd = [sys.executable, "-B", str(SCRIPTS / "multistep_pipeline_engine.py"), ' + ", ".join(repro_args) + "]",
-            "subprocess.run(cmd, check=True)",
-        ]
-        s5_repro.write_text("\n".join(repro_lines) + "\n", encoding="utf-8")
-
-        sha_md = _file_sha256(s5_md)
-        sha_rec = _write_json(s5_rec, rec_obj)
-        sha_rep = _file_sha256(s5_repro)
-        cp["stages"]["S5_report"].update({
-            "status": "COMPLETED",
-            "completed_at": _now_iso(),
-            "artifacts": {s5_md.name: sha_md, s5_rec.name: sha_rec, s5_repro.name: sha_rep},
-        })
-        cp["overall_status"] = "COMPLETED" if rec_obj["ok"] else "COMPLETED_WITH_WARNINGS"
+    if resume and _stage_verified_on_disk(cp, "S5_report", out_dir):
+        rec_obj = json.loads(s5_rec.read_text(encoding="utf-8"))
+        resumed_stages.append("S5_report")
+    else:
+        cp["stages"]["S5_report"] = {"status": "RUNNING", "started_at": _now_iso(), "artifacts": {}, "error": None}
         save_cp()
-        executed_stages.append("S5_report")
+        try:
+            maybe_inject_fail("S5_report")
+            with s2_csv.open("r", encoding="utf-8") as fh:
+                disk_rows = list(csv.DictReader(fh))
+            row_match = len(disk_rows) == stats_obj["rows_analyzed"] == ledger_obj["rows_cleaned"]
+            rec_obj = {
+                "ok": bool(row_match and viz_audit.get("value_range_covered")),
+                "analysis_mode": analysis_mode,
+                "disk_cleaned_rows": len(disk_rows),
+                "stats_rows_analyzed": stats_obj["rows_analyzed"],
+                "ledger_rows_cleaned": ledger_obj["rows_cleaned"],
+                "row_counts_reconciled": row_match,
+                "viz_range_covered": bool(viz_audit.get("value_range_covered")),
+                "resumed_stages": resumed_stages,
+                "executed_stages": executed_stages + ["S5_report"],
+                "input_sha256": input_sha,
+            }
+            role_ev = intake.get("column_role_evidence") or roles.get("column_role_evidence") or {}
+            t_ev = role_ev.get("target") or {}
+            g_ev = role_ev.get("group") or {}
 
-        all_arts = [s1_file.name, s2_csv.name, s2_ledger.name, s3_file.name, s4_svg.name, s4_audit.name, s5_md.name, s5_rec.name, s5_repro.name, cp_path.name] + viz_audit.get("matplotlib_exports", [])
-        if case_json_path and case_json_path.is_file():
+            if analysis_mode == "continuous_multivariate":
+                ols = stats_obj["ols_model"]
+                md = [
+                    f"# Multi-Step Scientific Analysis Report: Multivariable Regression of {eff_value_col}",
+                    "",
+                    "## 1. Key Findings & Statistical Scope",
+                    "",
+                    f"- Source dataset: `{intake['source_file']}` (SHA-256 `{input_sha[:16]}...`, raw rows: **{intake['rows_raw']}**, analyzed rows: **{stats_obj['rows_analyzed']}**; auto-routed to `continuous_multivariate` with zero silent imputation).",
+                    f"- Column role evidence: target=`{eff_value_col}` (source: `{t_ev.get('source', 'explicit')}`, anchor: `{t_ev.get('anchor', 'n/a')}`); predictors=`{eff_x_cols}`.",
+                    f"- OLS fit: **R^2 = {ols['r_squared']}**, **Adj. R^2 = {ols['adj_r_squared']}**, F({ols['df_model']}, {ols['df_resid']}) = {ols['f_statistic']} (`p={ols['f_p_value']}`), RMSE = {ols['rmse']}, residual Jarque-Bera `p={ols['jarque_bera_p']}`.",
+                    f"- Visualization artifact: `{s4_svg.name}` (`{viz_audit['width_mm']} x {viz_audit['height_mm']} mm`).",
+                    "- Interpretation boundary: Regression coefficients capture conditional linear associations within the observed covariate range and do not establish causality.",
+                    "",
+                    "## 2. Data Cleaning Audit Ledger (Single-Source)",
+                    "",
+                    "| Step | Rows Before | Rows After | Affected | Rule |",
+                    "| --- | ---: | ---: | ---: | --- |",
+                ]
+                for st in ledger_obj["steps"]:
+                    md.append(f"| `{st['step']}` | {st['rows_before']} | {st['rows_after']} | {st['affected']} | {st['rule']} |")
+                md.extend(["", "## 3. Bivariate Correlations with Outcome", "", "| Predictor | Pearson r | Pearson p | Spearman rho | Spearman p |", "| --- | ---: | ---: | ---: | ---: |"])
+                for cr in stats_obj["correlations"]:
+                    md.append(f"| `{cr['predictor']}` | {cr['pearson_r']} | {cr['pearson_p']} | {cr['spearman_rho']} | {cr['spearman_p']} |")
+                md.extend(["", "## 4. Multivariable OLS Coefficients", "", "| Term | Estimate | SE | 95% CI | t | p-value |", "| --- | ---: | ---: | --- | ---: | ---: |"])
+                for cf in ols["coefficients"]:
+                    md.append(f"| `{cf['term']}` | {cf['estimate']} | {cf['se']} | {cf['ci95']} | {cf['t_stat']} | {cf['p_value']} |")
+            else:
+                omni = stats_obj["omnibus_test"]
+                md = [
+                    f"# Multi-Step Scientific Analysis Report: {value_col} by {group_col}",
+                    "",
+                    "## 1. Key Findings & Statistical Scope",
+                    "",
+                    f"- Source dataset: `{intake['source_file']}` (SHA-256 `{input_sha[:16]}...`, raw rows: **{intake['rows_raw']}**, analyzed rows: **{stats_obj['rows_analyzed']}**; zero silent imputation).",
+                    f"- Column role evidence: target=`{value_col}` (`{t_ev.get('source', 'explicit')}`, anchor `{t_ev.get('anchor', 'n/a')}`), group=`{group_col}` (`{g_ev.get('source', 'explicit')}`, anchor `{g_ev.get('anchor', 'n/a')}`).",
+                    f"- Selected statistical route: `{omni.get('route')}` -> omnibus `{omni.get('test')}` (`stat={omni.get('statistic')}`, `p={omni.get('p_value')}`)",
+                    f"- Visualization artifact: `{s4_svg.name}` (`{viz_audit['width_mm']} x {viz_audit['height_mm']} mm`, full range covered: `{viz_audit['value_range_covered']}`).",
+                    "- Interpretation boundary: Observed group differences reflect distributional shifts within this dataset; observational or unrandomized comparisons do not by themselves establish causality.",
+                    "",
+                    "## 2. Data Cleaning Audit Ledger (Single-Source)",
+                    "",
+                    "| Step | Rows Before | Rows After | Affected | Rule |",
+                    "| --- | ---: | ---: | ---: | --- |",
+                ]
+                for st in ledger_obj["steps"]:
+                    md.append(f"| `{st['step']}` | {st['rows_before']} | {st['rows_after']} | {st['affected']} | {st['rule']} |")
+                md.extend(["", "## 3. Group Descriptive Summary", "", "| Group | n | Mean | SD | 95% CI | Median | IQR |", "| --- | ---: | ---: | ---: | --- | ---: | ---: |"])
+                for d in stats_obj["descriptive"]:
+                    md.append(f"| {d['group']} | {d['n']} | {d['mean']} | {d['sd']} | [{d['ci95_low']}, {d['ci95_high']}] | {d['median']} | {d['iqr']} |")
+                md.extend(["", "## 4. Pairwise Comparisons (Holm-Bonferroni Adjusted)", "", "| Pair | Test | Mean Diff | Hodges-Lehmann Shift | Hedges' g | Cliff's delta | p_raw | p_holm |", "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"])
+                for pw in stats_obj["pairwise_comparisons"]:
+                    md.append(f"| {pw['pair']} | {pw['test']} | {pw['diff_mean']} | {pw['hodges_lehmann_median_shift']} | {pw['hedges_g']} | {pw['cliffs_delta']} | {pw['p_raw']} | {pw['p_holm']} |")
+
+            if stats_obj.get("assumption_warnings"):
+                md.extend(["", "## 5. Assumption Diagnostics & Methodological Limits", ""])
+                for w in stats_obj["assumption_warnings"]:
+                    md.append(f"- {w}")
+
+            md.extend([
+                "",
+                "## 6. Stage Checkpoint & Reconciliation Provenance",
+                "",
+                f"- Row count reconciliation across cleaned CSV, ledger, and stats JSON: **{'PASS' if row_match else 'FAIL'}**",
+                f"- Stages reused from verified disk checkpoints: `{resumed_stages}` | Stages executed this run: `{executed_stages + ['S5_report']}`",
+            ])
+            s5_md.write_text("\n".join(md) + "\n", encoding="utf-8")
+
+            repro_args = [f'"--input", str(INPUT_FILE)', f'"--out-dir", str(OUT_DIR)', f'"--stem", "{stem}"']
+            if group_col:
+                repro_args.append(f'"--group-col", "{group_col}"')
+            if value_col:
+                repro_args.append(f'"--value-col", "{value_col}"')
+            repro_lines = [
+                "#!/usr/bin/env python3",
+                f'"""Linear reproduction script for multi-step analysis of {input_path.name}."""',
+                "",
+                "import subprocess, sys",
+                "from pathlib import Path",
+                "",
+                f'INPUT_FILE = Path("{input_path.name}")',
+                'OUT_DIR = Path(".")',
+                'SCRIPTS = Path("/skills/weekly-skill/scripts")',
+                "",
+                'cmd = [sys.executable, "-B", str(SCRIPTS / "multistep_pipeline_engine.py"), ' + ", ".join(repro_args) + "]",
+                "subprocess.run(cmd, check=True)",
+            ]
+            s5_repro.write_text("\n".join(repro_lines) + "\n", encoding="utf-8")
+
+            sha_md = _file_sha256(s5_md)
+            sha_rec = _write_json(s5_rec, rec_obj)
+            sha_rep = _file_sha256(s5_repro)
+            cp["stages"]["S5_report"].update({
+                "status": "COMPLETED",
+                "completed_at": _now_iso(),
+                "artifacts": {s5_md.name: sha_md, s5_rec.name: sha_rec, s5_repro.name: sha_rep},
+            })
+            executed_stages.append("S5_report")
+            save_cp()
+        except Exception as exc:
+            cp["stages"]["S5_report"].update({"status": "FAILED", "failed_at": _now_iso(), "error": str(exc)})
+            cp["overall_status"] = "FAILED_AT_S5_report"
+            save_cp()
+            return {"ok": False, "failed_stage": "S5_report", "error": str(exc), "checkpoint": cp_path.name}
+
+    # ---- Stage 6: Output Contract Sealing & result.json SHA-256 Checkpoint ----
+    s6_result = out_dir / "result.json"
+    all_arts = [
+        s1_file.name, s2_csv.name, s2_ledger.name, s3_file.name,
+        s4_svg.name, s4_audit.name, s5_md.name, s5_rec.name, s5_repro.name, cp_path.name,
+    ] + viz_audit.get("matplotlib_exports", [])
+    current_s3_sha = _file_sha256(s3_file)
+    s6_prev_payload_sha = (cp.get("stages", {}).get("S6_seal") or {}).get("payload_sha256")
+    if resume and _stage_verified_on_disk(cp, "S6_seal", out_dir) and s6_prev_payload_sha == current_s3_sha:
+        resumed_stages.append("S6_seal")
+        seal_ok = True
+    else:
+        cp["stages"]["S6_seal"] = {"status": "RUNNING", "started_at": _now_iso(), "artifacts": {}, "error": None}
+        save_cp()
+        try:
+            maybe_inject_fail("S6_seal")
             from case_contract_sealer import seal_result_contract
-            seal_result_contract(
-                case_json_path=case_json_path,
-                result_json_path=out_dir / "result.json",
+            unc_notes = list(stats_obj.get("assumption_warnings") or [])
+            if not unc_notes:
+                unc_notes.append("Statistical estimates reflect observed sample scope; observational findings do not imply causality.")
+            seal_rep = seal_result_contract(
+                case_json_path=case_json_path if (case_json_path and case_json_path.is_file()) else None,
+                result_json_path=s6_result,
                 task_id="agent-6aefb2fd",
                 status="ok" if rec_obj["ok"] else "partial",
                 payload_path=s3_file,
                 artifacts=all_arts,
                 sources=[input_path.name],
-                uncertainty=list(stats_obj.get("assumption_warnings") or []),
+                uncertainty=unc_notes,
             )
-    except Exception as exc:
-        cp["stages"]["S5_report"].update({"status": "FAILED", "failed_at": _now_iso(), "error": str(exc)})
-        cp["overall_status"] = "FAILED_AT_S5_report"
-        save_cp()
-        return {"ok": False, "failed_stage": "S5_report", "error": str(exc), "checkpoint": cp_path.name}
+            seal_ok = bool(seal_rep.get("ok"))
+            sha_res = _file_sha256(s6_result)
+            cp["stages"]["S6_seal"].update({
+                "status": "COMPLETED",
+                "completed_at": _now_iso(),
+                "payload_sha256": current_s3_sha,
+                "artifacts": {s6_result.name: sha_res},
+            })
+            cp["overall_status"] = "COMPLETED" if (rec_obj["ok"] and seal_ok) else "COMPLETED_WITH_WARNINGS"
+            executed_stages.append("S6_seal")
+            save_cp()
+        except Exception as exc:
+            cp["stages"]["S6_seal"].update({"status": "FAILED", "failed_at": _now_iso(), "error": str(exc)})
+            cp["overall_status"] = "FAILED_AT_S6_seal"
+            save_cp()
+            return {"ok": False, "failed_stage": "S6_seal", "error": str(exc), "checkpoint": cp_path.name}
 
     return {
-        "ok": bool(rec_obj["ok"]),
+        "ok": bool(rec_obj["ok"] and seal_ok),
         "analysis_mode": analysis_mode,
         "overall_status": cp["overall_status"],
         "checkpoint": cp_path.name,
         "resumed_stages": resumed_stages,
         "executed_stages": executed_stages,
-        "artifacts": all_arts,
+        "result_json": s6_result.name,
+        "result_json_sha256": _file_sha256(s6_result),
+        "artifacts": all_arts + [s6_result.name],
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Checkpointed multi-step scientific data analysis pipeline.")
     parser.add_argument("--input", default=None, help="Path to CSV, JSON, or SQLite input file.")
-    parser.add_argument("--input-dir", default=None, help="Optional /input directory for automatic table and case.json discovery.")
+    parser.add_argument("--input-dir", default=None, help="Optional /input directory for automatic table, task.md, and case.json discovery.")
     parser.add_argument("--table", default=None)
-    parser.add_argument("--group-col", default=None, help="Optional group column (auto-inferred when omitted; continuous-only tables route to OLS).")
-    parser.add_argument("--value-col", default=None, help="Optional outcome/value column (auto-inferred when omitted).")
+    parser.add_argument("--group-col", default=None, help="Optional group column (required if ambiguous without task.md).")
+    parser.add_argument("--value-col", "--target-col", dest="value_col", default=None, help="Optional outcome/target column (required if ambiguous without task.md).")
     parser.add_argument("--unit", default="")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--stem", default="analysis_report")
     parser.add_argument("--case-id", default="case-unknown")
     parser.add_argument("--case-json", default=None, help="Optional /input/case.json path to seal output_contract into result.json.")
-    parser.add_argument("--resume", action="store_true", help="Resume from verified disk checkpoints when input hash matches")
-    parser.add_argument("--fail-at-stage", default=None, choices=list(STAGES), help="Fault injection hook for checkpoint recovery testing")
+    parser.add_argument("--task-md", default=None, help="Optional /input/task.md path for explicit column-role evidence parsing.")
+    parser.add_argument("--resume", action="store_true", help="Resume from verified disk checkpoints when input and artifact hashes match.")
+    parser.add_argument("--fail-at-stage", default=None, choices=list(STAGES), help="Fault injection hook for checkpoint recovery testing.")
     args = parser.parse_args(argv)
 
     in_path = Path(args.input) if args.input else None
     case_json_p = Path(args.case_json) if args.case_json else None
+    task_md_p = Path(args.task_md) if args.task_md else None
+    dict_paths: list[Path] = []
     case_id = args.case_id
     if args.input_dir:
         from case_contract_sealer import discover_input_dir
@@ -1049,6 +1174,11 @@ def main(argv: list[str] | None = None) -> int:
             in_path = Path(disc["primary_table_candidate"])
         if case_json_p is None and disc.get("case_json_found"):
             case_json_p = Path(args.input_dir) / "case.json"
+        if task_md_p is None and disc.get("task_md_found"):
+            task_md_p = Path(args.input_dir) / "task.md"
+        for item in list(disc.get("dictionaries") or []) + list(disc.get("workorders") or []):
+            if item.get("abs"):
+                dict_paths.append(Path(item["abs"]))
         if case_id == "case-unknown" and disc.get("case_id"):
             case_id = disc["case_id"]
     if in_path is None:
@@ -1066,6 +1196,8 @@ def main(argv: list[str] | None = None) -> int:
         resume=args.resume,
         fail_at_stage=args.fail_at_stage,
         case_json_path=case_json_p,
+        task_md_path=task_md_p,
+        dictionary_paths=dict_paths,
     )
     print(json.dumps(rep, indent=2, ensure_ascii=False))
     return 0 if rep.get("ok") else 1

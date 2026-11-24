@@ -42,9 +42,21 @@ CELL_WIDTHS_MM = {
     "cell_1_5col": 114.0,
     "double": 174.0,
     "cell_double": 174.0,
+    "nature_single": 89.0,
+    "nature_double": 183.0,
+    "science_single": 55.0,
+    "science_1_5col": 120.0,
+    "science_double": 180.0,
 }
 
-SUPPORTED_CHARTS = {"bar_with_points", "boxplot_points", "scatter_regression", "line_with_band", "heatmap"}
+SUPPORTED_CHARTS = {
+    "bar_with_points",
+    "boxplot_points",
+    "scatter_regression",
+    "multivariate_ols",
+    "line_with_band",
+    "heatmap",
+}
 BANNED_CHARTS = {"pie", "donut", "3d_bar", "3d_pie", "radar", "spider", "stacked_3d"}
 MISSING_TOKENS = {"", "na", "n/a", "nan", "null", "none", "nd", ".", "-"}
 BACKEND_JARGON_RE = re.compile(
@@ -192,10 +204,15 @@ def advise_and_audit_chart(spec: dict[str, Any], *, base_dir: Path | None = None
         ("time_series", "trajectory"): ["line_with_band"],
         ("bivariate_continuous", "correlation"): ["scatter_regression"],
         ("bivariate_continuous", "relationship"): ["scatter_regression"],
+        ("multivariate_continuous", "multivariable_regression"): ["multivariate_ols"],
+        ("multivariate_continuous", "regression"): ["multivariate_ols"],
         ("matrix", "correlation"): ["heatmap"],
         ("matrix", "pattern"): ["heatmap"],
     }
-    recommended = rec_map.get((data_kind, goal), ["boxplot_points", "bar_with_points", "scatter_regression"])
+    recommended = rec_map.get((data_kind, goal), ["boxplot_points", "bar_with_points", "scatter_regression", "multivariate_ols"])
+    x_cols_spec = [str(c).strip() for c in (spec.get("x_cols") or []) if str(c).strip()]
+    if len(x_cols_spec) >= 2 and requested == "scatter_regression":
+        warnings.append("Multiple predictors specified in x_cols; routing to 'multivariate_ols' is strongly recommended over bivariate scatter_regression.")
     if profile and profile.get("crosses_zero") and requested == "bar_with_points":
         warnings.append(
             "Data contains both negative and positive values; bar_with_points is allowed only with an explicit y=0 "
@@ -213,8 +230,17 @@ def advise_and_audit_chart(spec: dict[str, Any], *, base_dir: Path | None = None
             warnings.append(
                 f"Source table contains {profile['missing_values']} missing value(s); excluded without zero-imputation."
             )
+        if x_cols_spec:
+            missing_x = [c for c in x_cols_spec if c not in profile["columns"]]
+            if missing_x:
+                g1_issues.append(f"MISSING_PREDICTOR_COLUMNS: {missing_x} not found in source table columns.")
+    unit_val = str(spec.get("unit", "")).strip()
+    unit_source = str(spec.get("unit_source", "spec" if unit_val else "unresolved")).strip()
+    if not unit_val and requested != "heatmap":
+        warnings.append("Measurement unit unresolved from task.md or source column schema; must be logged honestly in gaps.")
     if target_surface == "presentation" and not (spec.get("frame_width_mm") and spec.get("frame_height_mm")):
         warnings.append("Presentation surface requested without real picture-frame dimensions; treating layout as precheck only.")
+    blockers.extend(g1_issues)
     gates["gate1_data_fidelity"] = "PASS" if not g1_issues else "BLOCKED"
 
     # Gate 2: Chart Grammar & Anti-Patterns
@@ -245,7 +271,8 @@ def advise_and_audit_chart(spec: dict[str, Any], *, base_dir: Path | None = None
     cmap_name = str(spec.get("colormap", "")).strip()
     mark = "heatmap" if requested == "heatmap" else ("line" if requested == "line_with_band" else ("point" if requested == "scatter_regression" else "bar"))
     n_needed = max(4, profile["n_groups"]) if (profile and profile.get("n_groups")) else 4
-    colors = list(spec.get("palette") or VERIFIED_PALETTES[role][: min(n_needed, len(VERIFIED_PALETTES[role]))])
+    default_pal = VERIFIED_PALETTES[role] if role in {"sequential", "diverging"} else VERIFIED_PALETTES[role][: min(n_needed, len(VERIFIED_PALETTES[role]))]
+    colors = list(spec.get("palette") or default_pal)
     pal_rep = audit_palette(colors, role=role, mark=mark, colormap_name=cmap_name)
     if not pal_rep["ok"]:
         blockers.extend(pal_rep["blockers"])
@@ -279,12 +306,15 @@ def advise_and_audit_chart(spec: dict[str, Any], *, base_dir: Path | None = None
     # PlotAgent A/B/C Fact Sheets
     abc_facts = {
         "A_scientific_invariants": {
-            "source_file": profile.get("file") if profile else str(spec.get("table", "")),
+            "source_file": profile.get("file") if profile else Path(str(spec.get("table", ""))).name,
             "source_sha256": profile.get("sha256") if profile else None,
             "group_col": spec.get("group_col"),
             "x_col": spec.get("x_col", spec.get("group_col")),
+            "x_cols": x_cols_spec or ([spec.get("x_col")] if spec.get("x_col") else []),
             "value_col": spec.get("value_col"),
-            "unit": spec.get("unit", "unspecified"),
+            "unit": unit_val if unit_val else ("dimensionless (Pearson r)" if requested == "heatmap" else "unresolved"),
+            "unit_source": "dimensionless_correlation" if (requested == "heatmap" and not unit_val) else unit_source,
+            "predictor_units": spec.get("predictor_units") or {},
             "missing_policy": "exclude_without_zero_imputation",
             "dedup_policy": "remove_exact_row_duplicates_with_audit",
             "crosses_zero": profile.get("crosses_zero") if profile else None,

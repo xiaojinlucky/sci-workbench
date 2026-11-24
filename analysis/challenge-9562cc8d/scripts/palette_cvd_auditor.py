@@ -215,19 +215,34 @@ def audit_palette(
             else:
                 warnings.append(f"Tritanopia near-collision detected: {cvd_collisions[:3]}")
 
-    # 3. Grayscale luminance profile & monotonicity (for sequential/diverging)
+    # 3. Grayscale luminance profile & monotonicity (explicit boolean for all roles; never null)
     lums = [round(relative_luminance(rgb), 4) for _, rgb in parsed]
-    grayscale_monotonic: bool | None = None
+    inc = all(lums[i] <= lums[i + 1] + 1e-4 for i in range(n - 1)) if n >= 2 else True
+    dec = all(lums[i] >= lums[i + 1] - 1e-4 for i in range(n - 1)) if n >= 2 else True
+    sorted_l = sorted(lums)
+    min_lum_gap = round(min(sorted_l[i + 1] - sorted_l[i] for i in range(n - 1)), 4) if n >= 2 else 1.0
+    grayscale_separable = bool(min_lum_gap >= 0.025) if n >= 2 else True
+    grayscale_profile = "monotonic_ordered"
+
     if role == "sequential" and n >= 3:
-        inc = all(lums[i] <= lums[i + 1] + 1e-4 for i in range(n - 1))
-        dec = all(lums[i] >= lums[i + 1] - 1e-4 for i in range(n - 1))
-        grayscale_monotonic = inc or dec
+        grayscale_monotonic = bool(inc or dec)
+        grayscale_profile = "sequential_monotonic" if grayscale_monotonic else "sequential_non_monotonic"
         if not grayscale_monotonic:
             blockers.append(f"Sequential palette is NOT luminance-monotonic in grayscale (luminances={lums}).")
-    elif role == "qualitative" and n >= 2:
-        sorted_l = sorted(lums)
-        min_lum_gap = min(sorted_l[i + 1] - sorted_l[i] for i in range(n - 1))
-        if min_lum_gap < 0.03 and n <= 4:
+    elif role == "diverging" and n >= 3:
+        mid = n // 2
+        left_inc = all(lums[i] <= lums[i + 1] + 1e-4 for i in range(mid))
+        right_dec = all(lums[i] >= lums[i + 1] - 1e-4 for i in range(mid, n - 1))
+        left_dec = all(lums[i] >= lums[i + 1] - 1e-4 for i in range(mid))
+        right_inc = all(lums[i] <= lums[i + 1] + 1e-4 for i in range(mid, n - 1))
+        grayscale_monotonic = bool((left_inc and right_dec) or (left_dec and right_inc))
+        grayscale_profile = "diverging_symmetric_monotonic" if grayscale_monotonic else "diverging_non_symmetric"
+        if not grayscale_monotonic:
+            warnings.append(f"Diverging palette luminance is not symmetric-monotonic around midpoint (luminances={lums}).")
+    else:
+        grayscale_monotonic = bool(inc or dec)
+        grayscale_profile = "qualitative_luminance_checked"
+        if n >= 2 and min_lum_gap < 0.03 and n <= 4:
             warnings.append(f"Two categorical colors share nearly identical grayscale luminance (min gap={min_lum_gap:.3f}); pair with distinct markers/linestyles or direct labels for grayscale printing.")
 
     return {
@@ -242,6 +257,9 @@ def audit_palette(
         "min_delta_e_cvd": {k: (round(v, 2) if math.isfinite(v) else None) for k, v in min_de_cvd.items()},
         "grayscale_luminances": lums,
         "grayscale_monotonic": grayscale_monotonic,
+        "grayscale_separable": grayscale_separable,
+        "min_grayscale_luminance_gap": min_lum_gap,
+        "grayscale_profile": grayscale_profile,
         "blockers": blockers,
         "warnings": warnings,
         "recommended_fallback": VERIFIED_PALETTES.get(role, VERIFIED_PALETTES["qualitative"]),

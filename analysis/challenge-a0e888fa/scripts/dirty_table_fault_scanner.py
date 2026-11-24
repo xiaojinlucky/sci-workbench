@@ -13,10 +13,12 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import re
 import unicodedata
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +74,8 @@ def parse_numeric_with_unit(raw: str) -> dict[str, Any]:
     num_str = f"{mantissa}e{exp_part}" if exp_part is not None else mantissa
     try:
         val = float(num_str)
-    except ValueError:
+        dec_val = Decimal(num_str)
+    except (ValueError, InvalidOperation):
         return {"parsed": False, "normalized_text": norm, "storage_flags": storage_flags}
     unit_clean = (unit_part or "").strip().replace("µ", "u").replace("μ", "u")
     if unit_part and unit_part != unit_clean:
@@ -80,7 +83,8 @@ def parse_numeric_with_unit(raw: str) -> dict[str, Any]:
     return {
         "parsed": True,
         "value": val,
-        "is_true_zero": val == 0.0,
+        "decimal_str": num_str,
+        "is_true_zero": dec_val == Decimal("0"),
         "inline_unit": unit_clean or None,
         "inline_unit_raw": unit_part or None,
         "normalized_text": norm,
@@ -104,8 +108,7 @@ def detect_encoding_and_read(path: Path) -> dict[str, Any]:
             continue
 
     line_ending = "CRLF" if b"\r\n" in raw_bytes else ("CR" if b"\r" in raw_bytes else "LF")
-    lines = [ln for ln in text.splitlines() if ln.strip() != ""]
-    if not lines:
+    if not text.strip():
         return {
             "sha256": sha256,
             "bytes": len(raw_bytes),
@@ -115,24 +118,36 @@ def detect_encoding_and_read(path: Path) -> dict[str, Any]:
             "delimiter": ",",
             "columns": [],
             "rows": [],
+            "embedded_newline_cells": 0,
         }
 
-    header = lines[0]
+    # Streaming delimiter detection preserving quoted embedded newlines (never text.splitlines())
+    first_nonempty = next((ln for ln in text.splitlines() if ln.strip() != ""), "")
     if path.suffix.lower() == ".tsv":
         delim = "\t"
     else:
-        delim_counts = {d: header.count(d) for d in (",", ";", "\t", "|")}
-        delim = max(delim_counts, key=lambda k: delim_counts[k]) if max(delim_counts.values()) > 0 else ","
+        delim = ","
+        try:
+            dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
+            delim = dialect.delimiter
+        except Exception:
+            delim_counts = {d: first_nonempty.count(d) for d in (",", ";", "\t", "|")}
+            delim = max(delim_counts, key=lambda k: delim_counts[k]) if max(delim_counts.values()) > 0 else ","
 
-    reader = csv.DictReader(text.splitlines(), delimiter=delim)
+    stream = io.StringIO(text, newline="")
+    reader = csv.DictReader(stream, delimiter=delim)
     raw_cols = list(reader.fieldnames or [])
     clean_cols = [c.strip() for c in raw_cols]
     rows: list[dict[str, str]] = []
+    embedded_nl_cells = 0
     for rec in reader:
         # Preserve raw string values verbatim (never implicit int/float coercion)
         if all((v is None or str(v).strip() == "") for v in rec.values()):
             continue
         row_obj = {str(k).strip(): ("" if v is None else str(v)) for k, v in rec.items() if k is not None}
+        for v in row_obj.values():
+            if "\n" in v or "\r" in v:
+                embedded_nl_cells += 1
         if None in rec and rec[None]:
             row_obj["__extra_unmapped_fields__"] = "|".join(str(x) for x in rec[None])
         rows.append(row_obj)
@@ -147,6 +162,7 @@ def detect_encoding_and_read(path: Path) -> dict[str, Any]:
         "columns_raw": raw_cols,
         "columns": clean_cols,
         "header_whitespace_trimmed": raw_cols != clean_cols,
+        "embedded_newline_cells": embedded_nl_cells,
         "rows": rows,
     }
 
@@ -169,13 +185,47 @@ def _build_sentinel_lookup(workorder: dict[str, Any]) -> dict[str, str]:
     return lookup
 
 
-def _resolve_pk_cols(cols: list[str], workorder: dict[str, Any]) -> list[str]:
+def _resolve_pk_cols_with_audit(cols: list[str], workorder: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """Resolve primary key columns without silently dropping missing declared keys."""
     pk = workorder.get("primary_key")
-    if isinstance(pk, list) and pk:
-        return [str(c).strip() for c in pk if str(c).strip() in cols]
-    if isinstance(pk, str) and pk.strip() in cols:
-        return [pk.strip()]
-    return [cols[0]] if cols else []
+    if isinstance(pk, str) and pk.strip():
+        declared = [pk.strip()]
+    elif isinstance(pk, list) and pk:
+        declared = [str(c).strip() for c in pk if str(c).strip()]
+    else:
+        declared = []
+
+    if declared:
+        present = [c for c in declared if c in cols]
+        missing = [c for c in declared if c not in cols]
+        if missing:
+            return present, {
+                "status": "MISSING_DECLARED_PK",
+                "declared_primary_key": declared,
+                "present_primary_key": present,
+                "missing_primary_key_columns": missing,
+                "warning": f"Declared primary_key column(s) missing from table header: {missing}; refusing silent PK shrinkage.",
+            }
+        return present, {
+            "status": "DECLARED_EXACT",
+            "declared_primary_key": declared,
+            "present_primary_key": present,
+            "missing_primary_key_columns": [],
+        }
+
+    fallback = [cols[0]] if cols else []
+    return fallback, {
+        "status": "FALLBACK_FIRST_COLUMN_UNDECLARED",
+        "declared_primary_key": [],
+        "present_primary_key": fallback,
+        "missing_primary_key_columns": [],
+        "warning": "No explicit primary_key declared in workorder; fell back to first column — verify composite key uniqueness.",
+    }
+
+
+def _resolve_pk_cols(cols: list[str], workorder: dict[str, Any]) -> list[str]:
+    pk_cols, _ = _resolve_pk_cols_with_audit(cols, workorder)
+    return pk_cols
 
 
 def _resolve_numeric_targets(cols: list[str], pk_cols: list[str], workorder: dict[str, Any]) -> tuple[list[str], str | None]:
@@ -219,7 +269,7 @@ def scan_dirty_table(path: Path, workorder: dict[str, Any] | None = None) -> dic
     cols = raw_info["columns"]
     rows = raw_info["rows"]
     sentinel_lookup = _build_sentinel_lookup(wo)
-    pk_cols = _resolve_pk_cols(cols, wo)
+    pk_cols, pk_audit = _resolve_pk_cols_with_audit(cols, wo)
     id_cols = [str(c).strip() for c in (wo.get("id_columns_preserve_string") or pk_cols) if str(c).strip() in cols]
     num_cols, metric_col = _resolve_numeric_targets(cols, pk_cols, wo)
     unit_col = str(wo.get("unit_column") or wo.get("unit_col") or "").strip() or None
@@ -424,9 +474,11 @@ def scan_dirty_table(path: Path, workorder: dict[str, Any] | None = None) -> dic
         "line_ending": raw_info["line_ending"],
         "detected_delimiter": raw_info["delimiter"],
         "header_whitespace_trimmed": raw_info["header_whitespace_trimmed"],
+        "embedded_newline_cells": raw_info.get("embedded_newline_cells", 0),
         "rows_total": len(rows),
         "columns": cols,
         "primary_key_columns": pk_cols,
+        "primary_key_audit": pk_audit,
         "numeric_target_columns": num_cols,
         "metric_column": metric_col,
         "unit_column": unit_col,

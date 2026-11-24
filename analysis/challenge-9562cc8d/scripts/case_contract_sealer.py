@@ -10,9 +10,27 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_HOST_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/mnt/[a-z]/|/Users/|/home/[^/]+/|\\\\[^\\]+\\)", re.IGNORECASE)
+
+
+def sanitize_local_paths(obj: Any) -> Any:
+    """Recursively strip host-specific absolute paths, retaining only safe relative basenames."""
+    if isinstance(obj, str):
+        if _HOST_PATH_RE.search(obj) and len(obj) < 600 and "\n" not in obj:
+            norm = obj.replace("\\", "/").rstrip("/")
+            base = norm.rsplit("/", 1)[-1]
+            return base or obj
+        return obj
+    if isinstance(obj, list):
+        return [sanitize_local_paths(x) for x in obj]
+    if isinstance(obj, dict):
+        return {str(k): sanitize_local_paths(v) for k, v in obj.items()}
+    return obj
 
 DATA_EXTS = {".csv", ".tsv", ".json", ".jsonl"}
 DB_EXTS = {".sqlite", ".sqlite3", ".db"}
@@ -171,15 +189,50 @@ def seal_result_contract(
     merged["artifacts"] = sorted(set(list(merged.get("artifacts") or []) + list(artifacts or [])))
     merged["sources"] = sorted(set(list(merged.get("sources") or []) + list(sources or [])))
     merged["uncertainty"] = list(dict.fromkeys(list(merged.get("uncertainty") or []) + list(uncertainty or [])))
-    merged["gaps"] = list(dict.fromkeys(list(merged.get("gaps") or []) + list(gaps or [])))
+    # Support both string and structured dict gaps without duplicate collapse crashes
+    raw_gaps = list(merged.get("gaps") or []) + list(gaps or [])
+    dedup_gaps: list[Any] = []
+    seen_gap_keys: set[str] = set()
+    for g in raw_gaps:
+        gk = json.dumps(g, sort_keys=True, ensure_ascii=False) if isinstance(g, (dict, list)) else str(g)
+        if gk not in seen_gap_keys:
+            seen_gap_keys.add(gk)
+            dedup_gaps.append(g)
+    merged["gaps"] = dedup_gaps
     merged["change_records"] = list(dict.fromkeys(list(merged.get("change_records") or []) + list(change_records or [])))
 
     if payload:
         merged["analysis_summary"] = payload
+        if payload.get("export_tier"):
+            merged["export_tier"] = payload["export_tier"]
         # Promote matching keys directly if requested by output_contract
         for f in contract_fields:
             if f in payload and f not in merged:
                 merged[f] = payload[f]
+
+    # Build rich structured metrics from reconciliation/statistical_tests/descriptive_stats when available
+    recon = payload.get("source_to_visual_reconciliation") if isinstance(payload, dict) else None
+    rich_metrics: dict[str, Any] = {}
+    if isinstance(recon, dict):
+        for mk in (
+            "rows_raw", "exact_duplicates_removed", "missing_excluded", "clean_source_points",
+            "plotted_points_count", "points_clipped_outside_ylim", "max_abs_diff", "readback_method",
+            "readback_elements_verified", "readback_identity_verified", "readback_color_verified",
+            "readback_band_verified", "element_manifest_file", "reconciled",
+            "r_squared", "r_squared_adj", "rmse", "f_stat", "f_p_value", "max_vif",
+            "pearson_r", "ols_slope", "ols_intercept",
+            "coefficients", "vif", "diagnostics", "statistical_tests", "descriptive_stats",
+            "group_summaries", "matrix_cols", "matrix_shape", "matrix_values", "colorbar_range",
+            "sqlite_join_audit", "cultivar_stratified_summary",
+        ):
+            if mk in recon and recon[mk] is not None:
+                rich_metrics[mk] = recon[mk]
+        if payload.get("statistical_tables"):
+            rich_metrics["statistical_tables"] = payload["statistical_tables"]
+        if payload.get("exported_csv_tables"):
+            rich_metrics["exported_csv_tables"] = payload["exported_csv_tables"]
+        if payload.get("export_tier"):
+            rich_metrics["export_tier"] = payload["export_tier"]
 
     # Ensure every output_contract field is explicitly populated (honestly marked if absent)
     contract_backfilled: list[str] = []
@@ -187,10 +240,15 @@ def seal_result_contract(
         "result": payload or merged.get("analysis_summary") or {},
         "results": payload or merged.get("analysis_summary") or {},
         "summary": payload or merged.get("analysis_summary") or {},
-        "metrics": payload.get("metrics") or payload.get("omnibus_test") or payload.get("row_accounting") or payload,
+        "metrics": rich_metrics or payload.get("metrics") or payload.get("omnibus_test") or payload.get("row_accounting") or payload,
         "findings": merged.get("findings") or [f"Completed {task_id} for {case_id} with status={status}."],
         "evidence": merged["sources"],
-        "provenance": {"sources": merged["sources"], "artifacts": merged["artifacts"]},
+        "provenance": {
+            "sources": merged["sources"],
+            "artifacts": merged["artifacts"],
+            "source_sha256": recon.get("source_sha256") if isinstance(recon, dict) else None,
+            "export_tier": payload.get("export_tier") if isinstance(payload, dict) else None,
+        },
         "warnings": merged["uncertainty"],
         "limitations": merged["uncertainty"],
         "errors": merged["gaps"],
@@ -214,11 +272,12 @@ def seal_result_contract(
         "backfilled_fields": contract_backfilled,
     }
 
+    merged = sanitize_local_paths(merged)
     result_json_path.parent.mkdir(parents=True, exist_ok=True)
     result_json_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return {
         "ok": bool(merged["output_contract_verification"]["all_present"]),
-        "result_json": str(result_json_path),
+        "result_json": result_json_path.name,
         "case_id": case_id,
         "status": status,
         "contract_fields_verified": contract_fields,

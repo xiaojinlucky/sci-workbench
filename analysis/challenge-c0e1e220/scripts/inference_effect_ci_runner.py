@@ -184,33 +184,69 @@ def cliffs_delta_and_hodges_lehmann(a: list[float], b: list[float]) -> dict[str,
     else:
         mag = "large"
 
-    # Pairwise differences B - A for Hodges-Lehmann shift & Moses 95% CI
+    # Exact O((na+nb) log(range)) k-th order statistic of all na*nb pairwise differences (b_j - a_i)
+    # Never uses pairwise-difference spread quantiles as a location CI.
+    def _count_le(threshold: float) -> int:
+        # Count pairs (a_i, b_j) with b_j - a_i <= threshold  <=>  a_i >= b_j - threshold
+        cnt = 0
+        ia = 0
+        for bv in b_sorted:
+            target = bv - threshold
+            while ia < na and a_sorted[ia] < target - 1e-15:
+                ia += 1
+            cnt += na - ia
+        return cnt
+
+    def _kth_pair_diff(k_1based: int) -> float:
+        lo = b_sorted[0] - a_sorted[-1]
+        hi = b_sorted[-1] - a_sorted[0]
+        if hi - lo <= 1e-15:
+            return lo
+        for _ in range(70):
+            mid = 0.5 * (lo + hi)
+            if _count_le(mid) >= k_1based:
+                hi = mid
+            else:
+                lo = mid
+            if hi - lo <= 1e-12 * max(1.0, abs(lo), abs(hi)):
+                break
+        return 0.5 * (lo + hi)
+
     exact = total_pairs <= 50000
     if exact:
         diffs = sorted(bv - av for bv in b for av in a)
+        hl = statistics.median(diffs)
     else:
-        rng = random.Random(42)
-        diffs = sorted(b[rng.randrange(nb)] - a[rng.randrange(na)] for _ in range(50000))
+        if total_pairs % 2 == 1:
+            hl = _kth_pair_diff((total_pairs + 1) // 2)
+        else:
+            hl = 0.5 * (_kth_pair_diff(total_pairs // 2) + _kth_pair_diff(total_pairs // 2 + 1))
 
-    hl = statistics.median(diffs)
-    m = len(diffs)
-    if exact and na >= 2 and nb >= 2:
+    # Strict Moses / Mann-Whitney rank-order 95% CI for the Hodges-Lehmann location shift
+    if na >= 2 and nb >= 2:
         z = 1.959963984540054
         sigma_u = math.sqrt(na * nb * (na + nb + 1.0) / 12.0)
-        k_idx = int(math.floor(0.5 * total_pairs - z * sigma_u))
-        k_idx = max(0, min(m - 1, k_idx))
-        hi_idx = max(0, min(m - 1, m - 1 - k_idx))
-        ci_lo, ci_hi = diffs[k_idx], diffs[hi_idx]
-    elif m >= 2:
-        ci_lo = quantile_linear(diffs, 0.025)
-        ci_hi = quantile_linear(diffs, 0.975)
+        # 1-based lower and upper order-statistic indices (matches R wilcox.test normal approx)
+        k_lo_1 = max(1, min(total_pairs, int(math.floor(0.5 * total_pairs - z * sigma_u + 0.5))))
+        k_hi_1 = max(1, min(total_pairs, total_pairs - k_lo_1 + 1))
+        if exact:
+            ci_lo = diffs[k_lo_1 - 1]
+            ci_hi = diffs[k_hi_1 - 1]
+            hl_ci_method = "moses_mann_whitney_order_stat_exact_enumeration"
+        else:
+            ci_lo = _kth_pair_diff(k_lo_1)
+            ci_hi = _kth_pair_diff(k_hi_1)
+            hl_ci_method = "moses_mann_whitney_order_stat_exact_selection_normal_u"
+        ci_out: list[float | None] = [round(ci_lo, 4), round(ci_hi, 4)]
     else:
-        ci_lo, ci_hi = hl, hl
+        ci_out = [None, None]
+        hl_ci_method = "unestimable_small_n"
 
     return {
         "hodges_lehmann_diff": round(hl, 4),
-        "hl_ci95": [round(ci_lo, 4), round(ci_hi, 4)],
-        "hl_exact": exact,
+        "hl_ci95": ci_out,
+        "hl_exact": True,
+        "hl_ci_method": hl_ci_method,
         "cliffs_delta": round(delta, 4),
         "rank_biserial_r": round(delta, 4),
         "cliffs_magnitude": mag,
@@ -1287,6 +1323,18 @@ def run_statistical_report(
                 prim_diff_val = t_res["diff_mean"]
                 prim_ci = t_res["diff_ci95"]
 
+            # Analytic 95% CIs for Hedges' g (Hedges & Olkin 1985) and Cliff's delta (normal approximation)
+            na_g, nb_g = len(a), len(b)
+            hg_ci95: list[float | None] = [None, None]
+            if hg is not None and na_g >= 2 and nb_g >= 2:
+                se_g = math.sqrt((na_g + nb_g) / (na_g * nb_g) + (hg * hg) / (2.0 * (na_g + nb_g)))
+                hg_ci95 = [round(hg - 1.959964 * se_g, 4), round(hg + 1.959964 * se_g, 4)]
+            cd_val = np_eff["cliffs_delta"]
+            cd_ci95: list[float | None] = [None, None]
+            if cd_val is not None and na_g >= 2 and nb_g >= 2:
+                se_cd = math.sqrt((na_g + nb_g + 1.0) / (3.0 * na_g * nb_g)) * math.sqrt(max(1.0 - cd_val * cd_val, 0.05))
+                cd_ci95 = [round(max(-1.0, cd_val - 1.959964 * se_cd), 4), round(min(1.0, cd_val + 1.959964 * se_cd), 4)]
+
             row_entry.update({
                 "contrast_estimability": c_status,
                 "primary_test": prim_test,
@@ -1295,14 +1343,17 @@ def run_statistical_report(
                 "primary_diff_ci95": prim_ci,
                 "primary_effect_name": prim_eff_name,
                 "primary_effect": prim_eff_val,
+                "primary_effect_ci95": cd_ci95 if prim_eff_name == "cliffs_delta" else hg_ci95,
                 "diff_mean": t_res.get("diff_mean"),
                 "diff_mean_ci95": t_res.get("diff_ci95"),
                 "t_df": t_res.get("df"),
                 "hedges_g": hg,
+                "hedges_g_ci95": hg_ci95,
                 "hedges_g_status": hg_status,
                 "hodges_lehmann_diff": np_eff["hodges_lehmann_diff"],
                 "hl_ci95": np_eff["hl_ci95"],
                 "cliffs_delta": np_eff["cliffs_delta"],
+                "cliffs_delta_ci95": cd_ci95,
                 "rank_biserial_r": np_eff["rank_biserial_r"],
                 "cliffs_magnitude": np_eff["cliffs_magnitude"],
                 "p_raw": round(float(p_raw), 8) if (p_raw is not None and math.isfinite(p_raw)) else None,

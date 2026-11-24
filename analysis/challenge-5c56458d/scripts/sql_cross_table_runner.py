@@ -172,34 +172,245 @@ def _check_coded_misaggregation(sql: str, schema_rep: dict[str, Any]) -> list[st
     return warnings
 
 
+def _betacf(a: float, b: float, x: float) -> float:
+    """Lentz's continued fraction for regularized incomplete beta I_x(a, b)."""
+    fpmin = 1e-300
+    qab = a + b
+    qap = a + 1.0
+    qam = a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < fpmin:
+        d = fpmin
+    d = 1.0 / d
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < fpmin:
+            d = fpmin
+        c = 1.0 + aa / c
+        if abs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < fpmin:
+            d = fpmin
+        c = 1.0 + aa / c
+        if abs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 3e-12:
+            break
+    return h
+
+
+def _reg_inc_beta(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta function I_x(a, b) in pure stdlib."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    lbeta = math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+    front = math.exp(a * math.log(x) + b * math.log(1.0 - x) - lbeta)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return min(1.0, max(0.0, front * _betacf(a, b, x) / a))
+    return min(1.0, max(0.0, 1.0 - front * _betacf(b, a, 1.0 - x) / b))
+
+
+def _reg_upper_gamma(a: float, x: float) -> float:
+    """Regularized upper incomplete gamma function Q(a, x) in pure stdlib."""
+    if x <= 0.0:
+        return 1.0
+    if a <= 0.0:
+        return math.nan
+    gln = math.lgamma(a)
+    if x < a + 1.0:
+        # Series representation for P(a, x), return 1 - P
+        ap = a
+        term = 1.0 / a
+        total = term
+        for _ in range(300):
+            ap += 1.0
+            term *= x / ap
+            total += term
+            if abs(term) < abs(total) * 1e-13:
+                break
+        p_val = total * math.exp(-x + a * math.log(x) - gln)
+        return min(1.0, max(0.0, 1.0 - p_val))
+    # Lentz continued fraction for Q(a, x)
+    fpmin = 1e-300
+    b = x + 1.0 - a
+    c = 1.0 / fpmin
+    d = 1.0 / b if abs(b) >= fpmin else 1.0 / fpmin
+    h = d
+    for i in range(1, 300):
+        an = -i * (i - a)
+        b += 2.0
+        d = an * d + b
+        if abs(d) < fpmin:
+            d = fpmin
+        c = b + an / c
+        if abs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-13:
+            break
+    return min(1.0, max(0.0, math.exp(-x + a * math.log(x) - gln) * h))
+
+
+def _f_sf_exact(f_stat: float, df1: float, df2: float) -> float:
+    if not math.isfinite(f_stat) or f_stat < 0.0 or df1 <= 0.0 or df2 <= 0.0:
+        return math.nan
+    if f_stat == 0.0:
+        return 1.0
+    x = df2 / (df2 + df1 * f_stat)
+    return _reg_inc_beta(0.5 * df2, 0.5 * df1, x)
+
+
+def _chi2_sf_exact(x: float, df: float) -> float:
+    if not math.isfinite(x) or x <= 0.0:
+        return 1.0
+    if df <= 0.0:
+        return math.nan
+    return _reg_upper_gamma(0.5 * df, 0.5 * x)
+
+
+def _t_two_sided_p_exact(t_abs: float, df: float) -> float:
+    if not math.isfinite(t_abs) or df <= 0.0:
+        return math.nan
+    if t_abs == 0.0:
+        return 1.0
+    x = df / (df + t_abs * t_abs)
+    return _reg_inc_beta(0.5 * df, 0.5, x)
+
+
+def _t_crit_95_exact(df: float) -> float:
+    """Exact two-sided 95% Student t critical value for any continuous df > 0 via bisection."""
+    if df <= 0.0:
+        return 1.959963984540054
+    if df > 1e6:
+        return 1.959963984540054
+    lo, hi = 1.9599, 20.0 if df >= 1.0 else 200.0
+    while _t_two_sided_p_exact(hi, df) > 0.05:
+        hi *= 2.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if _t_two_sided_p_exact(mid, df) > 0.05:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def _wilson_ci_95(p_hat: float, n: int, z: float = 1.959963984540054) -> tuple[float, float]:
+    """Wilson score 95% CI strictly bounded in [0.0, 1.0] for proportions."""
+    if n <= 0:
+        return 0.0, 1.0
+    p = min(1.0, max(0.0, p_hat))
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p + z2 / (2.0 * n)) / denom
+    half = (z / denom) * math.sqrt((p * (1.0 - p)) / n + z2 / (4.0 * n * n))
+    return max(0.0, center - half), min(1.0, center + half)
+
+
+def _holm_bonferroni(pvals: list[float]) -> list[float]:
+    m = len(pvals)
+    order = sorted(range(m), key=lambda i: pvals[i])
+    adj = [1.0] * m
+    prev = 0.0
+    for rank, idx in enumerate(order):
+        val = min(1.0, max(prev, pvals[idx] * (m - rank)))
+        adj[idx] = val
+        prev = val
+    return adj
+
+
+def _row_matches_filters(row: dict[str, Any], filters: list[dict[str, Any]]) -> bool:
+    for flt in filters:
+        col = str(flt["col"])
+        op = str(flt["op"]).strip()
+        target = flt["value"]
+        val = row.get(col)
+        if val is None:
+            return False
+        if isinstance(target, (int, float)):
+            try:
+                fv = float(val)
+            except (TypeError, ValueError):
+                return False
+            tv = float(target)
+            if op == ">=" and not (fv >= tv):
+                return False
+            elif op == ">" and not (fv > tv):
+                return False
+            elif op == "<=" and not (fv <= tv):
+                return False
+            elif op == "<" and not (fv < tv):
+                return False
+            elif op == "=" and not (fv == tv):
+                return False
+            elif op in {"!=", "<>"} and not (fv != tv):
+                return False
+        else:
+            sv, tv = str(val), str(target)
+            if op == "=" and sv != tv:
+                return False
+            elif op in {"!=", "<>"} and sv == tv:
+                return False
+    return True
+
+
 def _run_independent_python_reconciliation(
     conn: sqlite3.Connection,
     reconcile_cfg: dict[str, Any],
     sql_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Independently load raw tables in Python, perform grouping/pre-agg, and verify max_abs_diff < 1e-9."""
+    """Independently load raw tables in Python, perform filtering/grouping/pre-agg/sort/limit, and verify max_abs_diff < 1e-9."""
     base_table = str(reconcile_cfg["base_table"])
     group_col_sql = str(reconcile_cfg["sql_group_col"])
     count_col_sql = str(reconcile_cfg.get("sql_count_col", "n_samples"))
     metrics_cfg: list[dict[str, Any]] = list(reconcile_cfg.get("metrics") or [])
+    filters_cfg: list[dict[str, Any]] = list(reconcile_cfg.get("filters") or [])
+    order_by_cfg: dict[str, Any] | None = reconcile_cfg.get("order_by")
+    limit_cfg: int | None = int(reconcile_cfg["limit"]) if reconcile_cfg.get("limit") is not None else None
 
-    # Load base rows as dicts
+    # Load base rows as dicts and mirror parameterized WHERE/ON filter predicates
     cur = conn.execute(f"SELECT * FROM {_qident(base_table)}")
     base_cols = [d[0] for d in cur.description]
     base_rows = [dict(zip(base_cols, row)) for row in cur.fetchall()]
+    if filters_cfg:
+        base_rows = [r for r in base_rows if _row_matches_filters(r, filters_cfg)]
 
     # Optional 1:N child pre-aggregation in native Python (grouped by base_pk)
     child_pre_agg = reconcile_cfg.get("child_pre_agg")
     child_by_pk: dict[Any, dict[str, Any]] = {}
+    binary_child_aliases: set[str] = set()
     if child_pre_agg:
         ct = str(child_pre_agg["table"])
         join_key = str(child_pre_agg["join_key"])
         c_cur = conn.execute(f"SELECT * FROM {_qident(ct)}")
         c_cols = [d[0] for d in c_cur.description]
         c_grouped: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+        all_child_vals: dict[str, set[float]] = defaultdict(set)
         for r in c_cur.fetchall():
             rec = dict(zip(c_cols, r))
             c_grouped[rec[join_key]].append(rec)
+            for alias, spec in (child_pre_agg.get("per_key_metrics") or {}).items():
+                col = spec["col"]
+                if rec.get(col) is not None:
+                    all_child_vals[alias].add(float(rec[col]))
+        for alias, uniq_vals in all_child_vals.items():
+            if uniq_vals and uniq_vals.issubset({0.0, 1.0}):
+                binary_child_aliases.add(alias)
         for pk_val, recs in c_grouped.items():
             summary: dict[str, Any] = {"__child_row_count__": len(recs)}
             for alias, spec in (child_pre_agg.get("per_key_metrics") or {}).items():
@@ -217,6 +428,7 @@ def _run_independent_python_reconciliation(
     # Optional dimension table (LEFT JOIN preserving legitimate empty groups)
     dim_cfg = reconcile_cfg.get("dimension_table")
     group_rows: dict[Any, list[dict[str, Any]]] = {}
+    dim_order: dict[str, Any] = {}
     if dim_cfg:
         dt = str(dim_cfg["table"])
         dim_key = str(dim_cfg["dim_key"])
@@ -229,6 +441,7 @@ def _run_independent_python_reconciliation(
             drec = dict(zip(d_cols, r))
             lbl = drec[label_col]
             key_to_label[drec[dim_key]] = lbl
+            dim_order[str(lbl)] = drec[dim_key]
             group_rows.setdefault(lbl, [])
         for brow in base_rows:
             fk_val = brow.get(base_fk)
@@ -269,18 +482,59 @@ def _run_independent_python_reconciliation(
             else:
                 group_rows.setdefault(brow.get(raw_grp), []).append(merged)
 
-    # Compute independent Python aggregates per group
+    # Detect binary 0/1 proportion metrics globally across all groups so Wilson score 95% CI is chosen automatically
+    binary_metric_cols: set[str] = set()
+    for m in metrics_cfg:
+        if str(m.get("agg", "")).lower() != "mean":
+            continue
+        sc = str(m["sql_col"])
+        src_c = str(m["source_col"])
+        if bool(m.get("is_binary_proportion")) or (src_c in binary_child_aliases):
+            binary_metric_cols.add(sc)
+            continue
+        all_m_vals = [float(r[src_c]) for rows in group_rows.values() for r in rows if r.get(src_c) is not None]
+        if all_m_vals and set(all_m_vals).issubset({0.0, 1.0}):
+            binary_metric_cols.add(sc)
+
     py_by_group: dict[str, dict[str, Any]] = {}
+    group_uncertainty: dict[str, dict[str, Any]] = {}
     for gkey, rows in group_rows.items():
         g_str = str(gkey)
         entry: dict[str, Any] = {count_col_sql: len(rows)}
+        u_entry: dict[str, Any] = {group_col_sql: g_str, count_col_sql: len(rows)}
         for m in metrics_cfg:
             sql_col = str(m["sql_col"])
             src_col = str(m["source_col"])
             agg = str(m["agg"]).lower()
             vals = [float(r[src_col]) for r in rows if r.get(src_col) is not None]
             if agg == "mean":
-                entry[sql_col] = statistics.fmean(vals) if vals else None
+                mean_v = statistics.fmean(vals) if vals else None
+                entry[sql_col] = mean_v
+                u_entry[f"{sql_col}_mean"] = round(mean_v, 6) if mean_v is not None else None
+                is_bin_prop = sql_col in binary_metric_cols
+                u_entry[f"{sql_col}_ci_method"] = "wilson_score_95" if is_bin_prop else "student_t_95"
+                if is_bin_prop and vals:
+                    w_lo, w_hi = _wilson_ci_95(mean_v, len(vals))  # type: ignore[arg-type]
+                    u_entry[f"{sql_col}_sd"] = round(statistics.stdev(vals), 6) if len(vals) >= 2 else None
+                    u_entry[f"{sql_col}_min"] = round(min(vals), 6)
+                    u_entry[f"{sql_col}_max"] = round(max(vals), 6)
+                    u_entry[f"{sql_col}_ci95_lo"] = round(w_lo, 6)
+                    u_entry[f"{sql_col}_ci95_hi"] = round(w_hi, 6)
+                elif len(vals) >= 2:
+                    sd_v = statistics.stdev(vals)
+                    se_v = sd_v / math.sqrt(len(vals))
+                    tc = _t_crit_95_exact(float(len(vals) - 1))
+                    u_entry[f"{sql_col}_sd"] = round(sd_v, 6)
+                    u_entry[f"{sql_col}_min"] = round(min(vals), 6)
+                    u_entry[f"{sql_col}_max"] = round(max(vals), 6)
+                    u_entry[f"{sql_col}_ci95_lo"] = round(mean_v - tc * se_v, 6)  # type: ignore[operator]
+                    u_entry[f"{sql_col}_ci95_hi"] = round(mean_v + tc * se_v, 6)  # type: ignore[operator]
+                else:
+                    u_entry[f"{sql_col}_sd"] = None
+                    u_entry[f"{sql_col}_min"] = round(vals[0], 6) if vals else None
+                    u_entry[f"{sql_col}_max"] = round(vals[0], 6) if vals else None
+                    u_entry[f"{sql_col}_ci95_lo"] = None
+                    u_entry[f"{sql_col}_ci95_hi"] = None
             elif agg == "sum":
                 zero_if_empty = bool(m.get("coalesce_zero", False))
                 entry[sql_col] = sum(vals) if vals else (0.0 if zero_if_empty else None)
@@ -291,6 +545,36 @@ def _run_independent_python_reconciliation(
             elif agg == "count":
                 entry[sql_col] = len(vals)
         py_by_group[g_str] = entry
+        group_uncertainty[g_str] = u_entry
+
+    # Mirror ORDER BY and LIMIT predicates on grouped Python reference (SQLite puts NULL first in ASC, last in DESC)
+    if order_by_cfg or limit_cfg is not None:
+        ordered_keys = list(py_by_group.keys())
+        if order_by_cfg:
+            ocol = str(order_by_cfg.get("col", group_col_sql))
+            odir = str(order_by_cfg.get("direction", "ASC")).upper()
+            desc = odir == "DESC"
+
+            def _sort_key(gk: str) -> tuple[Any, ...]:
+                if ocol == group_col_sql:
+                    v = gk
+                else:
+                    v = py_by_group[gk].get(ocol)
+                is_null = v is None
+                if desc:
+                    # DESC: non-nulls descending, then NULLs last
+                    return (1 if is_null else 0, -(float(v)) if (not is_null and isinstance(v, (int, float))) else 0.0, "" if is_null else str(v), str(dim_order.get(gk, gk)))
+                # ASC: NULLs first (SQLite default), then ascending
+                return (0 if is_null else 1, float(v) if (not is_null and isinstance(v, (int, float))) else 0.0, "" if is_null else str(v), str(dim_order.get(gk, gk)))
+
+            if desc and ocol == group_col_sql:
+                ordered_keys.sort(reverse=True)
+            else:
+                ordered_keys.sort(key=_sort_key)
+        if limit_cfg is not None:
+            ordered_keys = ordered_keys[:limit_cfg]
+        py_by_group = {gk: py_by_group[gk] for gk in ordered_keys}
+        group_uncertainty = {gk: group_uncertainty[gk] for gk in ordered_keys}
 
     sql_by_group = {str(r.get(group_col_sql)): r for r in sql_records}
     py_keys = set(py_by_group.keys())
@@ -329,6 +613,156 @@ def _run_independent_python_reconciliation(
             if diff >= 1e-9:
                 mismatches.append(f"Group '{gk}' {sc} numeric diff={diff:.3e} >= 1e-9 (sql={sv}, python={pv})")
 
+    # Complete pure-stdlib inferential statistics chain:
+    # One-Way ANOVA (exact F p-value) + Welch heteroscedastic ANOVA (exact F p-value)
+    # + Kruskal-Wallis H (exact chi2 p-value) + Pairwise Welch t + Holm-Bonferroni + Hedges' g
+    stat_assumptions: dict[str, Any] = {"performed": False}
+    primary_mean_m = next((m for m in metrics_cfg if str(m.get("agg", "")).lower() == "mean"), None)
+    if primary_mean_m is not None:
+        src_col = str(primary_mean_m["source_col"])
+        active_group_keys = set(py_by_group.keys())
+        grp_arrays = [
+            (str(gk), [float(r[src_col]) for r in rows if r.get(src_col) is not None])
+            for gk, rows in group_rows.items()
+            if str(gk) in active_group_keys
+        ]
+        non_empty = [(gk, arr) for gk, arr in grp_arrays if len(arr) >= 2]
+        if len(non_empty) >= 2:
+            all_v = [x for _, arr in non_empty for x in arr]
+            n_tot = len(all_v)
+            k_grp = len(non_empty)
+            g_mean = statistics.fmean(all_v)
+            ss_between = sum(len(arr) * (statistics.fmean(arr) - g_mean) ** 2 for _, arr in non_empty)
+            ss_within = sum(sum((x - statistics.fmean(arr)) ** 2 for x in arr) for _, arr in non_empty)
+            ss_total = ss_between + ss_within
+            df1_a, df2_a = k_grp - 1, n_tot - k_grp
+            f_stat = (ss_between / max(df1_a, 1)) / max(ss_within / max(df2_a, 1), 1e-15)
+            anova_p = _f_sf_exact(f_stat, float(df1_a), float(df2_a))
+            eta_sq = ss_between / max(ss_total, 1e-15)
+
+            # Variance homogeneity proxy: max/min group variance ratio (Hartley Fmax)
+            g_vars = [statistics.variance(arr) for _, arr in non_empty]
+            pos_vars = [v for v in g_vars if v > 1e-15]
+            var_ratio = (max(pos_vars) / min(pos_vars)) if len(pos_vars) >= 2 else None
+
+            # Welch's heteroscedastic one-way ANOVA
+            if all(v > 1e-15 for v in g_vars):
+                ns = [len(arr) for _, arr in non_empty]
+                means = [statistics.fmean(arr) for _, arr in non_empty]
+                ws = [n / v for n, v in zip(ns, g_vars)]
+                w_sum = sum(ws)
+                x_bar = sum(w * m for w, m in zip(ws, means)) / w_sum
+                w_num = sum(w * (m - x_bar) ** 2 for w, m in zip(ws, means)) / (k_grp - 1)
+                lam = sum(((1.0 - w / w_sum) ** 2) / (n - 1) for w, n in zip(ws, ns))
+                w_den = 1.0 + (2.0 * (k_grp - 2) / (k_grp * k_grp - 1)) * lam
+                welch_f = w_num / max(w_den, 1e-15)
+                w_df1 = float(k_grp - 1)
+                w_df2 = (k_grp * k_grp - 1) / (3.0 * lam) if lam > 1e-15 else float(df2_a)
+                welch_p = _f_sf_exact(welch_f, w_df1, w_df2)
+                welch_anova = {
+                    "estimable": True,
+                    "f_stat": round(welch_f, 4),
+                    "df1": round(w_df1, 3),
+                    "df2": round(w_df2, 3),
+                    "p_value": float(f"{welch_p:.6e}") if welch_p < 1e-4 else round(welch_p, 8),
+                }
+            else:
+                welch_anova = {"estimable": False, "reason": "zero_variance_group"}
+
+            # Tie-corrected Kruskal-Wallis H + exact chi2 p-value + epsilon^2
+            sorted_idx = sorted(range(n_tot), key=lambda i: all_v[i])
+            ranks = [0.0] * n_tot
+            tie_sizes: list[int] = []
+            ii = 0
+            while ii < n_tot:
+                jj = ii + 1
+                while jj < n_tot and all_v[sorted_idx[jj]] == all_v[sorted_idx[ii]]:
+                    jj += 1
+                avg_r = 0.5 * ((ii + 1) + jj)
+                for kk in range(ii, jj):
+                    ranks[sorted_idx[kk]] = avg_r
+                if jj - ii > 1:
+                    tie_sizes.append(jj - ii)
+                ii = jj
+            pos = 0
+            r2_sum = 0.0
+            for _, arr in non_empty:
+                r_sum = sum(ranks[pos : pos + len(arr)])
+                r2_sum += (r_sum * r_sum) / len(arr)
+                pos += len(arr)
+            h_raw = (12.0 / (n_tot * (n_tot + 1.0))) * r2_sum - 3.0 * (n_tot + 1.0)
+            tie_c = 1.0 - sum(t ** 3 - t for t in tie_sizes) / max(n_tot ** 3 - n_tot, 1)
+            kw_h = h_raw / max(tie_c, 1e-15)
+            kw_p = _chi2_sf_exact(kw_h, float(k_grp - 1))
+            eps_sq = max(0.0, (kw_h - k_grp + 1.0) / max(n_tot - k_grp, 1))
+
+            # Pairwise post-hoc comparisons: Welch t + Holm-Bonferroni + Hedges' g
+            raw_pvals: list[float] = []
+            pw_rows: list[dict[str, Any]] = []
+            for idx_a in range(k_grp):
+                for idx_b in range(idx_a + 1, k_grp):
+                    ga, arr_a = non_empty[idx_a]
+                    gb, arr_b = non_empty[idx_b]
+                    na, nb = len(arr_a), len(arr_b)
+                    ma, mb = statistics.fmean(arr_a), statistics.fmean(arr_b)
+                    va, vb = statistics.variance(arr_a), statistics.variance(arr_b)
+                    diff_m = mb - ma
+                    se2 = va / na + vb / nb
+                    if se2 > 1e-15:
+                        se = math.sqrt(se2)
+                        df_den = ((va / na) ** 2) / max(na - 1, 1) + ((vb / nb) ** 2) / max(nb - 1, 1)
+                        df_w = (se2 * se2) / max(df_den, 1e-15)
+                        t_w = diff_m / se
+                        p_raw = _t_two_sided_p_exact(abs(t_w), df_w)
+                        tc_w = _t_crit_95_exact(df_w)
+                        diff_ci = [round(diff_m - tc_w * se, 6), round(diff_m + tc_w * se, 6)]
+                    else:
+                        t_w, df_w, p_raw, diff_ci = 0.0, float(na + nb - 2), 1.0, [round(diff_m, 6), round(diff_m, 6)]
+                    pooled_sd = math.sqrt(((na - 1) * va + (nb - 1) * vb) / max(na + nb - 2, 1))
+                    j_corr = 1.0 - 3.0 / max(4 * (na + nb) - 9, 1)
+                    hedges_g = (diff_m / pooled_sd * j_corr) if pooled_sd > 1e-12 else None
+                    raw_pvals.append(p_raw)
+                    pw_rows.append({
+                        "pair": f"{ga} vs {gb}",
+                        "test": "Welch_t",
+                        "mean_diff": round(diff_m, 6),
+                        "mean_diff_ci95": diff_ci,
+                        "t_stat": round(t_w, 4),
+                        "df": round(df_w, 3),
+                        "hedges_g": round(hedges_g, 4) if hedges_g is not None else None,
+                        "p_raw": float(f"{p_raw:.6e}") if p_raw < 1e-4 else round(p_raw, 8),
+                    })
+            for row_pw, p_adj in zip(pw_rows, _holm_bonferroni(raw_pvals)):
+                row_pw["p_holm"] = float(f"{p_adj:.6e}") if p_adj < 1e-4 else round(p_adj, 8)
+                row_pw["significant_holm_05"] = bool(p_adj < 0.05)
+
+            het_flag = bool(var_ratio is not None and var_ratio > 4.0)
+            stat_assumptions = {
+                "performed": True,
+                "metric_column": src_col,
+                "p_value_method": "pure_stdlib_exact_incomplete_beta_and_gamma",
+                "non_empty_groups": k_grp,
+                "empty_groups_excluded_from_omnibus": len(grp_arrays) - k_grp,
+                "total_n": n_tot,
+                "variance_ratio_fmax": round(var_ratio, 4) if var_ratio is not None else None,
+                "heteroscedasticity_flagged": het_flag,
+                "anova_f": round(f_stat, 4),
+                "anova_df": [df1_a, df2_a],
+                "anova_p_value": float(f"{anova_p:.6e}") if anova_p < 1e-4 else round(anova_p, 8),
+                "eta_squared": round(eta_sq, 4),
+                "welch_anova": welch_anova,
+                "kruskal_wallis_h": round(kw_h, 4),
+                "kruskal_df": k_grp - 1,
+                "kruskal_p_value": float(f"{kw_p:.6e}") if kw_p < 1e-4 else round(kw_p, 8),
+                "epsilon_squared": round(eps_sq, 4),
+                "pairwise_comparisons": pw_rows,
+                "recommended_inference_route": (
+                    "Welch ANOVA / Kruskal-Wallis + pairwise Welch t (Holm-Bonferroni) [heteroscedasticity flagged: Fmax > 4.0]"
+                    if het_flag
+                    else "One-Way ANOVA / Welch ANOVA / Kruskal-Wallis concordant + pairwise Welch t (Holm-Bonferroni)"
+                ),
+            }
+
     passed = len(mismatches) == 0 and max_abs_diff < 1e-9 and checked_pairs > 0
     return {
         "performed": True,
@@ -337,7 +771,13 @@ def _run_independent_python_reconciliation(
         "checked_comparisons": checked_pairs,
         "max_abs_diff": max_abs_diff,
         "mismatches": mismatches,
+        "filters_mirrored": filters_cfg,
+        "order_by_mirrored": order_by_cfg,
+        "limit_mirrored": limit_cfg,
+        "binary_proportion_wilson_metrics": sorted(binary_metric_cols),
         "python_reference_by_group": py_by_group,
+        "group_uncertainty_summary": list(group_uncertainty.values()),
+        "statistical_assumptions_check": stat_assumptions,
     }
 
 
@@ -657,7 +1097,7 @@ def run_sql_analysis(
                         f"Query '{qid}' failed independent Python reconciliation: {reconcile_rep['mismatches']}"
                     )
 
-            # 7. Export verified query CSV
+            # 7. Export verified query CSV + read-back SELECT-to-CSV column parity check
             csv_p = out_dir / f"{stem}_{qid}.csv"
             with csv_p.open("w", encoding="utf-8", newline="") as fh:
                 writer = csv.DictWriter(fh, fieldnames=col_names)
@@ -665,10 +1105,31 @@ def run_sql_analysis(
                 for rec in records:
                     writer.writerow({k: ("" if v is None else v) for k, v in rec.items()})
 
+            with csv_p.open("r", encoding="utf-8", newline="") as rfh:
+                csv_header = next(csv.reader(rfh), [])
+            missing_in_csv = [c for c in col_names if c not in csv_header]
+            select_csv_parity_ok = len(missing_in_csv) == 0
+            if not select_csv_parity_ok:
+                errors.append(f"Query '{qid}' SELECT-to-CSV column mismatch: missing {missing_in_csv}")
+
+            # 7b. Export per-group dispersion & 95% t-CI table when Python reconciliation computed it
+            uncertainty_csv_name: str | None = None
+            u_rows = reconcile_rep.get("group_uncertainty_summary") or []
+            if u_rows:
+                u_csv = out_dir / f"{stem}_{qid}_uncertainty.csv"
+                u_cols = list(dict.fromkeys(k for r in u_rows for k in r.keys()))
+                with u_csv.open("w", encoding="utf-8", newline="") as ufh:
+                    uw = csv.DictWriter(ufh, fieldnames=u_cols)
+                    uw.writeheader()
+                    for ur in u_rows:
+                        uw.writerow({k: ("" if ur.get(k) is None else ur.get(k)) for k in u_cols})
+                uncertainty_csv_name = u_csv.name
+
             q_ok = (
                 not inflation_flag
                 and not coded_warns
                 and empty_class != "ANOMALOUS_EMPTY_RESULT"
+                and select_csv_parity_ok
                 and (not reconcile_rep["performed"] or reconcile_rep["passed"])
             )
 
@@ -682,6 +1143,7 @@ def run_sql_analysis(
                     "ok": q_ok,
                     "row_count": len(records),
                     "columns": col_names,
+                    "select_csv_column_parity_ok": select_csv_parity_ok,
                     "base_table": q_base_table or None,
                     "base_pk": q_base_pk or None,
                     "base_table_rows": base_rows,
@@ -700,6 +1162,7 @@ def run_sql_analysis(
                     "python_reconciliation": reconcile_rep,
                     "sql": sql,
                     "csv_artifact": csv_p.name,
+                    "uncertainty_csv_artifact": uncertainty_csv_name,
                     "records": records,
                 }
             )
@@ -711,36 +1174,44 @@ def run_sql_analysis(
     if not immutable_ok:
         errors.append("CRITICAL: SQLite database SHA-256 changed during read-only execution!")
 
-    # Render pure-stdlib SVG chart (and optional Matplotlib PNG/PDF if installed)
+    # Render pure-stdlib SVG chart per query (plus optional Matplotlib PNG/PDF for primary)
     group_col = str(query_spec.get("group_col", "")).strip()
     value_col = str(query_spec.get("value_col", "")).strip()
     title = str(query_spec.get("title", f"{value_col} by {group_col}"))
     chart_files: list[str] = []
     matplotlib_rendered = False
 
-    if primary_records and group_col and value_col and group_col in primary_records[0] and value_col in primary_records[0]:
-        svg_p = out_dir / f"{stem}_chart.svg"
-        _render_stdlib_svg_chart(
-            svg_p,
-            title=title,
-            group_col=group_col,
-            value_col=value_col,
-            records=primary_records,
-            count_col=primary_count_col,
-        )
-        chart_files.append(svg_p.name)
-        extra_charts = _try_render_matplotlib_charts(
-            out_dir,
-            stem,
-            title=title,
-            group_col=group_col,
-            value_col=value_col,
-            records=primary_records,
-            count_col=primary_count_col,
-        )
-        if extra_charts:
-            matplotlib_rendered = True
-            chart_files.extend(extra_charts)
+    for q_idx, qr in enumerate(query_results):
+        q_recs = qr.get("records") or []
+        if not q_recs:
+            continue
+        q_gcol = group_col if group_col in q_recs[0] else next((c for c in qr.get("columns", []) if isinstance(q_recs[0].get(c), str)), "")
+        q_vcol = value_col if value_col in q_recs[0] else next((c for c in qr.get("columns", []) if c != q_gcol and isinstance(q_recs[0].get(c), (int, float))), "")
+        q_cnt = next((c for c in _COUNT_COL_CANDIDATES if c in q_recs[0]), None)
+        if q_gcol and q_vcol:
+            q_svg = out_dir / (f"{stem}_chart.svg" if q_idx == 0 else f"{stem}_{qr['id']}_chart.svg")
+            _render_stdlib_svg_chart(
+                q_svg,
+                title=title if q_idx == 0 else f"{qr['id']}: {q_vcol} by {q_gcol}",
+                group_col=q_gcol,
+                value_col=q_vcol,
+                records=q_recs,
+                count_col=q_cnt,
+            )
+            chart_files.append(q_svg.name)
+            if q_idx == 0:
+                extra_charts = _try_render_matplotlib_charts(
+                    out_dir,
+                    stem,
+                    title=title,
+                    group_col=q_gcol,
+                    value_col=q_vcol,
+                    records=q_recs,
+                    count_col=q_cnt,
+                )
+                if extra_charts:
+                    matplotlib_rendered = True
+                    chart_files.extend(extra_charts)
 
     rep_payload = {
         "ok": len(errors) == 0 and immutable_ok and all(q.get("ok", False) for q in query_results),

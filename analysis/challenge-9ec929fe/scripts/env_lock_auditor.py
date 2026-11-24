@@ -122,6 +122,7 @@ def audit_environment(
 
     if script_path is not None:
         local_dir = script_path.resolve().parent
+        bundled_dir = Path(__file__).resolve().parent
         imports = _extract_script_imports(script_path)
         stdlib_used: list[str] = []
         installed_third_party: list[dict[str, Any]] = []
@@ -131,7 +132,12 @@ def audit_environment(
             if mod in stdlib_names or mod == "__future__":
                 stdlib_used.append(mod)
                 continue
-            if (local_dir / f"{mod}.py").is_file() or (local_dir / mod / "__init__.py").is_file():
+            if (
+                (local_dir / f"{mod}.py").is_file()
+                or (local_dir / mod / "__init__.py").is_file()
+                or (bundled_dir / f"{mod}.py").is_file()
+                or (bundled_dir / mod / "__init__.py").is_file()
+            ):
                 local_modules.append(mod)
                 continue
             probe = pkg_matrix.get(mod) or _probe_package(mod)

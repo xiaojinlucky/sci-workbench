@@ -1,129 +1,125 @@
 ---
 name: longdoc-thesis-revision
-description: Controlled long-document and thesis writing workflow supporting organizer-edit-workorder paragraph/chapter revision state machine (import receipt, propose/accept/reject, diff, rollback/reapply, controlled fault injection, offline HTML preview) and cross-chapter consistency auditing (acronyms, symbols, cross-chapter entity values, numbering gaps, duplicate discussion detection, citation field health, and truncation reporting).
+description: Controlled long-document and thesis writing workflow supporting multi-chapter General Discussion synthesis (convergences, conditional divergences, irreconcilable conflicts, and [ChX:Lxx]-anchored drafts), native .md/.txt/.tex/.docx/.pdf chapter ingestion with honest DOCX live citation-field (w:instrText) reporting, 4-key review-to-export closed-loop traceability, adaptive workorder anchor induction, deterministic revision state machine (annotate/replace, accept/reject, diff, SHA-256 rollback/reapply, fault injection), and domain-agnostic cross-chapter consistency auditing.
 ---
 
-# Thesis and Long-Document Revision & Cross-Chapter Consistency
+# Thesis and Long-Document Revision, General Discussion Synthesis & Cross-Chapter Consistency
 
-Execute controlled, traceable authoring and surgical revision on multi-chapter manuscripts, thesis compilations, and sectioned working chapters (`Organizer input repair v1`). Operate strictly on supplied files under `/input`; protect all unrequested bytes, surface every conflict or truncation honestly, and never fabricate missing chapters, data, or software state.
+Execute controlled, traceable authoring, multi-chapter **General Discussion Synthesis**, and surgical revision on multi-chapter manuscripts, thesis compilations, regulatory/technical long documents, and sectioned working chapters. Operate strictly on supplied files under `/input`; protect all unrequested bytes, surface every conflict, format boundary, or truncation honestly, and never fabricate missing chapters, data, or software state.
 
 ## Core Invariants
 
-1. **Byte-exact scope protection**: Read `/input/organizer-edit-workorder.json` (or `organizer_edit_workorder` inside `/input/case.json`) first. Support both `target_ids` (paragraph anchors such as `C01-P002`, `C01-P057`) and `edits[].file` (chapter paths). Keep original publication text, tables, formulas, citations, headings, and all unrequested chapters/blocks byte-identical to their imported SHA-256 baseline.
-2. **Distinguish editorial annotations from source claims**: When adding source-grounded annotations, insert clearly tagged editorial blocks without rewriting original wording or silently correcting contradictory source numbers/units. Quote exact source text and state uncertainties explicitly.
-3. **Full local revision lifecycle**: When the workorder requests local workflow operations, run the real deterministic state machine (`longdoc_revision_engine.py`) covering: import receipt, propose, individual accept/reject, diff, verified rollback and reapply, controlled invalid-operation fault injection (proving zero state/file mutation), editable manuscript export, and offline single-file HTML diff preview.
-4. **Cross-chapter scientific consistency**: Audit acronym expansions, mathematical/physical symbol definitions, same-entity numerical/sample-size conflicts across chapters, figure/table/equation numbering gaps and dangling references, cross-chapter duplicate discussion (bilingual shingle Jaccard), citation field integrity (flattened Zotero/EndNote artifacts or broken reference indices), and coverage/truncation risks.
-5. **Honest coverage and output contract**: Every `result.json` must preserve `case_id` and populate all five contract fields (`case_id`, `deliverable`, `preserved_facts`, `evidence_map`, `change_log`). If pages, TOC entries, or chapters are missing or truncated, report the exact covered range and mark gaps explicitly.
+1. **Evidence-bound Multi-Chapter General Discussion Synthesis (`synthesize-discussion`)**: Extract per-chapter `findings`, `conditions/scope`, `limitations`, and `citations` with exact `[ChX:Lxx]` anchors while filtering PDF/DOCX running headers, bare page numbers, and pure headings (zero running-header evidence leaks). Build a structured 3-column evidence matrix (**`cross_chapter_convergences`** requiring `>=2` distinct chapters, **`conditional_divergences`** stratified by experimental/population conditions, and **`irreconcilable_conflicts`** flagged `needs_author_resolution`). Draft General Discussion paragraphs **strictly from `>=2`-chapter convergences** with mandatory `[ChX:Lxx]` anchors on every sentence and an explicit `pending_confirmations` checklist.
+2. **4-Key Closed-Loop Review-to-Export Traceability & Honest Gap Sync**: Enforce `review_item_id <-> target_id <-> proposal_id <-> export_locator` binding across `parse-comments`, `propose --review-item-id`, `accept`/`reject`, and `export`. Triage unresolvable or out-of-scope reviewer requests explicitly as `unresolved` or `out_of_scope` (never leaving everything `open`), reject running-header evidence quotes, and run `export --audit-json ... --result-json ...` so all audit errors, warnings, truncation risks, and unresolved/out-of-scope review items merge automatically into `result.json`.
+3. **Honest Native Format & DOCX Citation-Field Reporting**: Parse `.docx` via pure-stdlib OOXML (`word/document.xml` + footnotes/endnotes) to detect live Zotero/CSL/EndNote/Mendeley `w:instrText` fields and tracked changes. When binary `.docx`/`.pdf` inputs are converted into working Markdown, explicitly report `format_mode: "derived_markdown_readonly_source"`, `citation_fields_preserved: false`, and `live_citation_fields_detected`. Use `patch-docx` only for targeted plain-text OOXML paragraph updates that leave untouched ZIP members and live citation field runs intact.
+4. **Byte-exact scope protection & full revision lifecycle**: Dynamically induce workorder anchor patterns (`BLOCKED_MISSING_TARGETS` if missing), support `annotate` (exact `v0` byte round-trip after stripping annotations) and substantive `replace`, individual `accept`/`reject`, `diff`, 100% SHA-256 `rollback`/`reapply`, 5-case zero-mutation `fault-test`, and offline zero-CDN HTML preview.
+5. **Domain-agnostic cross-chapter consistency & source-inherent dedup separation**: Audit acronyms, symbols, `(entity, unit, value, condition)` conflicts, numbering/citation health, and inverted-index bilingual duplicates—distinguishing `source_inherent` overlaps (warning) from `newly_introduced` duplicates (blocking error).
 
 ## Reference Pointers (Load On Demand)
 
 - Output schema and required `/app/output` artifacts: read `references/output_contract_spec.md` before finalizing `result.json`.
-- Cross-chapter continuity, multi-paper thesis general discussion de-duplication, citation live-field protection, anti-defensive scientific synthesis, and pre-mortem long-doc risk matrix: read `references/continuity_and_revision_protocol.md` when drafting or reconciling multi-chapter discussions.
+- Multi-chapter continuity, anti-duplication general discussion synthesis, tool-boundary comparison (`git diff`/`LaTeXdiff`/`Word`/`Zotero`), and pre-mortem risk matrix: read `references/continuity_and_revision_protocol.md`.
 - Minimal end-to-end CLI invocation illustration: see `examples/minimal_workflow_example.md`.
 
 ## Execution Workflow
 
+Set portable script root once (defaults to `/skills/weekly-skill` inside execution sandboxes):
+```bash
+SKILL_ROOT="${SKILL_ROOT:-/skills/weekly-skill}"
+```
+
 ### Step 1: Probe sandbox, initialize guards, and map inputs
 ```bash
-python3 /skills/weekly-skill/scripts/preflight_probe.py --out /app/work/env.json
-python3 /skills/weekly-skill/scripts/budget_guard.py --init
-python3 /skills/weekly-skill/scripts/result_guard.py --init --case-id "<CASE_ID>" --task-id "longdoc-thesis-revision"
-python3 /skills/weekly-skill/scripts/block_indexer.py --scan /input --out /app/work/input_blocks.json
+python3 "$SKILL_ROOT/scripts/preflight_probe.py" --out /app/work/env.json
+python3 "$SKILL_ROOT/scripts/budget_guard.py" --init
+python3 "$SKILL_ROOT/scripts/result_guard.py" --init --case-id "<CASE_ID>" --task-id "longdoc-thesis-revision"
+python3 "$SKILL_ROOT/scripts/block_indexer.py" --scan /input --out /app/work/input_blocks.json
 ```
-**Done when**: `env.json`, initial `result.json`, and `input_blocks.json` exist; actual chapter directory and workorder path (`/input/organizer-edit-workorder.json` or `/input/case.json`) are confirmed from real filesystem reads.
+**Done when**: `env.json`, initial `result.json`, and `input_blocks.json` exist; actual chapter directory (`.md`/`.txt`/`.tex`/`.docx`/`.pdf`) and workorder path are confirmed from real filesystem reads.
 
-### Step 2: Import chapters and run baseline cross-chapter audit
-1. Import working chapters into the local revision state directory (`/app/work/rev_state`) to lock original SHA-256 hashes, index paragraph anchors, and check coverage/truncation:
+### Step 2: Import chapters, generate chapter plan, and run baseline cross-chapter audit
+1. Import working chapters into `/app/work/rev_state` to lock `v0` SHA-256 hashes, induce workorder anchor patterns, auto-anchor anchorless paragraphs, and inspect coverage/truncation:
 ```bash
-python3 /skills/weekly-skill/scripts/longdoc_revision_engine.py import \
+python3 "$SKILL_ROOT/scripts/longdoc_revision_engine.py" import \
   --chapters-dir /input/chapters \
   --workorder /input/organizer-edit-workorder.json \
   --state-dir /app/work/rev_state \
   --receipt-out /app/output/import_receipt.json
 ```
-*(If chapters sit directly under `/input` or another subfolder, pass that actual path to `--chapters-dir`; if TOC metadata is supplied, pass `--toc-json <path>`.)*
-2. Run baseline cross-chapter consistency audit:
+*(Pass `--toc-json <path>` if TOC metadata exists; if advisor/reviewer comments exist, decompose them into trackable items via `parse-comments --state-dir /app/work/rev_state --comments-file <path> --out-json /app/output/review_action_items.json`.)*
+2. Run **Multi-Chapter General Discussion Synthesis** (`synthesize-discussion`), generate `chapter_plan.json`, and run baseline consistency audit:
 ```bash
-python3 /skills/weekly-skill/scripts/longdoc_chapter_consistency.py \
+python3 "$SKILL_ROOT/scripts/longdoc_chapter_consistency.py" synthesize-discussion \
   --chapters-dir /input/chapters \
   --workorder /input/organizer-edit-workorder.json \
+  --out-json /app/output/general_discussion_synthesis.json \
+  --out-md /app/output/general_discussion_synthesis.md
+
+python3 "$SKILL_ROOT/scripts/longdoc_chapter_consistency.py" \
+  --chapters-dir /input/chapters \
+  --generate-plan /app/work/chapter_plan.json
+
+python3 "$SKILL_ROOT/scripts/longdoc_chapter_consistency.py" \
+  --chapters-dir /input/chapters \
+  --workorder /input/organizer-edit-workorder.json \
+  --chapter-plan-json /app/work/chapter_plan.json \
   --out-json /app/work/baseline_consistency.json
 ```
-**Done when**: `import_receipt.json` records every chapter's original SHA-256 and target anchor positions; `baseline_consistency.json` catalogs all baseline terminology, symbol, entity-value, numbering, duplicate, citation, and truncation findings.
+**Done when**: `general_discussion_synthesis.json` confirms `running_header_evidence_leaks == []`, `all_draft_sentences_anchored == true`, and cleanly separates `cross_chapter_convergences` (`>=2` chapters), `conditional_divergences`, and `irreconcilable_conflicts` (`needs_author_resolution`); `import_receipt.json` reports exact `format_mode` and `citation_fields_preserved`.
 
-### Step 3: Execute controlled revision lifecycle (propose, accept/reject, diff, rollback, reapply, fault-test)
-1. Inspect target chapters and surrounding Methods/Results/Discussion context so every annotation is grounded in exact source quotations, scientific conditions, limitations, and unresolved conflicts.
-2. Propose edits for each authorized `target_id` (or authorized chapter file). When the workorder requires testing individual rejection alongside acceptance, create a distinct proposal to reject (for example, an overly broad or redundant candidate note) and accept the verified source-grounded annotations:
+### Step 3: Execute controlled revision lifecycle (`propose`, `accept`/`reject`, `diff`, `rollback`, `reapply`, `fault-test`, `export`)
+1. Propose grounded editorial annotations (`--mode annotate`) or authorized substantive paragraph rewrites (`--mode replace` with `--replacement-file` to avoid shell-quoting errors). Use `--target-id` when explicit/auto anchors are known, or `--file <rel> --block-index <N>` / `--anchor-query "<substring>"` for file-level workorders:
 ```bash
-python3 /skills/weekly-skill/scripts/longdoc_revision_engine.py propose \
+python3 "$SKILL_ROOT/scripts/longdoc_revision_engine.py" propose \
   --state-dir /app/work/rev_state \
   --target-id "<TARGET_ID>" \
   --mode annotate \
-  --title "<CONCISE_ANNOTATION_TITLE>" \
-  --annotation "<SOURCE_GROUNDED_EDITORIAL_NOTE>" \
+  --title "<CONCISE_TITLE>" \
+  --annotation-file /app/work/note_01.txt \
   --source-quote "<EXACT_VERBATIM_SOURCE_QUOTE>" \
   --source-ref "<FILE_OR_ANCHOR_REF>" \
   --uncertainty "<EXPLICIT_LIMITATION_OR_OPEN_CONFLICT>"
 ```
-   - When the task explicitly authorizes substantive paragraph rewriting (rather than non-destructive annotation under strict source-byte preservation), pass `--mode replace --replacement-text "<REVISED_PARAGRAPH>"` on authorized target IDs so the engine tracks full before/after diffs, rollback, and reapplication deterministically.
-3. Individually accept or reject proposals:
+2. Individually accept verified proposals and reject overbroad/ungrounded candidate proposals:
 ```bash
-python3 /skills/weekly-skill/scripts/longdoc_revision_engine.py accept \
-  --state-dir /app/work/rev_state --proposal-id "<PROP_ID>" --reason "<ACCEPT_RATIONALE>"
-python3 /skills/weekly-skill/scripts/longdoc_revision_engine.py reject \
-  --state-dir /app/work/rev_state --proposal-id "<PROP_ID_REJECTED>" --reason "<REJECT_RATIONALE>"
+python3 "$SKILL_ROOT/scripts/longdoc_revision_engine.py" accept --state-dir /app/work/rev_state --proposal-id P0001 --reason "<RATIONALE>"
+python3 "$SKILL_ROOT/scripts/longdoc_revision_engine.py" reject --state-dir /app/work/rev_state --proposal-id P0002 --reason "<RATIONALE>"
 ```
-4. Verify version comparison, true byte-exact rollback to `v0`, and deterministic reapplication of accepted proposals:
+3. Verify unified diff, 100% SHA-256 rollback to `v0`, deterministic reapplication, and 5-case controlled fault injection (`deliberate_fault_injection`, never a platform error):
 ```bash
-python3 /skills/weekly-skill/scripts/longdoc_revision_engine.py diff \
-  --state-dir /app/work/rev_state --from-version v0 --to-version latest \
-  --out-diff /app/output/revision.diff --out-json /app/work/diff_summary.json
-
-python3 /skills/weekly-skill/scripts/longdoc_revision_engine.py rollback \
-  --state-dir /app/work/rev_state --to-version v0 --out-json /app/work/rollback_receipt.json
-
-python3 /skills/weekly-skill/scripts/longdoc_revision_engine.py reapply \
-  --state-dir /app/work/rev_state --from-accepted --out-json /app/work/reapply_receipt.json
+python3 "$SKILL_ROOT/scripts/longdoc_revision_engine.py" diff --state-dir /app/work/rev_state --from-version v0 --to-version latest --out-diff /app/output/revision.diff --out-json /app/work/diff_summary.json
+python3 "$SKILL_ROOT/scripts/longdoc_revision_engine.py" rollback --state-dir /app/work/rev_state --to-version v0 --out-json /app/work/rollback_receipt.json
+python3 "$SKILL_ROOT/scripts/longdoc_revision_engine.py" reapply --state-dir /app/work/rev_state --from-accepted --out-json /app/work/reapply_receipt.json
+python3 "$SKILL_ROOT/scripts/longdoc_revision_engine.py" fault-test --state-dir /app/work/rev_state --out-json /app/output/fault_test_report.json
 ```
-5. Execute controlled invalid-operation fault injection and verify zero state/file mutation (`deliberate_fault_injection`, never reported as platform failure):
+4. Export editable chapters, revision records, evidence map, and self-contained offline HTML diff preview:
 ```bash
-python3 /skills/weekly-skill/scripts/longdoc_revision_engine.py fault-test \
-  --state-dir /app/work/rev_state --out-json /app/output/fault_test_report.json
-```
-6. Export editable revised chapters, structured revision records, evidence map, and self-contained offline HTML diff preview:
-```bash
-python3 /skills/weekly-skill/scripts/longdoc_revision_engine.py export \
+python3 "$SKILL_ROOT/scripts/longdoc_revision_engine.py" export \
   --state-dir /app/work/rev_state \
   --out-dir /app/output/chapters \
   --records-out /app/output/revision_records.json \
   --evidence-out /app/output/evidence_map.json \
   --html-preview /app/output/export_preview.html
 ```
-**Done when**: `rollback_receipt.json` confirms 100% SHA-256 restoration to `v0`, `reapply_receipt.json` confirms deterministic byte restoration of accepted state, `fault_test_report.json` confirms `state_unchanged_verified == true`, and `export_preview.html` renders all original/annotation/decision views offline.
+**Done when**: `rollback_receipt.json` confirms `sha256_restored_100pct == true`, `reapply_receipt.json` confirms `matches_pre_rollback_sha256 == true`, `fault_test_report.json` confirms `state_unchanged_verified == true`, and `export_preview.html` renders offline.
 
-### Step 4: Re-verify cross-chapter consistency, chapter planning & scope protection on exported chapters
+### Step 4: Re-verify exported chapters and write terminology & change log
 ```bash
-python3 /skills/weekly-skill/scripts/longdoc_chapter_consistency.py \
+python3 "$SKILL_ROOT/scripts/longdoc_chapter_consistency.py" \
   --chapters-dir /app/output/chapters \
   --workorder /input/organizer-edit-workorder.json \
   --baseline /app/work/baseline_consistency.json \
+  --chapter-plan-json /app/work/chapter_plan.json \
   --out-json /app/output/longdoc_audit.json
 ```
-Pass `--chapter-plan-json /app/work/chapter_plan.json` when checking chapter word/character budgets and per-chapter argument-role assignments (`research_question`, `methods`, `results`, `discussion`, `limitations`).
-Write `/app/output/terminology_and_change_log.md` summarizing:
-- covered chapters and any missing/truncated segments;
-- unified terminology/symbol registry and unresolved source conflicts (left untouched in source text, flagged for author decision);
-- accepted vs rejected proposals with exact anchor IDs, source quotes, and rollback/reapply/fault-test receipts;
-- cross-chapter synthesis guidance (if drafting a general discussion across compiled papers, link only supported common threads without copying earlier discussion prose).
+Write `/app/output/terminology_and_change_log.md` summarizing covered vs missing chapters, unified acronym/symbol/value ledger, unresolved source conflicts (left untouched in source text), accepted vs rejected proposals, `claim_support_matrix` findings, and rollback/reapply/fault-test receipts.
 
-**Done when**: `longdoc_audit.json` shows zero unauthorized chapter modifications (`modified_outside_workorder == []`) and zero newly introduced broken references or formatting corruption; all pre-existing source contradictions remain transparently logged rather than silently altered.
-
-### Step 5: Seal `result.json` and run final grounding & deliverable audits
-Patch `/app/output/result.json` with all five `output_contract` fields (`case_id`, `deliverable`, `preserved_facts`, `evidence_map`, `change_log`) plus `artifacts`, `metrics`, `metric_provenance`, and `findings`, then validate:
+### Step 5: Seal `result.json` via shell-safe `--patch-file` and run final audits
+Write patch payload to `/app/work/result_patch.json` containing all five contract fields (`case_id`, `deliverable`, `preserved_facts`, `evidence_map`, `change_log`) plus `artifacts`, `metrics`, `metric_provenance`, and `findings`:
 ```bash
-python3 /skills/weekly-skill/scripts/result_guard.py --patch-json '<PATCH_JSON>' --finalize
-python3 /skills/weekly-skill/scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
-python3 /skills/weekly-skill/scripts/final_audit.py \
+python3 "$SKILL_ROOT/scripts/result_guard.py" --patch-file /app/work/result_patch.json --finalize
+python3 "$SKILL_ROOT/scripts/gap_gate.py" --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
+python3 "$SKILL_ROOT/scripts/final_audit.py" \
   --dir /app/output \
   --require import_receipt.json \
   --require longdoc_audit.json \
@@ -135,8 +131,18 @@ python3 /skills/weekly-skill/scripts/final_audit.py \
 ```
 **Done when**: `result_guard.py --validate`, `gap_gate.py`, and `final_audit.py` all exit `0`.
 
+## Exit Codes, Recovery & Resume Playbook
+
+| Error Code / Exit | Cause | Deterministic Recovery Action |
+| --- | --- | --- |
+| `BLOCKED_MISSING_TARGETS` (rc=1) | Workorder `target_ids` absent from imported chapters | Inspect `import_receipt.json.anchor_index`; re-verify workorder IDs or pass `--allow-file-fallback` only when file-level scope is explicitly authorized |
+| `UNAUTHORIZED_SCOPE` (rc=1) | Target anchor or file outside workorder | Restrict `propose` to `import_receipt.json.authorized_target_ids` / `authorized_files` |
+| `TARGET_NOT_FOUND` (rc=1) | Anchor ID, `--block-index`, or `--anchor-query` unmatched | Query `manifest.json` anchor index; never guess trailing block silently |
+| `INVALID_PATCH` (rc=1) | Empty body/quote or duplicate annotation | Fix proposal file; state directory remains byte-unchanged; resume from existing `/app/work/rev_state` without re-importing |
+| Audit failure after edits (rc=1) | Unauthorized edit or newly broken ref | Run `rollback --to-version v0` then `reapply --proposal-ids <valid_ids>` |
+
 ## Failure & Boundary Handling
-- **Missing or truncated chapter files**: Record exact missing chapter numbers or abrupt ending lines in `import_receipt.json` and `result.json.gaps`; never claim full-thesis inspection when segments are absent.
-- **Unresolved source contradictions** (e.g., conflicting sample sizes or unit labels between source chapters): Report both verbatim locations and values in `longdoc_audit.json` and `change_log`; do not silently rewrite original publication numbers.
-- **Flattened citation fields or orphan reference numbers**: Report every unmapped `[N]` or Zotero/EndNote plain-text artifact in `longdoc_audit.json` and add to author confirmation items.
-- **No external client required**: All operations run offline via Python 3.12 standard library; no Word XML engine, remote coauthor server, or external CDN is required or fabricated.
+- **Missing or truncated chapters**: Record exact missing chapter numbers or abrupt endings in `import_receipt.json` and `result.json.gaps`; never claim full-thesis coverage over partial input.
+- **Unresolved source contradictions**: Report both verbatim locations, conditions, and values in `longdoc_audit.json` and `change_log`; never silently overwrite source data.
+- **Cross-disciplinary & anchorless documents**: Domain-agnostic `(entity, unit, value, condition)` extraction covers SI/Chinese units across clinical, regulatory, materials, chemistry, economics, and social science corpora; condition-phrase binding prevents cross-arm/cross-year false positives.
+- **Offline determinism**: Runs entirely via Python 3.12 stdlib (`.docx` OOXML and `.pdf` `zlib` FlateDecode fallbacks included; `pdftotext`/`pdfplumber`/`pypdf` used automatically when present).

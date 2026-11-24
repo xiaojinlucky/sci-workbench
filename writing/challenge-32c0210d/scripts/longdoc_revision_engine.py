@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Offline local revision state machine for long documents and thesis chapters.
 
-Implements the complete organizer-edit-workorder lifecycle using Python 3.12 stdlib only:
-  - import: byte-exact SHA-256 snapshot, paragraph anchor index, coverage & truncation receipt
-  - propose: target-scoped editorial annotation or block proposal with source quote & uncertainty
+Zero-dependency Python 3.12 stdlib implementation (with optional pdftotext/pdfplumber/pypdf
+acceleration for PDFs and stdlib OOXML/zlib fallbacks):
+  - import: byte-exact SHA-256 snapshot (.md/.txt/.tex/.docx/.pdf), adaptive target_id
+    pattern induction + deterministic auto paragraph anchoring, coverage & truncation receipt
+  - propose: target-scoped annotate or substantive replace_block proposal (supports
+    --block-index, --anchor-query, --annotation-file, --replacement-file)
   - accept / reject: individual per-proposal decision preserving all unrequested bytes
-  - diff: unified diff & original-block preservation check between any two versions
-  - rollback: byte-verified restoration to a prior snapshot (e.g., v0)
-  - reapply: deterministic reapplication of accepted proposals with SHA-256 parity check
-  - fault-test: controlled invalid-operation injection proving 100% zero state/file mutation
-  - export: editable chapters, structured revision records, evidence map, offline HTML preview
+  - diff / rollback / reapply: unified diff, 100% SHA-256 rollback, deterministic reapply
+  - fault-test: 5 deliberate invalid operations proving zero state/file mutation
+  - parse-comments: decompose advisor/reviewer comments into trackable edit action items
+  - export: editable chapters, revision records, evidence map, offline HTML diff preview
 """
 
 from __future__ import annotations
@@ -23,12 +25,16 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import xml.etree.ElementTree as ET
+import zipfile
+import zlib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-CHAPTER_EXTS = {".md", ".txt", ".tex"}
-ANCHOR_PATTERNS = [
+CHAPTER_EXTS = {".md", ".txt", ".tex", ".docx", ".pdf"}
+DEFAULT_ANCHOR_PATTERNS = [
     re.compile(r"^\s*\[([A-Za-z0-9]+-P\d+[A-Za-z0-9_-]*)\]"),
     re.compile(r"<!--\s*(?:id\s*:\s*)?([A-Za-z0-9]+-P\d+[A-Za-z0-9_-]*)\s*-->"),
     re.compile(r'id=["\']([A-Za-z0-9]+-P\d+[A-Za-z0-9_-]*)["\']'),
@@ -50,8 +56,6 @@ CHAPTER_NUM_RE = re.compile(r"(?:^|[/_-])(?:ch(?:apter)?|sec(?:tion)?|part|第)\
 
 
 class RevisionError(Exception):
-    """Base error for controlled revision state machine exceptions."""
-
     error_code = "REVISION_ERROR"
 
 
@@ -106,21 +110,252 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
 
 
 def strip_editorial_annotations(text: str) -> str:
-    """Remove tagged editorial annotation blocks to recover original manuscript text."""
-    return ANNOTATION_BLOCK_RE.sub("", text)
+    return ANNOTATION_BLOCK_RE.sub("", text.replace("\r\n", "\n"))
+
+
+def _is_running_header_line(text: str) -> bool:
+    """Filter PDF/DOCX running headers, bare page numbers, and URL footers from evidence quotes."""
+    st = text.strip()
+    if not st:
+        return True
+    low = st.lower()
+    if re.fullmatch(r"\d{1,4}", st) or re.fullmatch(r"page\s*\d+(?:\s*of\s*\d+)?", low):
+        return True
+    if low.startswith(("<!-- page", "## [page", "contains nonbinding recommendations", "https://", "http://", "doi:", "rev paul pediatr")):
+        return True
+    if "contains nonbinding recommendations" in low and len(st) < 420:
+        return True
+    if re.search(r"rev\s+paul\s+pediatr\.?\s*\d{4}", low) and len(st) < 200:
+        return True
+    if re.search(r"https?://\S+", st) and re.search(r"\b\d{2}/\d{2}/\d{2,4}\b", st) and len(st) < 500:
+        return True
+    return False
+
+
+LIVE_CITATION_FIELD_RE = re.compile(
+    r"ADDIN\s+(?:ZOTERO_ITEM|ZOTERO_BIBL|CSL_CITATION|EN\.CITE|EN\.REFLIST|Mendeley)|"
+    r"\b(?:ZOTERO|CSL_CITATION|ENDNOTE|MENDELEY|CITATION)\b",
+    re.I,
+)
+
+
+def _extract_docx_text(docx_path: Path) -> tuple[str, dict[str, Any]]:
+    paras: list[str] = []
+    live_fields: list[str] = []
+    field_systems: set[str] = set()
+    tracked_changes = 0
+    filtered_headers = 0
+    try:
+        with zipfile.ZipFile(docx_path, "r") as zf:
+            for xml_name in ("word/document.xml", "word/footnotes.xml", "word/endnotes.xml"):
+                if xml_name not in zf.namelist():
+                    continue
+                root = ET.fromstring(zf.read(xml_name))
+                for elem in root.iter():
+                    tag = elem.tag.split("}")[-1]
+                    if tag in {"ins", "del"}:
+                        tracked_changes += 1
+                    elif tag == "instrText" and elem.text and elem.text.strip():
+                        code = elem.text.strip()
+                        if LIVE_CITATION_FIELD_RE.search(code):
+                            live_fields.append(code[:140])
+                            low_c = code.lower()
+                            if "zotero" in low_c or "csl" in low_c:
+                                field_systems.add("Zotero/CSL")
+                            if "en.cite" in low_c or "endnote" in low_c:
+                                field_systems.add("EndNote")
+                            if "mendeley" in low_c:
+                                field_systems.add("Mendeley")
+                            if not field_systems:
+                                field_systems.add("Word_Citation_Field")
+                for p_node in root.iter():
+                    if p_node.tag.split("}")[-1] != "p":
+                        continue
+                    pieces: list[str] = []
+                    for child in p_node.iter():
+                        ctag = child.tag.split("}")[-1]
+                        if ctag == "t" and child.text:
+                            pieces.append(child.text)
+                        elif ctag == "tab":
+                            pieces.append("\t")
+                        elif ctag == "br":
+                            pieces.append("\n")
+                    line = "".join(pieces).strip()
+                    if not line:
+                        continue
+                    if _is_running_header_line(line):
+                        filtered_headers += 1
+                        continue
+                    paras.append(line)
+    except (zipfile.BadZipFile, ET.ParseError, OSError) as exc:
+        raise RevisionError(f"Corrupt or unreadable DOCX archive {docx_path.name}: {exc}") from exc
+
+    return "\n\n".join(paras) + "\n", {
+        "format": "docx",
+        "extractor": "stdlib_ooxml",
+        "paragraphs": len(paras),
+        "filtered_running_headers": filtered_headers,
+        "tracked_change_nodes": tracked_changes,
+        "live_citation_fields_detected": len(live_fields),
+        "citation_field_systems": sorted(field_systems),
+        "live_citation_field_samples": live_fields[:6],
+        "format_mode": "derived_markdown_readonly_source",
+        "citation_fields_preserved": False,
+    }
+
+
+def patch_docx_plain_paragraph(src_docx: Path, dst_docx: Path, *, match_substring: str, replacement_substring: str) -> dict[str, Any]:
+    """Targeted OOXML plain-text paragraph patch leaving untouched ZIP members and w:instrText citation fields intact."""
+    if not match_substring or not src_docx.is_file():
+        raise InvalidPatchError("patch_docx_plain_paragraph requires existing src_docx and non-empty match_substring.")
+    patched = False
+    before_fields = 0
+    after_fields = 0
+    with zipfile.ZipFile(src_docx, "r") as zin:
+        doc_xml = zin.read("word/document.xml")
+        root = ET.fromstring(doc_xml)
+        before_fields = sum(1 for e in root.iter() if e.tag.split("}")[-1] == "instrText" and e.text and LIVE_CITATION_FIELD_RE.search(e.text))
+        for p_node in root.iter():
+            if p_node.tag.split("}")[-1] != "p":
+                continue
+            # Never mutate paragraphs containing live citation field instructions
+            has_field = any(c.tag.split("}")[-1] in {"instrText", "fldChar"} for c in p_node.iter())
+            if has_field:
+                continue
+            for t_node in p_node.iter():
+                if t_node.tag.split("}")[-1] == "t" and t_node.text and match_substring in t_node.text:
+                    t_node.text = t_node.text.replace(match_substring, replacement_substring, 1)
+                    patched = True
+                    break
+            if patched:
+                break
+        if not patched:
+            raise TargetNotFoundError("Target plain-text paragraph not found (or protected because it holds live citation fields).")
+        new_doc_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        dst_docx.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(dst_docx, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                zout.writestr(item, new_doc_xml if item.filename == "word/document.xml" else zin.read(item.filename))
+    with zipfile.ZipFile(dst_docx, "r") as zchk:
+        rchk = ET.fromstring(zchk.read("word/document.xml"))
+        after_fields = sum(1 for e in rchk.iter() if e.tag.split("}")[-1] == "instrText" and e.text and LIVE_CITATION_FIELD_RE.search(e.text))
+    return {
+        "ok": patched and (before_fields == after_fields),
+        "format_mode": "targeted_ooxml_plain_text_patch",
+        "live_citation_fields_before": before_fields,
+        "live_citation_fields_after": after_fields,
+        "citation_fields_preserved": before_fields == after_fields,
+        "output_docx": str(dst_docx),
+    }
+
+
+def _extract_pdf_stdlib_zlib(pdf_path: Path) -> tuple[str, int]:
+    raw = pdf_path.read_bytes()
+    pages = len(re.findall(rb"/Type\s*/Page\b(?!s)", raw))
+    chunks: list[str] = []
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", raw, re.DOTALL):
+        data = m.group(1)
+        dec = None
+        for wb in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+            try:
+                dec = zlib.decompress(data, wb)
+                break
+            except Exception:
+                pass
+        s = (dec or data).decode("latin-1", errors="ignore")
+        if "Tj" not in s and "TJ" not in s:
+            continue
+        for tm in re.finditer(r"\(((?:\\.|[^\\)])*)\)\s*Tj", s):
+            t = tm.group(1).replace(r"\(", "(").replace(r"\)", ")").replace(r"\\", "\\").strip()
+            if t:
+                chunks.append(t)
+        for am in re.finditer(r"\[(.*?)\]\s*TJ", s, re.DOTALL):
+            parts = [pm.group(1).replace(r"\(", "(").replace(r"\)", ")") for pm in re.finditer(r"\(((?:\\.|[^\\)])*)\)", am.group(1))]
+            joined = "".join(parts).strip()
+            if joined:
+                chunks.append(joined)
+    return "\n\n".join(chunks) + "\n", max(pages, 1 if chunks else 0)
+
+
+def _read_source_chapter(fp: Path) -> tuple[str, bytes, dict[str, Any]]:
+    raw = fp.read_bytes()
+    suf = fp.suffix.lower()
+    if suf == ".docx":
+        txt, meta = _extract_docx_text(fp)
+    elif suf == ".pdf":
+        approx_pages = len(re.findall(rb"/Type\s*/Page\b(?!s)", raw))
+        txt, meta = "", {"format": "pdf", "extractor": "stdlib_zlib_fallback", "pages": approx_pages}
+        bin_p = shutil.which("pdftotext")
+        if bin_p:
+            try:
+                pr = subprocess.run([bin_p, "-enc", "UTF-8", str(fp), "-"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+                if pr.returncode == 0 and pr.stdout.strip():
+                    txt, meta = pr.stdout, {"format": "pdf", "extractor": "pdftotext", "pages": approx_pages or 1}
+            except Exception:
+                pass
+        if not txt.strip():
+            try:
+                import pdfplumber  # type: ignore
+                with pdfplumber.open(str(fp)) as doc:
+                    joined = "\n\n".join((pg.extract_text() or "") for pg in doc.pages if (pg.extract_text() or "").strip())
+                    if joined.strip():
+                        txt = joined + "\n"
+                        meta = {"format": "pdf", "extractor": "pdfplumber", "pages": len(doc.pages)}
+            except Exception:
+                pass
+        if not txt.strip():
+            try:
+                from pypdf import PdfReader  # type: ignore
+                rd = PdfReader(str(fp))
+                joined = "\n\n".join((pg.extract_text() or "") for pg in rd.pages if (pg.extract_text() or "").strip())
+                if joined.strip():
+                    txt = joined + "\n"
+                    meta = {"format": "pdf", "extractor": "pypdf", "pages": len(rd.pages)}
+            except Exception:
+                pass
+        if not txt.strip():
+            txt, pages = _extract_pdf_stdlib_zlib(fp)
+            meta = {"format": "pdf", "extractor": "stdlib_zlib_fallback", "pages": pages}
+        meta["format_mode"] = "derived_markdown_readonly_source"
+        meta["citation_fields_preserved"] = False
+    else:
+        txt = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
+        meta = {
+            "format": suf.lstrip(".") or "txt",
+            "extractor": "utf8_text",
+            "format_mode": "native_text_in_place",
+            "citation_fields_preserved": True,
+            "live_citation_fields_detected": 0,
+        }
+    meta["source_bytes"] = len(raw)
+    meta["source_sha256"] = _sha256_bytes(raw)
+    return txt, raw, meta
+
+
+def _induce_anchor_patterns(target_ids: list[str]) -> list[re.Pattern[str]]:
+    patterns = list(DEFAULT_ANCHOR_PATTERNS)
+    seen: set[str] = set()
+    for tid in target_ids:
+        t = tid.strip()
+        if not t:
+            continue
+        shape = "".join(
+            r"[A-Za-z]+" if tok.isalpha() else (r"\d+" if tok.isdigit() else re.escape(tok))
+            for tok in re.findall(r"[A-Za-z]+|\d+|[^A-Za-z0-9]+", t)
+        )
+        if shape not in seen:
+            seen.add(shape)
+            patterns.append(
+                re.compile(rf"(?:^\s*\[|<!--\s*(?:id\s*:\s*)?|id=[\"']|\{{#|\s|^|^\s*\*\*)({shape})(?:[\]\"'}}:*：]|\s|$)")
+            )
+    return patterns
 
 
 def parse_workorder(workorder_path: Path | None) -> dict[str, Any]:
-    """Parse organizer-edit-workorder.json or case.json containing organizer_edit_workorder."""
     if not workorder_path or not workorder_path.is_file():
         return {
-            "present": False,
-            "workorder_id": None,
-            "schema_mode": "none",
-            "target_ids": [],
-            "target_files": [],
-            "operation_requirements": [],
-            "raw_source_path": None,
+            "present": False, "workorder_id": None, "schema_mode": "none",
+            "target_ids": [], "target_files": [], "operation_requirements": [], "raw_source_path": None,
         }
     raw = json.loads(workorder_path.read_text(encoding="utf-8"))
     wo = raw.get("organizer_edit_workorder", raw) if isinstance(raw, dict) else {}
@@ -165,9 +400,9 @@ def parse_workorder(workorder_path: Path | None) -> dict[str, Any]:
     }
 
 
-def _extract_anchor_id(block_text: str) -> str | None:
+def _extract_anchor_id(block_text: str, patterns: list[re.Pattern[str]] | None = None) -> str | None:
     first_lines = "\n".join(block_text.splitlines()[:3])
-    for pat in ANCHOR_PATTERNS:
+    for pat in (patterns or DEFAULT_ANCHOR_PATTERNS):
         m = pat.search(first_lines)
         if m:
             return m.group(1).strip()
@@ -175,7 +410,6 @@ def _extract_anchor_id(block_text: str) -> str | None:
 
 
 def _split_blocks_with_offsets(text: str) -> list[dict[str, Any]]:
-    """Split text into paragraph blocks while preserving exact character offsets."""
     blocks: list[dict[str, Any]] = []
     pos = 0
     length = len(text)
@@ -187,12 +421,9 @@ def _split_blocks_with_offsets(text: str) -> list[dict[str, Any]]:
             if chunk.strip():
                 idx += 1
                 blocks.append({
-                    "block_index": idx,
-                    "start": pos,
-                    "end": end,
+                    "block_index": idx, "start": pos, "end": end,
                     "start_line": text.count("\n", 0, pos) + 1,
-                    "end_line": text.count("\n", 0, end) + 1,
-                    "text": chunk,
+                    "end_line": text.count("\n", 0, end) + 1, "text": chunk,
                 })
         pos = m.end()
     if pos < length:
@@ -200,97 +431,15 @@ def _split_blocks_with_offsets(text: str) -> list[dict[str, Any]]:
         if chunk.strip():
             idx += 1
             blocks.append({
-                "block_index": idx,
-                "start": pos,
-                "end": length,
+                "block_index": idx, "start": pos, "end": length,
                 "start_line": text.count("\n", 0, pos) + 1,
-                "end_line": text.count("\n", 0, length) + 1,
-                "text": chunk,
+                "end_line": text.count("\n", 0, length) + 1, "text": chunk,
             })
     return blocks
 
 
 def _scan_chapter_files(chapters_dir: Path) -> list[Path]:
-    return sorted(
-        p for p in chapters_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in CHAPTER_EXTS
-    )
-
-
-def _detect_coverage_and_truncation(
-    chapters_dir: Path,
-    files: list[Path],
-    toc_path: Path | None = None,
-) -> dict[str, Any]:
-    chapter_nums: list[int] = []
-    truncation_risks: list[dict[str, Any]] = []
-    chapter_inventory: list[dict[str, Any]] = []
-
-    for fp in files:
-        rel = fp.relative_to(chapters_dir).as_posix()
-        raw = fp.read_bytes()
-        text = raw.decode("utf-8", errors="replace")
-        lines = text.splitlines()
-        chapter_inventory.append({
-            "file": rel,
-            "bytes": len(raw),
-            "lines": len(lines),
-            "chars": len(text),
-            "sha256": _sha256_bytes(raw),
-        })
-        m_num = CHAPTER_NUM_RE.search(rel)
-        if m_num:
-            chapter_nums.append(int(m_num.group(1)))
-
-        if TRUNCATION_MARKER_RE.search(text):
-            truncation_risks.append({
-                "file": rel,
-                "reason": "explicit_truncation_or_missing_page_marker",
-                "excerpt": text.strip()[-120:],
-            })
-        else:
-            stripped = text.rstrip()
-            if stripped and len(stripped) >= 80:
-                last_char = stripped[-1]
-                last_line = stripped.splitlines()[-1].strip()
-                if (
-                    last_char not in ".!?。！？)]}”\"'`|>"
-                    and not last_line.startswith(("#", "|", "-", "*", "\\"))
-                ):
-                    truncation_risks.append({
-                        "file": rel,
-                        "reason": "abrupt_unpunctuated_ending",
-                        "excerpt": last_line[-120:],
-                    })
-
-    missing_chapters: list[str] = []
-    if chapter_nums:
-        lo, hi = min(chapter_nums), max(chapter_nums)
-        present_set = set(chapter_nums)
-        for n in range(lo, hi + 1):
-            if n not in present_set:
-                missing_chapters.append(f"chapter_{n:02d}")
-
-    toc_gaps: list[str] = []
-    if toc_path and toc_path.is_file():
-        toc = json.loads(toc_path.read_text(encoding="utf-8"))
-        expected = toc.get("expected_chapters", []) if isinstance(toc, dict) else []
-        present_rels = {item["file"] for item in chapter_inventory}
-        for exp in expected:
-            exp_name = exp.get("file", "") if isinstance(exp, dict) else str(exp)
-            if exp_name and exp_name not in present_rels:
-                toc_gaps.append(exp_name)
-                if exp_name not in missing_chapters:
-                    missing_chapters.append(exp_name)
-
-    return {
-        "chapters_imported": len(files),
-        "chapter_inventory": chapter_inventory,
-        "missing_chapters": missing_chapters,
-        "toc_gaps": toc_gaps,
-        "truncation_risks": truncation_risks,
-        "complete_coverage_claimed": len(missing_chapters) == 0 and len(truncation_risks) == 0,
-    }
+    return sorted(p for p in chapters_dir.rglob("*") if p.is_file() and p.suffix.lower() in CHAPTER_EXTS)
 
 
 def _collect_dir_hashes(root: Path) -> dict[str, str]:
@@ -298,8 +447,7 @@ def _collect_dir_hashes(root: Path) -> dict[str, str]:
     if not root.is_dir():
         return out
     for fp in sorted(p for p in root.rglob("*") if p.is_file()):
-        rel = fp.relative_to(root).as_posix()
-        out[rel] = _sha256_file(fp)
+        out[fp.relative_to(root).as_posix()] = _sha256_file(fp)
     return out
 
 
@@ -308,8 +456,7 @@ def _copy_tree(src: Path, dst: Path) -> None:
         shutil.rmtree(dst)
     dst.mkdir(parents=True, exist_ok=True)
     for fp in sorted(p for p in src.rglob("*") if p.is_file()):
-        rel = fp.relative_to(src)
-        target = dst / rel
+        target = dst / fp.relative_to(src)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(fp, target)
 
@@ -319,19 +466,12 @@ def _load_state(state_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]], 
     if not manifest_p.is_file():
         raise RevisionError(f"State directory not initialized: {state_dir}")
     manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
-    proposals_p = state_dir / "proposals.json"
-    proposals = json.loads(proposals_p.read_text(encoding="utf-8")) if proposals_p.is_file() else []
-    history_p = state_dir / "history.json"
-    history = json.loads(history_p.read_text(encoding="utf-8")) if history_p.is_file() else []
+    proposals = json.loads((state_dir / "proposals.json").read_text(encoding="utf-8")) if (state_dir / "proposals.json").is_file() else []
+    history = json.loads((state_dir / "history.json").read_text(encoding="utf-8")) if (state_dir / "history.json").is_file() else []
     return manifest, proposals, history
 
 
-def _save_state(
-    state_dir: Path,
-    manifest: dict[str, Any],
-    proposals: list[dict[str, Any]],
-    history: list[dict[str, Any]],
-) -> None:
+def _save_state(state_dir: Path, manifest: dict[str, Any], proposals: list[dict[str, Any]], history: list[dict[str, Any]]) -> None:
     _atomic_write_json(state_dir / "manifest.json", manifest)
     _atomic_write_json(state_dir / "proposals.json", proposals)
     _atomic_write_json(state_dir / "history.json", history)
@@ -344,13 +484,14 @@ def cmd_import(
     workorder_path: Path | None = None,
     toc_path: Path | None = None,
     receipt_out: Path | None = None,
+    allow_file_fallback: bool = False,
 ) -> dict[str, Any]:
     files = _scan_chapter_files(chapters_dir)
     if not files:
-        raise RevisionError(f"No chapter files (.md/.txt/.tex) found in {chapters_dir}")
+        raise RevisionError(f"No chapter files (.md/.txt/.tex/.docx/.pdf) found in {chapters_dir}")
 
     wo = parse_workorder(workorder_path)
-    coverage = _detect_coverage_and_truncation(chapters_dir, files, toc_path=toc_path)
+    anchor_patterns = _induce_anchor_patterns(wo["target_ids"])
 
     if state_dir.exists():
         shutil.rmtree(state_dir)
@@ -361,24 +502,51 @@ def cmd_import(
 
     anchor_index: dict[str, dict[str, Any]] = {}
     initial_sha256: dict[str, str] = {}
+    initial_source_meta: dict[str, dict[str, Any]] = {}
+    chapter_inventory: list[dict[str, Any]] = []
+    chapter_nums: list[int] = []
+    truncation_risks: list[dict[str, Any]] = []
 
     for ch_idx, fp in enumerate(files, 1):
-        rel = fp.relative_to(chapters_dir).as_posix()
-        raw = fp.read_bytes()
-        initial_sha256[rel] = _sha256_bytes(raw)
-        for dest_root in (snap_v0, working):
-            dest = dest_root / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(raw)
+        orig_rel = fp.relative_to(chapters_dir).as_posix()
+        text, raw_bytes, rmeta = _read_source_chapter(fp)
+        is_binary_src = fp.suffix.lower() in {".docx", ".pdf"}
+        # Normalize line endings to \n on text import so annotate strip roundtrip SHA-256 is 100% exact
+        work_rel = f"{orig_rel}.extracted.md" if is_binary_src else orig_rel
+        work_bytes = text.replace("\r\n", "\n").encode("utf-8") if is_binary_src else raw_bytes.replace(b"\r\n", b"\n")
+        initial_sha256[work_rel] = _sha256_bytes(work_bytes)
+        initial_source_meta[work_rel] = {"original_file": orig_rel, **rmeta}
 
-        text = raw.decode("utf-8", errors="replace")
+        for dest_root in (snap_v0, working):
+            dest = dest_root / work_rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(work_bytes)
+
+        chapter_inventory.append({
+            "file": work_rel, "original_file": orig_rel, "format": rmeta["format"],
+            "extractor": rmeta["extractor"], "bytes": len(work_bytes),
+            "lines": len(text.splitlines()), "chars": len(text), "sha256": initial_sha256[work_rel],
+        })
+        m_num = CHAPTER_NUM_RE.search(orig_rel)
+        if m_num:
+            chapter_nums.append(int(m_num.group(1)))
+
+        if TRUNCATION_MARKER_RE.search(text):
+            truncation_risks.append({"file": work_rel, "reason": "explicit_truncation_marker", "excerpt": text.strip()[-120:]})
+        else:
+            st = text.rstrip()
+            if len(st) >= 80:
+                last_line = st.splitlines()[-1].strip()
+                if st[-1] not in ".!?。！？)]}”\"'`|>" and not last_line.startswith(("#", "|", "-", "*", "\\")):
+                    truncation_risks.append({"file": work_rel, "reason": "abrupt_unpunctuated_ending", "excerpt": last_line[-120:]})
+
         for blk in _split_blocks_with_offsets(text):
-            explicit_id = _extract_anchor_id(blk["text"])
+            explicit_id = _extract_anchor_id(blk["text"], anchor_patterns)
             aid = explicit_id or f"CH{ch_idx:02d}-P{blk['block_index']:03d}"
             if aid in anchor_index:
-                aid = f"{rel}::P{blk['block_index']:03d}"
+                aid = f"{work_rel}::P{blk['block_index']:03d}"
             anchor_index[aid] = {
-                "file": rel,
+                "file": work_rel,
                 "block_index": blk["block_index"],
                 "start_line": blk["start_line"],
                 "end_line": blk["end_line"],
@@ -387,7 +555,33 @@ def cmd_import(
                 "preview": " ".join(blk["text"].split())[:140],
             }
 
-    # Resolve workorder target_ids to files
+    missing_chapters: list[str] = []
+    if chapter_nums:
+        present = set(chapter_nums)
+        for n in range(min(present), max(present) + 1):
+            if n not in present:
+                missing_chapters.append(f"chapter_{n:02d}")
+    toc_gaps: list[str] = []
+    if toc_path and toc_path.is_file():
+        toc = json.loads(toc_path.read_text(encoding="utf-8"))
+        present_rels = {item["original_file"] for item in chapter_inventory} | set(initial_sha256.keys())
+        for exp in (toc.get("expected_chapters", []) if isinstance(toc, dict) else []):
+            exp_name = exp.get("file", "") if isinstance(exp, dict) else str(exp)
+            if exp_name and exp_name not in present_rels:
+                toc_gaps.append(exp_name)
+                if exp_name not in missing_chapters:
+                    missing_chapters.append(exp_name)
+
+    coverage = {
+        "chapters_imported": len(files),
+        "chapter_inventory": chapter_inventory,
+        "missing_chapters": missing_chapters,
+        "toc_gaps": toc_gaps,
+        "truncation_risks": truncation_risks,
+        "complete_coverage_claimed": len(missing_chapters) == 0 and len(truncation_risks) == 0,
+    }
+
+    # Resolve workorder target_ids strictly (never silently fall back to full-file passthrough!)
     resolved_targets: dict[str, str] = {}
     missing_targets: list[str] = []
     for tid in wo["target_ids"]:
@@ -396,46 +590,80 @@ def cmd_import(
         else:
             missing_targets.append(tid)
 
-    authorized_files = sorted(set(wo["target_files"]) | set(resolved_targets.values()))
+    # Map original file names in workorder to working relative names (handles .docx/.pdf -> .extracted.md)
+    orig_to_work = {v["original_file"]: k for k, v in initial_source_meta.items()}
+    norm_target_files = [orig_to_work.get(tf, tf) for tf in wo["target_files"]]
+    authorized_files = sorted(set(norm_target_files) | set(resolved_targets.values()))
+
+    if missing_targets:
+        scope_status = "DEGRADED_FILE_LEVEL_WARNING" if (allow_file_fallback and norm_target_files) else "BLOCKED_MISSING_TARGETS"
+    else:
+        scope_status = "ENFORCED" if wo["present"] else "UNCONSTRAINED"
+
     manifest = {
-        "schema_version": "2.0",
+        "schema_version": "2.1",
         "imported_at_utc": _utc_now(),
         "current_version": "v0",
         "version_counter": 0,
         "workorder": wo,
+        "scope_enforcement_status": scope_status,
         "authorized_target_ids": wo["target_ids"],
         "authorized_files": authorized_files,
         "resolved_target_map": resolved_targets,
         "missing_workorder_targets": missing_targets,
         "initial_sha256": initial_sha256,
+        "initial_source_meta": initial_source_meta,
         "anchor_index": anchor_index,
         "coverage": coverage,
     }
-    history = [
-        {
-            "event": "import",
-            "version": "v0",
-            "parent_version": None,
-            "timestamp_utc": manifest["imported_at_utc"],
-            "file_sha256": initial_sha256,
-            "notes": f"Imported {len(files)} chapter file(s) with {len(anchor_index)} indexed block(s).",
-        }
-    ]
+    history = [{
+        "event": "import", "version": "v0", "parent_version": None,
+        "timestamp_utc": manifest["imported_at_utc"], "file_sha256": initial_sha256,
+        "notes": f"Imported {len(files)} chapter file(s) with {len(anchor_index)} indexed block(s); scope_status={scope_status}.",
+    }]
+    _save_state(state_dir, manifest, [], history)
+
+    has_derived_binary = any(m.get("format_mode") == "derived_markdown_readonly_source" for m in initial_source_meta.values())
+    total_live_fields = sum(int(m.get("live_citation_fields_detected", 0)) for m in initial_source_meta.values())
+    format_declaration = {
+        "format_mode": "derived_markdown_readonly_source" if has_derived_binary else "native_text_in_place",
+        "citation_fields_preserved": not has_derived_binary,
+        "live_citation_fields_detected": total_live_fields,
+        "per_file_format_meta": {
+            k: {
+                "original_file": v.get("original_file"),
+                "format": v.get("format"),
+                "format_mode": v.get("format_mode", "native_text_in_place"),
+                "citation_fields_preserved": v.get("citation_fields_preserved", True),
+                "live_citation_fields_detected": v.get("live_citation_fields_detected", 0),
+                "citation_field_systems": v.get("citation_field_systems", []),
+            }
+            for k, v in initial_source_meta.items()
+        },
+    }
+    manifest["format_declaration"] = format_declaration
     _save_state(state_dir, manifest, [], history)
 
     receipt = {
-        "ok": True,
+        "ok": scope_status != "BLOCKED_MISSING_TARGETS",
         "receipt_type": "import_receipt",
         "imported_at_utc": manifest["imported_at_utc"],
         "current_version": "v0",
         "chapters_count": len(files),
         "indexed_anchors_count": len(anchor_index),
+        "explicit_anchors_count": sum(1 for v in anchor_index.values() if v["explicit"]),
+        "auto_anchors_count": sum(1 for v in anchor_index.values() if not v["explicit"]),
         "workorder_id": wo["workorder_id"],
         "workorder_schema_mode": wo["schema_mode"],
+        "scope_enforcement_status": scope_status,
         "authorized_target_ids": wo["target_ids"],
         "authorized_files": authorized_files,
         "resolved_target_map": resolved_targets,
         "missing_workorder_targets": missing_targets,
+        "format_mode": format_declaration["format_mode"],
+        "citation_fields_preserved": format_declaration["citation_fields_preserved"],
+        "live_citation_fields_detected": format_declaration["live_citation_fields_detected"],
+        "format_declaration": format_declaration,
         "initial_sha256": initial_sha256,
         "coverage_manifest": coverage,
     }
@@ -449,9 +677,20 @@ def _check_authorization(
     *,
     target_id: str | None,
     file_rel: str | None,
-) -> tuple[str, str]:
+    block_index: int | None = None,
+    anchor_query: str = "",
+) -> tuple[str, str, str]:
+    """Resolve and enforce workorder authorization. Never silently bypasses missing_targets."""
     anchors = manifest["anchor_index"]
     wo = manifest["workorder"]
+    scope_status = manifest.get("scope_enforcement_status", "ENFORCED")
+    anchoring_warning = ""
+
+    if wo["present"] and scope_status == "BLOCKED_MISSING_TARGETS":
+        raise UnauthorizedTargetError(
+            f"Workorder scope blocked: target_ids {manifest.get('missing_workorder_targets')} were not found in imported chapters."
+        )
+
     resolved_file = file_rel
     resolved_tid = target_id
 
@@ -460,14 +699,31 @@ def _check_authorization(
             raise TargetNotFoundError(f"Target anchor {target_id!r} not found in imported chapters.")
         resolved_file = anchors[target_id]["file"]
     elif file_rel:
-        if file_rel not in manifest["initial_sha256"]:
+        orig_to_work = {v.get("original_file"): k for k, v in manifest.get("initial_source_meta", {}).items()}
+        resolved_file = orig_to_work.get(file_rel, file_rel)
+        if resolved_file not in manifest["initial_sha256"]:
             raise TargetNotFoundError(f"Chapter file {file_rel!r} not found in imported chapters.")
-        # Pick the last block of the file if only chapter file is specified
-        file_anchors = [
-            (aid, meta) for aid, meta in anchors.items() if meta["file"] == file_rel
-        ]
-        file_anchors.sort(key=lambda x: x[1]["block_index"])
-        resolved_tid = file_anchors[-1][0]
+        file_anchors = sorted(
+            [(aid, meta) for aid, meta in anchors.items() if meta["file"] == resolved_file],
+            key=lambda x: x[1]["block_index"],
+        )
+        if block_index is not None:
+            hit = next((aid for aid, m in file_anchors if m["block_index"] == block_index), None)
+            if not hit:
+                raise TargetNotFoundError(f"Block index {block_index} not found in {resolved_file!r}.")
+            resolved_tid = hit
+        elif anchor_query.strip():
+            q = anchor_query.strip().lower()
+            hit = next((aid for aid, m in file_anchors if q in m["preview"].lower()), None)
+            if not hit:
+                raise TargetNotFoundError(f"No block matching query {anchor_query!r} in {resolved_file!r}.")
+            resolved_tid = hit
+        else:
+            resolved_tid = file_anchors[-1][0]
+            anchoring_warning = (
+                f"No --target-id, --block-index, or --anchor-query provided for {resolved_file}; "
+                f"defaulted to trailing block {resolved_tid}."
+            )
     else:
         raise InvalidPatchError("Either --target-id or --file must be provided.")
 
@@ -475,15 +731,15 @@ def _check_authorization(
     if wo["present"]:
         auth_ids = set(manifest.get("authorized_target_ids", []))
         auth_files = set(manifest.get("authorized_files", []))
-        if auth_ids and resolved_tid not in auth_ids:
+        if auth_ids and scope_status == "ENFORCED" and resolved_tid not in auth_ids:
             raise UnauthorizedTargetError(
-                f"Target {resolved_tid!r} is outside organizer-edit-workorder authorized target_ids {sorted(auth_ids)}."
+                f"Target {resolved_tid!r} is outside workorder authorized target_ids {sorted(auth_ids)}."
             )
-        if not auth_ids and auth_files and resolved_file not in auth_files:
+        if (not auth_ids or scope_status == "DEGRADED_FILE_LEVEL_WARNING") and auth_files and resolved_file not in auth_files:
             raise UnauthorizedTargetError(
-                f"File {resolved_file!r} is outside organizer-edit-workorder authorized files {sorted(auth_files)}."
+                f"File {resolved_file!r} is outside workorder authorized files {sorted(auth_files)}."
             )
-    return resolved_tid, resolved_file
+    return resolved_tid, resolved_file, anchoring_warning
 
 
 def _format_annotation_block(prop: dict[str, Any]) -> str:
@@ -498,21 +754,31 @@ def _format_annotation_block(prop: dict[str, Any]) -> str:
     return "\n\n" + "\n".join(lines)
 
 
-def _apply_proposal_to_text(text: str, prop: dict[str, Any], anchor_meta: dict[str, Any]) -> str:
+def _apply_proposal_to_text(
+    text: str,
+    prop: dict[str, Any],
+    anchor_meta: dict[str, Any],
+    anchor_patterns: list[re.Pattern[str]],
+) -> str:
     blocks = _split_blocks_with_offsets(text)
     target_blk = None
     tid = prop["target_id"]
     for blk in blocks:
-        if _extract_anchor_id(blk["text"]) == tid:
+        if _extract_anchor_id(blk["text"], anchor_patterns) == tid:
             target_blk = blk
             break
     if target_blk is None:
-        # Match by original SHA-256 of the block (ignoring previously inserted annotations)
         orig_hash = anchor_meta["original_sha256"]
         for blk in blocks:
             if _sha256_bytes(blk["text"].encode("utf-8")) == orig_hash:
                 target_blk = blk
                 break
+    if target_blk is None:
+        bidx = anchor_meta.get("block_index")
+        if isinstance(bidx, int) and 1 <= bidx <= len(blocks):
+            cand = blocks[bidx - 1]
+            if not cand["text"].lstrip().startswith("> [Editorial Annotation"):
+                target_blk = cand
     if target_blk is None:
         raise TargetNotFoundError(f"Could not locate intact original block for {tid!r} in {prop['file']}.")
 
@@ -520,8 +786,7 @@ def _apply_proposal_to_text(text: str, prop: dict[str, Any], anchor_meta: dict[s
         marker = f"[Editorial Annotation | ID: {prop['proposal_id']} |"
         if marker in text:
             raise InvalidPatchError(f"Proposal {prop['proposal_id']} is already applied.")
-        insertion = _format_annotation_block(prop)
-        return text[: target_blk["end"]] + insertion + text[target_blk["end"] :]
+        return text[: target_blk["end"]] + _format_annotation_block(prop) + text[target_blk["end"] :]
 
     if prop["mode"] == "replace_block":
         replacement = prop.get("replacement_text", "").strip()
@@ -532,11 +797,25 @@ def _apply_proposal_to_text(text: str, prop: dict[str, Any], anchor_meta: dict[s
     raise InvalidPatchError(f"Unsupported proposal mode: {prop['mode']!r}")
 
 
+def _load_review_items(state_dir: Path) -> list[dict[str, Any]]:
+    rp = state_dir / "review_items.json"
+    if not rp.is_file():
+        return []
+    data = json.loads(rp.read_text(encoding="utf-8"))
+    return data if isinstance(data, list) else data.get("action_items", [])
+
+
+def _save_review_items(state_dir: Path, items: list[dict[str, Any]]) -> None:
+    _atomic_write_json(state_dir / "review_items.json", items)
+
+
 def cmd_propose(
     state_dir: Path,
     *,
     target_id: str | None = None,
     file_rel: str | None = None,
+    block_index: int | None = None,
+    anchor_query: str = "",
     mode: str = "annotate",
     title: str = "",
     annotation: str = "",
@@ -544,6 +823,7 @@ def cmd_propose(
     source_ref: str = "",
     uncertainty: str = "",
     replacement_text: str = "",
+    review_item_id: str = "",
 ) -> dict[str, Any]:
     manifest, proposals, history = _load_state(state_dir)
     if mode == "replace":
@@ -555,50 +835,68 @@ def cmd_propose(
     if mode == "annotate" and not annotation.strip():
         raise InvalidPatchError("Annotation body must be non-empty.")
     if mode == "replace_block" and not replacement_text.strip():
-        raise InvalidPatchError("Substantive replace mode requires non-empty --replacement-text.")
+        raise InvalidPatchError("Substantive replace mode requires non-empty --replacement-text or --replacement-file.")
     if not source_quote.strip() or not source_ref.strip():
         raise InvalidPatchError("Both --source-quote and --source-ref are required for grounded revisions.")
+    if _is_running_header_line(source_quote):
+        raise InvalidPatchError(f"Running header or page-banner text cannot serve as evidence source_quote: {source_quote!r}")
 
-    resolved_tid, resolved_file = _check_authorization(manifest, target_id=target_id, file_rel=file_rel)
+    resolved_tid, resolved_file, anchoring_warning = _check_authorization(
+        manifest, target_id=target_id, file_rel=file_rel, block_index=block_index, anchor_query=anchor_query
+    )
+    review_items = _load_review_items(state_dir)
+    linked_rid = review_item_id.strip() or None
+    if linked_rid:
+        ritem = next((it for it in review_items if it.get("action_id") == linked_rid or it.get("review_item_id") == linked_rid), None)
+        if ritem is None:
+            raise InvalidPatchError(f"Review item {linked_rid!r} not found in state_dir/review_items.json.")
+        if ritem.get("resolution_status") == "out_of_scope":
+            raise UnauthorizedTargetError(f"Review item {linked_rid!r} is marked out_of_scope and cannot be auto-resolved.")
+        if ritem.get("suggested_target_id") and ritem["suggested_target_id"] != resolved_tid:
+            raise InvalidPatchError(
+                f"4-key anchor mismatch: review item {linked_rid} targets {ritem['suggested_target_id']}, "
+                f"but proposal targets {resolved_tid}."
+            )
+    else:
+        # Auto-link if an existing review item binds directly to this target_id
+        auto_r = next((it for it in review_items if it.get("suggested_target_id") == resolved_tid and it.get("resolution_status") not in {"out_of_scope", "resolved"}), None)
+        if auto_r:
+            linked_rid = auto_r.get("review_item_id") or auto_r.get("action_id")
+
     prop_id = f"P{len(proposals) + 1:04d}"
-
     prop = {
-        "proposal_id": prop_id,
-        "target_id": resolved_tid,
-        "file": resolved_file,
-        "mode": mode,
-        "title": title.strip(),
-        "annotation": annotation.strip(),
-        "source_quote": source_quote.strip(),
-        "source_ref": source_ref.strip(),
-        "uncertainty": uncertainty.strip(),
-        "replacement_text": replacement_text.strip(),
-        "status": "proposed",
-        "decision_reason": "",
-        "applied_version": None,
-        "created_at_utc": _utc_now(),
-        "decided_at_utc": None,
+        "proposal_id": prop_id, "review_item_id": linked_rid,
+        "target_id": resolved_tid, "file": resolved_file, "mode": mode,
+        "title": title.strip(), "annotation": annotation.strip(), "source_quote": source_quote.strip(),
+        "source_ref": source_ref.strip(), "uncertainty": uncertainty.strip(),
+        "replacement_text": replacement_text.strip(), "status": "proposed", "decision_reason": "",
+        "applied_version": None, "created_at_utc": _utc_now(), "decided_at_utc": None,
     }
-    # Dry-run apply to guarantee patch validity before mutating proposals.json
-    work_file = state_dir / "working" / resolved_file
-    cur_text = work_file.read_text(encoding="utf-8")
-    _ = _apply_proposal_to_text(cur_text, prop, manifest["anchor_index"][resolved_tid])
+    anchor_patterns = _induce_anchor_patterns(manifest.get("authorized_target_ids", []))
+    cur_text = (state_dir / "working" / resolved_file).read_text(encoding="utf-8")
+    _ = _apply_proposal_to_text(cur_text, prop, manifest["anchor_index"][resolved_tid], anchor_patterns)
+
+    if linked_rid:
+        for it in review_items:
+            if it.get("action_id") == linked_rid or it.get("review_item_id") == linked_rid:
+                it["target_id"] = resolved_tid
+                it["suggested_target_id"] = resolved_tid
+                it["linked_proposal_id"] = prop_id
+                it["proposal_id"] = prop_id
+                it["resolution_status"] = "proposed"
+        _save_review_items(state_dir, review_items)
 
     proposals.append(prop)
     _save_state(state_dir, manifest, proposals, history)
-    return {"ok": True, "proposal": prop}
+    out: dict[str, Any] = {"ok": True, "proposal": prop}
+    if anchoring_warning:
+        out["warning"] = anchoring_warning
+    return out
 
 
-def cmd_decide(
-    state_dir: Path,
-    *,
-    proposal_id: str,
-    action: str,
-    reason: str = "",
-) -> dict[str, Any]:
+def cmd_decide(state_dir: Path, *, proposal_id: str, action: str, reason: str = "") -> dict[str, Any]:
     if action not in {"accept", "reject"}:
         raise InvalidPatchError(f"Invalid decision action: {action!r}")
-
     manifest, proposals, history = _load_state(state_dir)
     prop = next((p for p in proposals if p["proposal_id"] == proposal_id), None)
     if prop is None:
@@ -615,40 +913,34 @@ def cmd_decide(
         prop["decided_at_utc"] = _utc_now()
         post_hashes = _collect_dir_hashes(working_dir)
         unchanged = pre_hashes == post_hashes
+        if prop.get("review_item_id"):
+            ritems = _load_review_items(state_dir)
+            for it in ritems:
+                if it.get("review_item_id") == prop["review_item_id"] or it.get("action_id") == prop["review_item_id"]:
+                    it["resolution_status"] = "unresolved"
+                    it["resolution_reason"] = f"Linked proposal {proposal_id} rejected: {prop['decision_reason']}"
+            _save_review_items(state_dir, ritems)
         history.append({
-            "event": "reject",
-            "proposal_id": proposal_id,
-            "version": manifest["current_version"],
-            "parent_version": manifest["current_version"],
-            "timestamp_utc": prop["decided_at_utc"],
-            "reason": prop["decision_reason"],
-            "working_bytes_unchanged": unchanged,
-            "file_sha256": post_hashes,
+            "event": "reject", "proposal_id": proposal_id, "version": manifest["current_version"],
+            "parent_version": manifest["current_version"], "timestamp_utc": prop["decided_at_utc"],
+            "reason": prop["decision_reason"], "working_bytes_unchanged": unchanged, "file_sha256": post_hashes,
         })
         _save_state(state_dir, manifest, proposals, history)
-        return {
-            "ok": True,
-            "action": "reject",
-            "proposal_id": proposal_id,
-            "current_version": manifest["current_version"],
-            "working_bytes_unchanged": unchanged,
-        }
+        return {"ok": True, "action": "reject", "proposal_id": proposal_id, "current_version": manifest["current_version"], "working_bytes_unchanged": unchanged}
 
-    # Accept: apply strictly to authorized file and verify non-target files + original text
+    anchor_patterns = _induce_anchor_patterns(manifest.get("authorized_target_ids", []))
     target_file = working_dir / prop["file"]
     cur_text = target_file.read_text(encoding="utf-8")
-    new_text = _apply_proposal_to_text(cur_text, prop, manifest["anchor_index"][prop["target_id"]])
-    if prop["mode"] == "annotate":
+    new_text = _apply_proposal_to_text(cur_text, prop, manifest["anchor_index"][prop["target_id"]], anchor_patterns)
+    has_prior_replace = any(p["status"] == "accepted" and p["file"] == prop["file"] and p["mode"] == "replace_block" for p in proposals)
+    if prop["mode"] == "annotate" and not has_prior_replace:
         v0_text = (state_dir / "snapshots" / "v0" / prop["file"]).read_text(encoding="utf-8")
         if strip_editorial_annotations(new_text) != v0_text:
             raise InvalidPatchError("Annotation unexpectedly altered original publication text.")
 
     _atomic_write_text(target_file, new_text)
     post_hashes = _collect_dir_hashes(working_dir)
-
-    untouched_changed = [
-        rel for rel, h in pre_hashes.items() if rel != prop["file"] and post_hashes.get(rel) != h
-    ]
+    untouched_changed = [rel for rel, h in pre_hashes.items() if rel != prop["file"] and post_hashes.get(rel) != h]
     if untouched_changed:
         raise RevisionError(f"Unrequested chapters changed unexpectedly: {untouched_changed}")
 
@@ -662,26 +954,26 @@ def cmd_decide(
     prop["decision_reason"] = reason.strip() or "Accepted source-grounded editorial change."
     prop["applied_version"] = new_ver
     prop["decided_at_utc"] = _utc_now()
+    if prop.get("review_item_id"):
+        ritems = _load_review_items(state_dir)
+        for it in ritems:
+            if it.get("review_item_id") == prop["review_item_id"] or it.get("action_id") == prop["review_item_id"]:
+                it["resolution_status"] = "resolved"
+                it["linked_proposal_id"] = proposal_id
+                it["proposal_id"] = proposal_id
+                it["target_id"] = prop["target_id"]
+                it["resolution_reason"] = prop["decision_reason"]
+        _save_review_items(state_dir, ritems)
     history.append({
-        "event": "accept",
-        "proposal_id": proposal_id,
-        "target_id": prop["target_id"],
-        "file": prop["file"],
-        "version": new_ver,
-        "parent_version": parent_ver,
-        "timestamp_utc": prop["decided_at_utc"],
-        "reason": prop["decision_reason"],
-        "original_text_preserved": prop["mode"] == "annotate",
-        "file_sha256": post_hashes,
+        "event": "accept", "proposal_id": proposal_id, "target_id": prop["target_id"], "file": prop["file"],
+        "mode": prop["mode"], "version": new_ver, "parent_version": parent_ver,
+        "timestamp_utc": prop["decided_at_utc"], "reason": prop["decision_reason"],
+        "original_text_preserved": prop["mode"] == "annotate" and not has_prior_replace, "file_sha256": post_hashes,
     })
     _save_state(state_dir, manifest, proposals, history)
     return {
-        "ok": True,
-        "action": "accept",
-        "proposal_id": proposal_id,
-        "version": new_ver,
-        "file": prop["file"],
-        "file_sha256": post_hashes[prop["file"]],
+        "ok": True, "action": "accept", "proposal_id": proposal_id, "mode": prop["mode"],
+        "version": new_ver, "file": prop["file"], "file_sha256": post_hashes[prop["file"]],
         "untouched_files_preserved": True,
     }
 
@@ -698,26 +990,24 @@ def cmd_diff(
     out_diff: Path | None = None,
     out_json: Path | None = None,
 ) -> dict[str, Any]:
-    manifest, _, _ = _load_state(state_dir)
+    manifest, proposals, _ = _load_state(state_dir)
     v_from = _resolve_version(manifest, from_version)
     v_to = _resolve_version(manifest, to_version)
-    dir_from = state_dir / "snapshots" / v_from
-    dir_to = state_dir / "snapshots" / v_to
+    dir_from, dir_to = state_dir / "snapshots" / v_from, state_dir / "snapshots" / v_to
     if not dir_from.is_dir():
         raise VersionNotFoundError(f"Snapshot version {v_from!r} not found.")
     if not dir_to.is_dir():
         raise VersionNotFoundError(f"Snapshot version {v_to!r} not found.")
 
-    hashes_from = _collect_dir_hashes(dir_from)
-    hashes_to = _collect_dir_hashes(dir_to)
-    all_files = sorted(hashes_from.keys() | hashes_to.keys())
-
+    hashes_from, hashes_to = _collect_dir_hashes(dir_from), _collect_dir_hashes(dir_to)
+    replace_files = {p["file"] for p in proposals if p["status"] == "accepted" and p["mode"] == "replace_block"}
     diff_chunks: list[str] = []
     changed_files: list[str] = []
     unchanged_files: list[str] = []
     original_preserved_all = True
+    annotate_only_preserved = True
 
-    for rel in all_files:
+    for rel in sorted(hashes_from.keys() | hashes_to.keys()):
         if hashes_from.get(rel) == hashes_to.get(rel):
             unchanged_files.append(rel)
             continue
@@ -726,45 +1016,35 @@ def cmd_diff(
         txt_b = (dir_to / rel).read_text(encoding="utf-8") if (dir_to / rel).is_file() else ""
         if v_from == "v0" and strip_editorial_annotations(txt_b) != txt_a:
             original_preserved_all = False
+            if rel not in replace_files:
+                annotate_only_preserved = False
         ud = difflib.unified_diff(
-            txt_a.splitlines(keepends=True),
-            txt_b.splitlines(keepends=True),
-            fromfile=f"{v_from}/{rel}",
-            tofile=f"{v_to}/{rel}",
-            n=3,
+            txt_a.splitlines(keepends=True), txt_b.splitlines(keepends=True),
+            fromfile=f"{v_from}/{rel}", tofile=f"{v_to}/{rel}", n=3,
         )
         diff_chunks.append("".join(ud))
 
     full_diff = "\n".join(c for c in diff_chunks if c)
     if out_diff:
         _atomic_write_text(out_diff, full_diff)
-
     summary = {
-        "ok": True,
-        "from_version": v_from,
-        "to_version": v_to,
-        "changed_files": changed_files,
-        "unchanged_files": unchanged_files,
+        "ok": True, "from_version": v_from, "to_version": v_to,
+        "changed_files": changed_files, "unchanged_files": unchanged_files,
         "original_blocks_preserved": original_preserved_all,
-        "diff_lines": len(full_diff.splitlines()),
-        "diff_text": full_diff,
+        "annotate_only_files_preserved": annotate_only_preserved,
+        "authorized_replace_files": sorted(replace_files),
+        "diff_lines": len(full_diff.splitlines()), "diff_text": full_diff,
     }
     if out_json:
         _atomic_write_json(out_json, {k: v for k, v in summary.items() if k != "diff_text"})
     return summary
 
 
-def cmd_rollback(
-    state_dir: Path,
-    *,
-    to_version: str = "v0",
-    out_json: Path | None = None,
-) -> dict[str, Any]:
+def cmd_rollback(state_dir: Path, *, to_version: str = "v0", out_json: Path | None = None) -> dict[str, Any]:
     manifest, proposals, history = _load_state(state_dir)
     target_snap = state_dir / "snapshots" / to_version
     if not target_snap.is_dir():
         raise VersionNotFoundError(f"Cannot rollback: version {to_version!r} does not exist.")
-
     parent_ver = manifest["current_version"]
     expected_hashes = _collect_dir_hashes(target_snap)
     working_dir = state_dir / "working"
@@ -778,14 +1058,9 @@ def cmd_rollback(
     _copy_tree(working_dir, state_dir / "snapshots" / new_ver)
 
     receipt = {
-        "ok": restored_exact,
-        "event": "rollback",
-        "rolled_back_from": parent_ver,
-        "restored_target_version": to_version,
-        "new_version": new_ver,
-        "timestamp_utc": _utc_now(),
-        "sha256_restored_100pct": restored_exact,
-        "file_sha256": actual_hashes,
+        "ok": restored_exact, "event": "rollback", "rolled_back_from": parent_ver,
+        "restored_target_version": to_version, "new_version": new_ver,
+        "timestamp_utc": _utc_now(), "sha256_restored_100pct": restored_exact, "file_sha256": actual_hashes,
     }
     history.append(receipt)
     _save_state(state_dir, manifest, proposals, history)
@@ -808,29 +1083,20 @@ def cmd_reapply(
         wanted = set(proposal_ids or [])
         selected = [p for p in proposals if p["proposal_id"] in wanted]
         if len(selected) != len(wanted):
-            found = {p["proposal_id"] for p in selected}
-            missing = sorted(wanted - found)
+            missing = sorted(wanted - {p["proposal_id"] for p in selected})
             raise ProposalNotFoundError(f"Cannot reapply missing proposal(s): {missing}")
-
     if not selected:
         raise InvalidPatchError("No proposals selected for reapplication.")
 
-    # Find most recent pre-rollback accept snapshot for byte parity comparison
-    prev_accept_hashes: dict[str, str] | None = None
-    for ev in reversed(history):
-        if ev.get("event") == "accept":
-            prev_accept_hashes = ev.get("file_sha256")
-            break
-
-    # Reset working to v0 before reapplying cleanly
+    prev_accept_hashes = next((ev.get("file_sha256") for ev in reversed(history) if ev.get("event") == "accept"), None)
     working_dir = state_dir / "working"
     _copy_tree(state_dir / "snapshots" / "v0", working_dir)
+    anchor_patterns = _induce_anchor_patterns(manifest.get("authorized_target_ids", []))
 
     applied_ids: list[str] = []
     for prop in selected:
         fp = working_dir / prop["file"]
-        cur_text = fp.read_text(encoding="utf-8")
-        new_text = _apply_proposal_to_text(cur_text, prop, manifest["anchor_index"][prop["target_id"]])
+        new_text = _apply_proposal_to_text(fp.read_text(encoding="utf-8"), prop, manifest["anchor_index"][prop["target_id"]], anchor_patterns)
         _atomic_write_text(fp, new_text)
         applied_ids.append(prop["proposal_id"])
 
@@ -844,13 +1110,9 @@ def cmd_reapply(
     matches_prior = (actual_hashes == prev_accept_hashes) if prev_accept_hashes is not None else None
     receipt = {
         "ok": True if matches_prior is None else bool(matches_prior),
-        "event": "reapply",
-        "parent_version": parent_ver,
-        "new_version": new_ver,
-        "reapplied_proposals": applied_ids,
-        "timestamp_utc": _utc_now(),
-        "matches_pre_rollback_sha256": matches_prior,
-        "file_sha256": actual_hashes,
+        "event": "reapply", "parent_version": parent_ver, "new_version": new_ver,
+        "reapplied_proposals": applied_ids, "timestamp_utc": _utc_now(),
+        "matches_pre_rollback_sha256": matches_prior, "file_sha256": actual_hashes,
     }
     history.append(receipt)
     _save_state(state_dir, manifest, proposals, history)
@@ -868,142 +1130,61 @@ def _state_fingerprint(state_dir: Path) -> dict[str, Any]:
 
 
 def cmd_fault_test(state_dir: Path, *, out_json: Path | None = None) -> dict[str, Any]:
-    """Run 5 deliberate invalid operations and verify 100% zero state/file mutation."""
-    manifest, proposals, history = _load_state(state_dir)
+    manifest, _, history = _load_state(state_dir)
     before_fp = _state_fingerprint(state_dir)
-
-    # Pick an unauthorized anchor if workorder restricts scope
     auth_ids = set(manifest.get("authorized_target_ids", []))
     auth_files = set(manifest.get("authorized_files", []))
-    unauth_anchor = None
-    for aid, meta in manifest["anchor_index"].items():
-        if auth_ids and aid not in auth_ids:
-            unauth_anchor = aid
-            break
-        if not auth_ids and auth_files and meta["file"] not in auth_files:
-            unauth_anchor = aid
-            break
-
+    unauth_anchor = next(
+        (aid for aid, meta in manifest["anchor_index"].items()
+         if (auth_ids and aid not in auth_ids) or (not auth_ids and auth_files and meta["file"] not in auth_files)),
+        None,
+    )
     cases: list[dict[str, Any]] = []
 
     def _run_case(case_id: str, desc: str, fn) -> None:
         pre = _state_fingerprint(state_dir)
-        caught_type = None
-        caught_code = None
+        caught_type = caught_code = None
         caught_msg = ""
         try:
             fn()
         except RevisionError as exc:
-            caught_type = type(exc).__name__
-            caught_code = exc.error_code
-            caught_msg = str(exc)
-        post = _state_fingerprint(state_dir)
-        unchanged = pre == post
+            caught_type, caught_code, caught_msg = type(exc).__name__, exc.error_code, str(exc)
+        unchanged = pre == _state_fingerprint(state_dir)
         cases.append({
-            "fault_case_id": case_id,
-            "category": "deliberate_fault_injection",
-            "is_platform_failure": False,
-            "description": desc,
-            "exception_raised": caught_type is not None,
-            "exception_type": caught_type,
-            "error_code": caught_code,
-            "message": caught_msg,
-            "state_unchanged": unchanged,
+            "fault_case_id": case_id, "category": "deliberate_fault_injection", "is_platform_failure": False,
+            "description": desc, "exception_raised": caught_type is not None, "exception_type": caught_type,
+            "error_code": caught_code, "message": caught_msg, "state_unchanged": unchanged,
             "passed": (caught_type is not None) and unchanged,
         })
 
-    _run_case(
-        "F01_OUT_OF_RANGE_TARGET",
-        "Propose annotation against non-existent anchor ZZ99-P999.",
-        lambda: cmd_propose(
-            state_dir,
-            target_id="ZZ99-P999",
-            title="Invalid target test",
-            annotation="Must be rejected.",
-            source_quote="N/A",
-            source_ref="N/A",
-        ),
-    )
-
+    _run_case("F01_OUT_OF_RANGE_TARGET", "Propose against non-existent anchor ZZ99-P999.",
+              lambda: cmd_propose(state_dir, target_id="ZZ99-P999", title="Invalid", annotation="No", source_quote="N/A", source_ref="N/A"))
     if unauth_anchor:
-        _run_case(
-            "F02_UNAUTHORIZED_SCOPE",
-            f"Propose annotation against existing but unauthorized anchor {unauth_anchor}.",
-            lambda: cmd_propose(
-                state_dir,
-                target_id=unauth_anchor,
-                title="Scope violation test",
-                annotation="Must be blocked by workorder scope.",
-                source_quote="Existing text",
-                source_ref=unauth_anchor,
-            ),
-        )
+        _run_case("F02_UNAUTHORIZED_SCOPE", f"Propose against unauthorized anchor {unauth_anchor}.",
+                  lambda: cmd_propose(state_dir, target_id=unauth_anchor, title="Scope test", annotation="Block", source_quote="x", source_ref=unauth_anchor))
     else:
-        _run_case(
-            "F02_UNAUTHORIZED_FILE_PATH",
-            "Propose annotation against non-existent external file outside chapter tree.",
-            lambda: cmd_propose(
-                state_dir,
-                file_rel="../outside_scope.md",
-                title="Path boundary test",
-                annotation="Must be blocked.",
-                source_quote="N/A",
-                source_ref="N/A",
-            ),
-        )
-
-    _run_case(
-        "F03_INVALID_PROPOSAL_ID",
-        "Attempt to accept non-existent proposal P9999.",
-        lambda: cmd_decide(state_dir, proposal_id="P9999", action="accept"),
-    )
-
-    _run_case(
-        "F04_INVALID_ROLLBACK_VERSION",
-        "Attempt to rollback to non-existent version v999.",
-        lambda: cmd_rollback(state_dir, to_version="v999"),
-    )
-
-    first_valid_tid = next(iter(manifest.get("authorized_target_ids", [])), None) or next(
-        iter(manifest["anchor_index"].keys())
-    )
-    _run_case(
-        "F05_MALFORMED_EMPTY_PATCH",
-        "Attempt to submit an empty annotation without source quote.",
-        lambda: cmd_propose(
-            state_dir,
-            target_id=first_valid_tid,
-            title="Malformed patch",
-            annotation="",
-            source_quote="",
-            source_ref="",
-        ),
-    )
+        _run_case("F02_UNAUTHORIZED_FILE_PATH", "Propose against external file ../outside_scope.md.",
+                  lambda: cmd_propose(state_dir, file_rel="../outside_scope.md", title="Path test", annotation="Block", source_quote="N/A", source_ref="N/A"))
+    _run_case("F03_INVALID_PROPOSAL_ID", "Accept non-existent proposal P9999.", lambda: cmd_decide(state_dir, proposal_id="P9999", action="accept"))
+    _run_case("F04_INVALID_ROLLBACK_VERSION", "Rollback to non-existent version v999.", lambda: cmd_rollback(state_dir, to_version="v999"))
+    first_tid = next(iter(manifest.get("authorized_target_ids", [])), None) or next(iter(manifest["anchor_index"].keys()))
+    _run_case("F05_MALFORMED_EMPTY_PATCH", "Submit empty annotation without source quote.",
+              lambda: cmd_propose(state_dir, target_id=first_tid, title="Empty", annotation="", source_quote="", source_ref=""))
 
     after_fp = _state_fingerprint(state_dir)
     all_unchanged = before_fp == after_fp
     all_passed = all_unchanged and all(c["passed"] for c in cases)
-
     report = {
-        "ok": all_passed,
-        "category": "deliberate_fault_injection",
-        "is_platform_failure": False,
-        "tested_at_utc": _utc_now(),
-        "total_cases": len(cases),
+        "ok": all_passed, "category": "deliberate_fault_injection", "is_platform_failure": False,
+        "tested_at_utc": _utc_now(), "total_cases": len(cases),
         "passed_cases": sum(1 for c in cases if c["passed"]),
         "state_unchanged_verified": all_unchanged,
         "pre_test_working_sha256": before_fp["working_sha256"],
-        "post_test_working_sha256": after_fp["working_sha256"],
-        "cases": cases,
+        "post_test_working_sha256": after_fp["working_sha256"], "cases": cases,
     }
-    # Record fault test receipt in history without touching working/manifest/proposals
     history.append({
-        "event": "fault_test",
-        "version": manifest["current_version"],
-        "timestamp_utc": report["tested_at_utc"],
-        "passed_cases": report["passed_cases"],
-        "total_cases": report["total_cases"],
-        "state_unchanged_verified": all_unchanged,
+        "event": "fault_test", "version": manifest["current_version"], "timestamp_utc": report["tested_at_utc"],
+        "passed_cases": report["passed_cases"], "total_cases": report["total_cases"], "state_unchanged_verified": all_unchanged,
     })
     _atomic_write_json(state_dir / "history.json", history)
     if out_json:
@@ -1011,12 +1192,123 @@ def cmd_fault_test(state_dir: Path, *, out_json: Path | None = None) -> dict[str
     return report
 
 
-def _render_html_preview(
-    manifest: dict[str, Any],
-    proposals: list[dict[str, Any]],
-    history: list[dict[str, Any]],
-    diff_summary: dict[str, Any],
-) -> str:
+def cmd_parse_comments(state_dir: Path, *, comments_file: Path, out_json: Path | None = None) -> dict[str, Any]:
+    """Decompose advisor/reviewer comments (Markdown/text/JSON) into actionable trackable items."""
+    manifest, proposals, _ = _load_state(state_dir)
+    if not comments_file.is_file():
+        raise RevisionError(f"Comments file not found: {comments_file}")
+    raw_txt = comments_file.read_text(encoding="utf-8", errors="replace")
+    raw_items: list[str] = []
+    if comments_file.suffix.lower() == ".json":
+        obj = json.loads(raw_txt)
+        seq = obj.get("comments", obj) if isinstance(obj, dict) else obj
+        if isinstance(seq, list):
+            raw_items = [str(x.get("comment") or x.get("text") or x) if isinstance(x, dict) else str(x) for x in seq]
+    else:
+        for ln in raw_txt.splitlines():
+            st = ln.strip()
+            if not st or st.startswith("#"):
+                continue
+            st = re.sub(r"^(?:[-*•]|\d+[.)、])\s+", "", st).strip()
+            if len(st) >= 8:
+                raw_items.append(st)
+
+    anchors = manifest["anchor_index"]
+    cat_rules = (
+        ("terminology", re.compile(r"acronym|terminolog|symbol|abbrev|术语|缩写|符号", re.I)),
+        ("numeric_consistency", re.compile(r"number|sample|n\s*=|conflict|unit|value|数值|样本量|单位|矛盾", re.I)),
+        ("citation", re.compile(r"cite|citation|reference|zotero|bib|引用|文献", re.I)),
+        ("duplication_structure", re.compile(r"duplicat|repeat|chapter|section|plan|重复|章节|结构", re.I)),
+    )
+    OUT_OF_SCOPE_RE = re.compile(
+        r"\b(?:new\s+experiment|additional\s+experiment|run\s+a\s+new\s+(?:trial|assay|cohort)|collect\s+new\s+data|"
+        r"wet[\s-]*lab|recruit\s+more\s+patients|external\s+validation\s+cohort\s+not\s+provided|fabricat|invent\s+data)\b|"
+        r"补做(?:新)?实验|补充(?:新)?实验|新招募|新增实验数据|未提供(?:的新)?实验|超出工单范围",
+        re.I,
+    )
+    auth_ids = set(manifest.get("authorized_target_ids", []))
+    auth_files = set(manifest.get("authorized_files", []))
+    wo_present = bool(manifest.get("workorder", {}).get("present"))
+
+    items_out: list[dict[str, Any]] = []
+    for idx, ctext in enumerate(raw_items, 1):
+        rid = f"R{idx:03d}"
+        category = next((c for c, p in cat_rules if p.search(ctext)), "substantive_revision")
+        severity = "major" if re.search(r"must|error|conflict|wrong|missing|contradict|必须|错误|矛盾|缺失", ctext, re.I) else "minor"
+        matched_anchor = next((aid for aid in anchors if aid in ctext), None)
+        if not matched_anchor:
+            cwords = {w.lower() for w in re.findall(r"[A-Za-z]{4,}|[\u4e00-\u9fff]{2,}", ctext)}
+            best_score, best_aid = 0, None
+            for aid, meta in anchors.items():
+                if _is_running_header_line(meta.get("preview", "")):
+                    continue
+                pwords = {w.lower() for w in re.findall(r"[A-Za-z]{4,}|[\u4e00-\u9fff]{2,}", meta["preview"])}
+                sc = len(cwords & pwords)
+                if sc > best_score:
+                    best_score, best_aid = sc, aid
+            matched_anchor = best_aid if best_score >= 2 else None
+        matched_file = anchors[matched_anchor]["file"] if matched_anchor else None
+        linked_prop_obj = next(
+            (p for p in proposals if (p.get("review_item_id") == rid) or (matched_anchor and p["target_id"] == matched_anchor)),
+            None,
+        )
+        linked_prop = linked_prop_obj["proposal_id"] if linked_prop_obj else None
+
+        # Explicit triage: resolved / proposed / out_of_scope / unresolved (never leave unactionable items blindly "open")
+        resolution_reason = ""
+        if OUT_OF_SCOPE_RE.search(ctext):
+            status = "out_of_scope"
+            resolution_reason = "Requires new empirical/experimental data or out-of-scope work not supplied in /input."
+        elif wo_present and matched_anchor and (
+            (auth_ids and matched_anchor not in auth_ids) or (not auth_ids and auth_files and matched_file not in auth_files)
+        ):
+            status = "out_of_scope"
+            resolution_reason = f"Target {matched_anchor} ({matched_file}) is outside authorized workorder scope."
+        elif linked_prop_obj and linked_prop_obj.get("status") == "accepted":
+            status = "resolved"
+            resolution_reason = f"Closed by accepted proposal {linked_prop}."
+        elif linked_prop_obj and linked_prop_obj.get("status") == "proposed":
+            status = "proposed"
+            resolution_reason = f"Pending editorial decision on proposal {linked_prop}."
+        else:
+            status = "unresolved"
+            resolution_reason = (
+                "Matched anchor awaiting grounded proposal." if matched_anchor else "No grounded anchor matched in supplied chapters; requires author triage."
+            )
+
+        items_out.append({
+            "review_item_id": rid,
+            "action_id": rid,
+            "category": category,
+            "severity": severity,
+            "comment_text": ctext,
+            "target_id": matched_anchor,
+            "suggested_target_id": matched_anchor,
+            "suggested_file": matched_file,
+            "proposal_id": linked_prop,
+            "linked_proposal_id": linked_prop,
+            "export_locator": None,
+            "resolution_status": status,
+            "resolution_reason": resolution_reason,
+        })
+    _save_review_items(state_dir, items_out)
+    status_counts = {
+        k: sum(1 for it in items_out if it["resolution_status"] == k)
+        for k in ("resolved", "proposed", "unresolved", "out_of_scope")
+    }
+    res = {
+        "ok": True,
+        "source_comments_file": comments_file.name,
+        "total_items": len(items_out),
+        "status_counts": status_counts,
+        "action_items": items_out,
+    }
+    if out_json:
+        _atomic_write_json(out_json, res)
+    return res
+
+
+def _render_html_preview(manifest: dict[str, Any], proposals: list[dict[str, Any]], history: list[dict[str, Any]], diff_summary: dict[str, Any]) -> str:
     esc = html.escape
     accepted = [p for p in proposals if p["status"] == "accepted"]
     rejected = [p for p in proposals if p["status"] == "rejected"]
@@ -1027,160 +1319,236 @@ def _render_html_preview(
     prop_rows = []
     for p in proposals:
         badge_cls = "ok" if p["status"] == "accepted" else ("rej" if p["status"] == "rejected" else "pend")
+        body_txt = p["replacement_text"] if p["mode"] == "replace_block" else p["annotation"]
         prop_rows.append(
-            f"<tr>"
-            f"<td><code>{esc(p['proposal_id'])}</code></td>"
+            f"<tr><td><code>{esc(p['proposal_id'])}</code><br><small>{esc(p['mode'])}</small></td>"
             f"<td><code>{esc(p['target_id'])}</code><br><small>{esc(p['file'])}</small></td>"
             f"<td><span class='badge {badge_cls}'>{esc(p['status'])}</span></td>"
-            f"<td><strong>{esc(p['title'])}</strong><br>{esc(p['annotation'])}</td>"
-            f"<td><em>\"{esc(p['source_quote'])}\"</em><br><small>{esc(p['source_ref'])}</small></td>"
-            f"<td>{esc(p.get('decision_reason') or '')}<br><small>{esc(p.get('uncertainty') or '')}</small></td>"
-            f"</tr>"
+            f"<td><strong>{esc(p['title'])}</strong><br>{esc(body_txt[:360])}</td>"
+            f"<td><em>\"{esc(p['source_quote'][:220])}\"</em><br><small>{esc(p['source_ref'])}</small></td>"
+            f"<td>{esc(p.get('decision_reason') or '')}<br><small>{esc(p.get('uncertainty') or '')}</small></td></tr>"
         )
-
     diff_lines_html = []
-    for ln in diff_summary.get("diff_text", "").splitlines():
-        if ln.startswith("+++") or ln.startswith("---"):
-            cls = "d-hdr"
-        elif ln.startswith("@@"):
-            cls = "d-hunk"
-        elif ln.startswith("+"):
-            cls = "d-add"
-        elif ln.startswith("-"):
-            cls = "d-del"
-        else:
-            cls = "d-ctx"
+    for ln in diff_summary.get("diff_text", "").splitlines()[:600]:
+        cls = "d-hdr" if ln.startswith(("+++", "---")) else ("d-hunk" if ln.startswith("@@") else ("d-add" if ln.startswith("+") else ("d-del" if ln.startswith("-") else "d-ctx")))
         diff_lines_html.append(f"<div class='{cls}'>{esc(ln)}</div>")
+    hist_rows = [
+        f"<tr><td>{i}</td><td><code>{esc(str(h.get('event','')))}</code></td><td><code>{esc(str(h.get('version') or h.get('new_version') or ''))}</code></td>"
+        f"<td>{esc(str(h.get('timestamp_utc','')))}</td><td>{esc(str(h.get('proposal_id') or h.get('notes') or h.get('restored_target_version') or ''))}</td></tr>"
+        for i, h in enumerate(history, 1)
+    ]
+    return (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Long-Document Revision Export Preview</title><style>"
+        "body{margin:0;font-family:system-ui,sans-serif;background:#f8fafc;color:#0f172a;line-height:1.5}"
+        ".wrap{max-width:1120px;margin:24px auto;padding:0 16px}.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:16px 0}"
+        ".kpi,.card{background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:12px;overflow-x:auto}"
+        ".kpi .lbl{font-size:.78rem;color:#475569;text-transform:uppercase}.kpi .val{font-size:1.2rem;font-weight:700;margin-top:4px}"
+        "table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{border-bottom:1px solid #e2e8f0;padding:8px;text-align:left;vertical-align:top}"
+        "th{background:#f1f5f9}.badge{padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600}.badge.ok{background:#dcfce7;color:#15803d}"
+        ".badge.rej{background:#fee2e2;color:#b91c1c}.badge.pend{background:#fef9c3;color:#854d0e}"
+        ".diff{font-family:monospace;font-size:.82rem;white-space:pre-wrap;word-break:break-word}"
+        ".d-hdr{background:#e2e8f0;font-weight:700;padding:2px 6px}.d-hunk{background:#dbeafe;color:#1e3a8a;padding:2px 6px}"
+        ".d-add{background:#dcfce7;color:#14532d;padding:1px 6px}.d-del{background:#fee2e2;color:#7f1d1d;padding:1px 6px}.d-ctx{padding:1px 6px;color:#334155}"
+        "</style></head><body><div class='wrap'><h1>Long-Document Local Revision Export Preview</h1>"
+        f"<p style='color:#475569'>Workorder: <code>{esc(str(manifest['workorder'].get('workorder_id') or 'none'))}</code> | Version: <code>{esc(manifest['current_version'])}</code> | Scope: <code>{esc(manifest.get('scope_enforcement_status',''))}</code> | Offline Zero-CDN</p>"
+        f"<div class='kpi-grid'><div class='kpi'><div class='lbl'>Chapters</div><div class='val'>{len(manifest['initial_sha256'])}</div></div>"
+        f"<div class='kpi'><div class='lbl'>Accepted / Rejected</div><div class='val'>{len(accepted)} / {len(rejected)}</div></div>"
+        f"<div class='kpi'><div class='lbl'>Annotate Scope Intact</div><div class='val'>{'YES' if diff_summary['annotate_only_files_preserved'] else 'CHECK'}</div></div>"
+        f"<div class='kpi'><div class='lbl'>Rollback &amp; Reapply</div><div class='val'>{'VERIFIED' if (rollback_ok and reapply_ok) else 'PARTIAL'}</div></div>"
+        f"<div class='kpi'><div class='lbl'>Fault Injection</div><div class='val'>{'VERIFIED' if fault_ok else 'NOT RUN'}</div></div></div>"
+        "<h2>1. Proposal Decisions &amp; Source Grounding</h2><div class='card'><table><thead><tr><th>ID / Mode</th><th>Target</th><th>Decision</th><th>Change Body</th><th>Source Quote</th><th>Rationale &amp; Uncertainty</th></tr></thead>"
+        f"<tbody>{''.join(prop_rows) or '<tr><td colspan=6>No proposals.</td></tr>'}</tbody></table></div>"
+        f"<h2>2. Unified Diff (v0 &rarr; {esc(manifest['current_version'])})</h2><div class='card diff'>{''.join(diff_lines_html) or '<div class=d-ctx>No differences.</div>'}</div>"
+        "<h2>3. Version &amp; Audit Chain</h2><div class='card'><table><thead><tr><th>#</th><th>Event</th><th>Version</th><th>UTC</th><th>Detail</th></tr></thead>"
+        f"<tbody>{''.join(hist_rows)}</tbody></table></div></div></body></html>"
+    )
 
-    hist_rows = []
-    for idx, h in enumerate(history, 1):
-        hist_rows.append(
-            f"<tr><td>{idx}</td><td><code>{esc(str(h.get('event','')))}</code></td>"
-            f"<td><code>{esc(str(h.get('version') or h.get('new_version') or ''))}</code></td>"
-            f"<td>{esc(str(h.get('timestamp_utc','')))}</td>"
-            f"<td>{esc(str(h.get('proposal_id') or h.get('notes') or h.get('restored_target_version') or ''))}</td></tr>"
-        )
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Long-Document Revision Export Preview</title>
-<style>
-:root {{ --bg:#f8fafc; --card:#ffffff; --ink:#0f172a; --muted:#475569; --line:#cbd5e1; --accent:#1d4ed8; --ok:#15803d; --rej:#b91c1c; }}
-body {{ margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); line-height:1.5; }}
-.wrap {{ max-width:1120px; margin:24px auto; padding:0 16px; }}
-h1 {{ font-size:1.5rem; margin:0 0 8px; }}
-h2 {{ font-size:1.15rem; margin:24px 0 10px; border-bottom:1px solid var(--line); padding-bottom:4px; }}
-.kpi-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin:16px 0; }}
-.kpi {{ background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; }}
-.kpi .lbl {{ font-size:0.78rem; color:var(--muted); text-transform:uppercase; }}
-.kpi .val {{ font-size:1.25rem; font-weight:700; margin-top:4px; }}
-.card {{ background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px; overflow-x:auto; }}
-table {{ width:100%; border-collapse:collapse; font-size:0.88rem; }}
-th, td {{ border-bottom:1px solid #e2e8f0; padding:8px 10px; text-align:left; vertical-align:top; }}
-th {{ background:#f1f5f9; font-weight:600; }}
-.badge {{ display:inline-block; padding:2px 8px; border-radius:12px; font-size:0.78rem; font-weight:600; }}
-.badge.ok {{ background:#dcfce7; color:var(--ok); }}
-.badge.rej {{ background:#fee2e2; color:var(--rej); }}
-.badge.pend {{ background:#fef9c3; color:#854d0e; }}
-.diff {{ font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:0.82rem; white-space:pre-wrap; word-break:break-word; }}
-.d-hdr {{ background:#e2e8f0; font-weight:700; padding:2px 6px; }}
-.d-hunk {{ background:#dbeafe; color:#1e3a8a; padding:2px 6px; }}
-.d-add {{ background:#dcfce7; color:#14532d; padding:1px 6px; }}
-.d-del {{ background:#fee2e2; color:#7f1d1d; padding:1px 6px; }}
-.d-ctx {{ padding:1px 6px; color:#334155; }}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>Long-Document Local Revision Export Preview</h1>
-  <p style="color:var(--muted);margin:0;">Workorder: <code>{esc(str(manifest['workorder'].get('workorder_id') or 'none'))}</code> | Current Version: <code>{esc(manifest['current_version'])}</code> | Offline Self-Contained Preview (Zero External Requests)</p>
-  <div class="kpi-grid">
-    <div class="kpi"><div class="lbl">Chapters Imported</div><div class="val">{len(manifest['initial_sha256'])}</div></div>
-    <div class="kpi"><div class="lbl">Accepted / Rejected</div><div class="val">{len(accepted)} / {len(rejected)}</div></div>
-    <div class="kpi"><div class="lbl">Original Blocks Preserved</div><div class="val">{'YES' if diff_summary['original_blocks_preserved'] else 'CHECK'}</div></div>
-    <div class="kpi"><div class="lbl">Rollback &amp; Reapply</div><div class="val">{'VERIFIED' if (rollback_ok and reapply_ok) else 'PARTIAL'}</div></div>
-    <div class="kpi"><div class="lbl">Fault Injection Unchanged</div><div class="val">{'VERIFIED' if fault_ok else 'NOT RUN'}</div></div>
-  </div>
-  <h2>1. Proposal Decisions &amp; Source Grounding</h2>
-  <div class="card">
-    <table>
-      <thead><tr><th>ID</th><th>Target</th><th>Decision</th><th>Editorial Annotation</th><th>Exact Source Quote</th><th>Rationale &amp; Uncertainty</th></tr></thead>
-      <tbody>{''.join(prop_rows) or '<tr><td colspan="6">No proposals recorded.</td></tr>'}</tbody>
-    </table>
-  </div>
-  <h2>2. Unified Diff (v0 &rarr; {esc(manifest['current_version'])})</h2>
-  <div class="card diff">{''.join(diff_lines_html) or '<div class="d-ctx">No byte differences between v0 and current version.</div>'}</div>
-  <h2>3. Version &amp; Audit Event Chain</h2>
-  <div class="card">
-    <table>
-      <thead><tr><th>#</th><th>Event</th><th>Version</th><th>Timestamp (UTC)</th><th>Detail</th></tr></thead>
-      <tbody>{''.join(hist_rows)}</tbody>
-    </table>
-  </div>
-</div>
-</body>
-</html>
-"""
+def _compute_export_locator(out_dir: Path, prop: dict[str, Any], anchor_meta: dict[str, Any]) -> str:
+    rel = prop["file"]
+    fp = out_dir / rel
+    if not fp.is_file():
+        return f"{rel}:L{anchor_meta.get('start_line', 1)}-L{anchor_meta.get('end_line', 1)}"
+    txt = fp.read_text(encoding="utf-8", errors="replace")
+    if prop["mode"] == "annotate":
+        marker = f"[Editorial Annotation | ID: {prop['proposal_id']} |"
+        pos = txt.find(marker)
+        if pos != -1:
+            end_marker = f"[/Editorial Annotation | ID: {prop['proposal_id']}]"
+            end_pos = txt.find(end_marker, pos)
+            s_ln = txt.count("\n", 0, pos) + 1
+            e_ln = txt.count("\n", 0, end_pos if end_pos != -1 else pos) + 1
+            return f"{rel}:L{s_ln}-L{e_ln}"
+    elif prop["mode"] == "replace_block":
+        rep = prop.get("replacement_text", "").strip()
+        if rep:
+            pos = txt.find(rep[:80])
+            if pos != -1:
+                s_ln = txt.count("\n", 0, pos) + 1
+                e_ln = txt.count("\n", 0, pos + len(rep)) + 1
+                return f"{rel}:L{s_ln}-L{e_ln}"
+    return f"{rel}:L{anchor_meta.get('start_line', 1)}-L{anchor_meta.get('end_line', 1)}"
 
 
 def cmd_export(
-    state_dir: Path,
-    *,
-    out_dir: Path,
-    records_out: Path | None = None,
-    evidence_out: Path | None = None,
-    html_preview: Path | None = None,
+    state_dir: Path, *, out_dir: Path, records_out: Path | None = None,
+    evidence_out: Path | None = None, html_preview: Path | None = None,
+    audit_json: Path | None = None, result_json: Path | None = None,
 ) -> dict[str, Any]:
     manifest, proposals, history = _load_state(state_dir)
-    working_dir = state_dir / "working"
-    _copy_tree(working_dir, out_dir)
+    review_items = _load_review_items(state_dir)
+    _copy_tree(state_dir / "working", out_dir)
     exported_hashes = _collect_dir_hashes(out_dir)
     diff_summary = cmd_diff(state_dir, from_version="v0", to_version="latest")
 
+    # Compute 4-key closed loop: review_item_id <-> target_id <-> proposal_id <-> export_locator
+    prop_by_id = {p["proposal_id"]: p for p in proposals}
+    for p in proposals:
+        ameta = manifest["anchor_index"].get(p["target_id"], {})
+        p["export_locator"] = _compute_export_locator(out_dir, p, ameta) if p["status"] == "accepted" else None
+
+    four_key_traceability: list[dict[str, Any]] = []
+    seen_pids: set[str] = set()
+    for it in review_items:
+        pid = it.get("proposal_id") or it.get("linked_proposal_id")
+        prop = prop_by_id.get(pid) if pid else None
+        if prop:
+            seen_pids.add(pid)
+            it["export_locator"] = prop.get("export_locator")
+            if prop["status"] == "accepted":
+                it["resolution_status"] = "resolved"
+        four_key_traceability.append({
+            "review_item_id": it.get("review_item_id") or it.get("action_id"),
+            "target_id": it.get("target_id") or it.get("suggested_target_id"),
+            "proposal_id": pid,
+            "export_locator": it.get("export_locator"),
+            "resolution_status": it.get("resolution_status", "unresolved"),
+            "resolution_reason": it.get("resolution_reason", ""),
+        })
+    for p in proposals:
+        if p["proposal_id"] not in seen_pids:
+            four_key_traceability.append({
+                "review_item_id": p.get("review_item_id"),
+                "target_id": p["target_id"],
+                "proposal_id": p["proposal_id"],
+                "export_locator": p.get("export_locator"),
+                "resolution_status": "resolved" if p["status"] == "accepted" else ("rejected" if p["status"] == "rejected" else "proposed"),
+                "resolution_reason": p.get("decision_reason", ""),
+            })
+    _save_review_items(state_dir, review_items)
+    _save_state(state_dir, manifest, proposals, history)
+
     evidence_map = [
-        {
-            "proposal_id": p["proposal_id"],
-            "status": p["status"],
-            "target_id": p["target_id"],
-            "file": p["file"],
-            "title": p["title"],
-            "source_ref": p["source_ref"],
-            "source_quote": p["source_quote"],
-            "uncertainty": p["uncertainty"],
-            "decision_reason": p["decision_reason"],
-        }
+        {k: p.get(k) for k in ("proposal_id", "review_item_id", "mode", "status", "target_id", "file", "export_locator", "title", "source_ref", "source_quote", "uncertainty", "decision_reason")}
         for p in proposals
     ]
+
+    # Collect ALL audit gaps, coverage/truncation risks, format caveats, and unresolved/out_of_scope review items
+    merged_gaps: list[dict[str, Any]] = []
+    merged_warnings: list[str] = []
+    cov = manifest.get("coverage", {})
+    for mc in cov.get("missing_chapters", []):
+        merged_gaps.append({"type": "missing_chapter", "detail": mc, "status": "unresolved"})
+    for tr in cov.get("truncation_risks", []):
+        merged_gaps.append({"type": "truncation_risk", "file": tr.get("file"), "detail": tr.get("reason"), "status": "unresolved"})
+    fmt_decl = manifest.get("format_declaration", {
+        "format_mode": "native_text_in_place",
+        "citation_fields_preserved": True,
+        "live_citation_fields_detected": 0,
+    })
+    if fmt_decl.get("format_mode") == "derived_markdown_readonly_source":
+        msg = (
+            f"Derived Markdown export from read-only binary source: citation_fields_preserved=false "
+            f"(live_citation_fields_detected={fmt_decl.get('live_citation_fields_detected', 0)})."
+        )
+        merged_warnings.append(msg)
+        if fmt_decl.get("live_citation_fields_detected", 0) > 0:
+            merged_gaps.append({"type": "citation_fields_not_preserved_in_derived_markdown", "detail": msg, "status": "requires_native_ooxml_or_manual_relink"})
+
+    for it in review_items:
+        st = it.get("resolution_status", "unresolved")
+        if st in {"unresolved", "out_of_scope"}:
+            merged_gaps.append({
+                "type": f"review_item_{st}",
+                "review_item_id": it.get("review_item_id") or it.get("action_id"),
+                "target_id": it.get("target_id"),
+                "detail": it.get("resolution_reason") or it.get("comment_text", "")[:140],
+                "status": st,
+            })
+
+    if audit_json and audit_json.is_file():
+        audit_doc = json.loads(audit_json.read_text(encoding="utf-8"))
+        for err in audit_doc.get("errors", []):
+            merged_gaps.append({"type": "consistency_audit_error", "detail": str(err), "status": "unresolved"})
+        for warn in audit_doc.get("warnings", []):
+            merged_warnings.append(str(warn))
+
+    # Auto-merge gaps, warnings, four_key_traceability, and format_declaration into result.json if supplied!
+    result_synced = False
+    if result_json:
+        existing: dict[str, Any] = {}
+        if result_json.is_file():
+            try:
+                existing = json.loads(result_json.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {}
+        prev_gaps = existing.get("gaps") if isinstance(existing.get("gaps"), list) else []
+        prev_warns = existing.get("warnings") if isinstance(existing.get("warnings"), list) else []
+        seen_gap_keys = {json.dumps(g, sort_keys=True, ensure_ascii=False) for g in prev_gaps}
+        for g in merged_gaps:
+            k = json.dumps(g, sort_keys=True, ensure_ascii=False)
+            if k not in seen_gap_keys:
+                prev_gaps.append(g)
+                seen_gap_keys.add(k)
+        for w in merged_warnings:
+            if w not in prev_warns:
+                prev_warns.append(w)
+        existing["gaps"] = prev_gaps
+        existing["warnings"] = prev_warns
+        existing["four_key_traceability"] = four_key_traceability
+        existing["format_mode"] = fmt_decl.get("format_mode")
+        existing["citation_fields_preserved"] = fmt_decl.get("citation_fields_preserved")
+        existing["live_citation_fields_detected"] = fmt_decl.get("live_citation_fields_detected", 0)
+        _atomic_write_json(result_json, existing)
+        result_synced = True
+
     records = {
-        "ok": True,
-        "exported_at_utc": _utc_now(),
-        "current_version": manifest["current_version"],
-        "workorder": manifest["workorder"],
-        "initial_sha256": manifest["initial_sha256"],
-        "exported_sha256": exported_hashes,
+        "ok": True, "exported_at_utc": _utc_now(), "current_version": manifest["current_version"],
+        "scope_enforcement_status": manifest.get("scope_enforcement_status"), "workorder": manifest["workorder"],
+        "format_mode": fmt_decl.get("format_mode"),
+        "citation_fields_preserved": fmt_decl.get("citation_fields_preserved"),
+        "live_citation_fields_detected": fmt_decl.get("live_citation_fields_detected", 0),
+        "format_declaration": fmt_decl,
+        "initial_sha256": manifest["initial_sha256"], "exported_sha256": exported_hashes,
         "original_blocks_preserved": diff_summary["original_blocks_preserved"],
-        "changed_files": diff_summary["changed_files"],
-        "unchanged_files": diff_summary["unchanged_files"],
-        "proposals": proposals,
-        "version_history": history,
-        "coverage_manifest": manifest["coverage"],
+        "annotate_only_files_preserved": diff_summary["annotate_only_files_preserved"],
+        "authorized_replace_files": diff_summary["authorized_replace_files"],
+        "changed_files": diff_summary["changed_files"], "unchanged_files": diff_summary["unchanged_files"],
+        "four_key_traceability": four_key_traceability,
+        "review_items": review_items,
+        "merged_gaps": merged_gaps,
+        "merged_warnings": merged_warnings,
+        "result_json_synced": result_synced,
+        "proposals": proposals, "version_history": history, "coverage_manifest": cov,
     }
     if records_out:
         _atomic_write_json(records_out, records)
     if evidence_out:
-        _atomic_write_json(evidence_out, {"evidence_map": evidence_map})
+        _atomic_write_json(evidence_out, {"evidence_map": evidence_map, "four_key_traceability": four_key_traceability})
     if html_preview:
         _atomic_write_text(html_preview, _render_html_preview(manifest, proposals, history, diff_summary))
     return {
-        "ok": True,
-        "exported_dir": str(out_dir),
-        "exported_files": len(exported_hashes),
-        "changed_files": diff_summary["changed_files"],
-        "unchanged_files": diff_summary["unchanged_files"],
+        "ok": True, "exported_dir": str(out_dir), "exported_files": len(exported_hashes),
+        "changed_files": diff_summary["changed_files"], "unchanged_files": diff_summary["unchanged_files"],
         "original_blocks_preserved": diff_summary["original_blocks_preserved"],
+        "annotate_only_files_preserved": diff_summary["annotate_only_files_preserved"],
+        "format_mode": fmt_decl.get("format_mode"),
+        "citation_fields_preserved": fmt_decl.get("citation_fields_preserved"),
+        "live_citation_fields_detected": fmt_decl.get("live_citation_fields_detected", 0),
+        "four_key_links_count": len(four_key_traceability),
+        "merged_gaps_count": len(merged_gaps),
+        "result_json_synced": result_synced,
     }
 
 
@@ -1188,24 +1556,30 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Local controllable revision state machine for long documents.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_imp = sub.add_parser("import", help="Import chapters, hash v0 snapshot, index anchors, check coverage.")
+    p_imp = sub.add_parser("import", help="Import chapters (.md/.txt/.tex/.docx/.pdf), hash v0, induce anchor patterns.")
     p_imp.add_argument("--chapters-dir", required=True, type=Path)
     p_imp.add_argument("--state-dir", required=True, type=Path)
     p_imp.add_argument("--workorder", type=Path, default=None)
     p_imp.add_argument("--toc-json", type=Path, default=None)
     p_imp.add_argument("--receipt-out", type=Path, default=None)
+    p_imp.add_argument("--allow-file-fallback", action="store_true", help="Degrade to file-level warning if target_ids missing but file scope exists.")
 
-    p_prop = sub.add_parser("propose", help="Create a source-grounded editorial proposal.")
+    p_prop = sub.add_parser("propose", help="Create a source-grounded editorial annotation or substantive replace proposal.")
     p_prop.add_argument("--state-dir", required=True, type=Path)
     p_prop.add_argument("--target-id", default=None)
     p_prop.add_argument("--file", default=None)
+    p_prop.add_argument("--block-index", type=int, default=None)
+    p_prop.add_argument("--anchor-query", default="")
     p_prop.add_argument("--mode", default="annotate", choices=["annotate", "replace", "replace_block"])
     p_prop.add_argument("--title", required=True)
     p_prop.add_argument("--annotation", default="")
+    p_prop.add_argument("--annotation-file", type=Path, default=None)
     p_prop.add_argument("--source-quote", required=True)
     p_prop.add_argument("--source-ref", required=True)
     p_prop.add_argument("--uncertainty", default="")
     p_prop.add_argument("--replacement-text", default="")
+    p_prop.add_argument("--replacement-file", type=Path, default=None)
+    p_prop.add_argument("--review-item-id", default="", help="Optional review item ID (e.g. R001) to bind 4-key traceability.")
 
     for act in ("accept", "reject"):
         p_dec = sub.add_parser(act, help=f"{act.capitalize()} an individual proposal.")
@@ -1235,66 +1609,67 @@ def main(argv: list[str] | None = None) -> int:
     p_ft.add_argument("--state-dir", required=True, type=Path)
     p_ft.add_argument("--out-json", type=Path, default=None)
 
-    p_exp = sub.add_parser("export", help="Export editable chapters, records, evidence map, and offline HTML preview.")
+    p_pc = sub.add_parser("parse-comments", help="Decompose advisor/reviewer feedback into actionable edit items.")
+    p_pc.add_argument("--state-dir", required=True, type=Path)
+    p_pc.add_argument("--comments-file", required=True, type=Path)
+    p_pc.add_argument("--out-json", type=Path, default=None)
+
+    p_exp = sub.add_parser("export", help="Export editable chapters, 4-key records, evidence map, offline HTML preview, and result.json gap sync.")
     p_exp.add_argument("--state-dir", required=True, type=Path)
     p_exp.add_argument("--out-dir", required=True, type=Path)
     p_exp.add_argument("--records-out", type=Path, default=None)
     p_exp.add_argument("--evidence-out", type=Path, default=None)
     p_exp.add_argument("--html-preview", type=Path, default=None)
+    p_exp.add_argument("--audit-json", type=Path, default=None, help="Optional longdoc_audit.json whose errors/warnings auto-merge into gaps.")
+    p_exp.add_argument("--result-json", type=Path, default=None, help="Optional result.json to auto-merge audit gaps, review statuses, and 4-key links.")
+
+    p_docx = sub.add_parser("patch-docx", help="Targeted OOXML plain-text paragraph patch preserving untouched ZIP members and w:instrText citation fields.")
+    p_docx.add_argument("--src-docx", required=True, type=Path)
+    p_docx.add_argument("--dst-docx", required=True, type=Path)
+    p_docx.add_argument("--match-substring", required=True)
+    p_docx.add_argument("--replacement-substring", required=True)
 
     args = parser.parse_args(argv)
     try:
         if args.command == "import":
             res = cmd_import(
-                args.chapters_dir,
-                args.state_dir,
-                workorder_path=args.workorder,
-                toc_path=args.toc_json,
-                receipt_out=args.receipt_out,
+                args.chapters_dir, args.state_dir, workorder_path=args.workorder,
+                toc_path=args.toc_json, receipt_out=args.receipt_out, allow_file_fallback=args.allow_file_fallback,
             )
         elif args.command == "propose":
+            ann_txt = args.annotation_file.read_text(encoding="utf-8") if args.annotation_file else args.annotation
+            rep_txt = args.replacement_file.read_text(encoding="utf-8") if args.replacement_file else args.replacement_text
             res = cmd_propose(
-                args.state_dir,
-                target_id=args.target_id,
-                file_rel=args.file,
-                mode=args.mode,
-                title=args.title,
-                annotation=args.annotation,
-                source_quote=args.source_quote,
-                source_ref=args.source_ref,
-                uncertainty=args.uncertainty,
-                replacement_text=args.replacement_text,
+                args.state_dir, target_id=args.target_id, file_rel=args.file,
+                block_index=args.block_index, anchor_query=args.anchor_query, mode=args.mode,
+                title=args.title, annotation=ann_txt, source_quote=args.source_quote,
+                source_ref=args.source_ref, uncertainty=args.uncertainty, replacement_text=rep_txt,
+                review_item_id=args.review_item_id,
             )
         elif args.command in {"accept", "reject"}:
             res = cmd_decide(args.state_dir, proposal_id=args.proposal_id, action=args.command, reason=args.reason)
         elif args.command == "diff":
-            res = cmd_diff(
-                args.state_dir,
-                from_version=args.from_version,
-                to_version=args.to_version,
-                out_diff=args.out_diff,
-                out_json=args.out_json,
-            )
+            res = cmd_diff(args.state_dir, from_version=args.from_version, to_version=args.to_version, out_diff=args.out_diff, out_json=args.out_json)
             res = {k: v for k, v in res.items() if k != "diff_text"}
         elif args.command == "rollback":
             res = cmd_rollback(args.state_dir, to_version=args.to_version, out_json=args.out_json)
         elif args.command == "reapply":
             pids = [x.strip() for x in args.proposal_ids.split(",") if x.strip()]
-            res = cmd_reapply(
-                args.state_dir,
-                proposal_ids=pids,
-                from_accepted=args.from_accepted,
-                out_json=args.out_json,
-            )
+            res = cmd_reapply(args.state_dir, proposal_ids=pids, from_accepted=args.from_accepted, out_json=args.out_json)
         elif args.command == "fault-test":
             res = cmd_fault_test(args.state_dir, out_json=args.out_json)
+        elif args.command == "parse-comments":
+            res = cmd_parse_comments(args.state_dir, comments_file=args.comments_file, out_json=args.out_json)
         elif args.command == "export":
             res = cmd_export(
-                args.state_dir,
-                out_dir=args.out_dir,
-                records_out=args.records_out,
-                evidence_out=args.evidence_out,
-                html_preview=args.html_preview,
+                args.state_dir, out_dir=args.out_dir, records_out=args.records_out,
+                evidence_out=args.evidence_out, html_preview=args.html_preview,
+                audit_json=args.audit_json, result_json=args.result_json,
+            )
+        elif args.command == "patch-docx":
+            res = patch_docx_plain_paragraph(
+                args.src_docx, args.dst_docx,
+                match_substring=args.match_substring, replacement_substring=args.replacement_substring,
             )
         else:
             raise RevisionError(f"Unknown command: {args.command}")

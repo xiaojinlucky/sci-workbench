@@ -26,10 +26,17 @@
 
 ## 2. CLI Commands
 ```bash
+# Step 1: Extract /input fact & boundary index (.pdf/.docx/.md/.json)
+python3 /skills/weekly-skill/scripts/grant_7element_auditor.py \
+  --input-dir /input \
+  --extract-corpus-index /app/work/corpus_index.json
+
+# Step 3: Run 7-element, source_ref verbatim back-check & workorder audit
 python3 /skills/weekly-skill/scripts/grant_7element_auditor.py \
   --draft /app/output/grant_chapter.md \
   --plan-json /app/output/grant_plan.json \
   --case-json /input/case.json \
+  --corpus-dir /input \
   --crosswalk /app/output/element_crosswalk.md \
   --emit-contract-helper /app/work/contract_helper.json \
   --out-json /app/output/grant_audit.json
@@ -39,12 +46,20 @@ python3 /skills/weekly-skill/scripts/grant_7element_auditor.py \
 ```json
 {
   "passed": true,
+  "draft_extractor": "utf8_text",
+  "parse_mode": "headings",
   "seven_elements": {
     "missing_elements": [],
     "thin_elements": [],
-    "total_han_chars": 2050,
+    "seven_section_han_chars": 2050,
     "draft_size_range": [1600, 2600],
     "draft_size_ok": true
+  },
+  "evidence_map_verification": {
+    "checked_count": 5,
+    "verified_count": 4,
+    "planned_or_gap_count": 1,
+    "ungrounded_count": 0
   },
   "provenance_and_boundary": {
     "applicant_evidence_present": false,

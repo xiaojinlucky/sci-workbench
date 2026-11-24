@@ -31,11 +31,13 @@ When natural EN↔ZH syntax genuinely requires reordering clauses (for example, 
 
 Alternatively, attach an inline HTML comment on the translated paragraph: `<!-- reordered_clause_note: Chinese topic-first syntax moved 2024 before n=128; bindings verified -->`. Unattested order inversions always fail the guard.
 
-## 3. Live Citation and Bilingual Reference 1:1 Synchronization
+## 3. Immutable `source_citation_ledger`, Live Citation Fields, and Heading Hierarchy 1:1
 
-Prevent the two highest-frequency bilingual bibliography failures:
-1. **Orphaned script mismatch**: Converting the reference list from Chinese to English while leaving in-text citations as `（张伟等，2023）` breaks author-year lookup and live citation links. Synchronize in-text citations (`(Zhang et al., 2023)`) with the target bibliography and preserve original Chinese metadata in `reference_map.json` / `evidence_map`.
-2. **Cross-entry title/DOI/year swap**: Never batch-translate titles without locking each entry to its citation key and DOI. Every `[k]` entry must preserve the exact same DOI and publication year at position `[k]` and match its own translated title and author list.
+Prevent the four highest-frequency structural and bibliography failures:
+1. **No external additions or silent DOI completions**: Every reference in the source document is locked into an immutable `source_citation_ledger` (`cite_key`, original text, `source_doi`, `source_page`/`source_line`), with `translated_title` stored separately as a display-only field. Any target entry absent from source (`unverified_external_additions`) or any unauthorized completion of a missing/truncated source DOI (`unverified_doi_completions`) is barred from `verified_dois`/`verified_citations` and forces `passed=false` (non-zero exit).
+2. **Orphaned script mismatch**: Converting the reference list from Chinese to English while leaving in-text citations as `（张伟等，2023）` breaks author-year lookup. Synchronize in-text citations (`(Zhang et al., 2023)`) with the target bibliography while keeping the immutable source record intact.
+3. **Cross-entry title/DOI/year swap**: Never batch-translate titles without locking each entry to its `cite_key` and DOI. Every `[k]` entry must preserve the exact same DOI and publication year at position `[k]` and match its own translated title and author list.
+4. **Heading hierarchy 1:1 & honest OOXML live-field degradation**: Never silently merge, drop, or simplify section headings (`H1/H2/H3` count and depth must align 1:1 or `HEADING_HIERARCHY_DRIFT` blocks). When extracting `.docx` files containing Zotero/CSL, Mendeley, EndNote, Citavi, or Word `REF` `w:instrText` fields into Markdown plain text, explicitly record `live_citation_fields` and `citation_fields_preserved: false` — never claim live citation links survive Markdown export.
 
 ## 4. Negation Scope and Epistemic Hedge Conservation
 

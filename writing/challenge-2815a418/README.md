@@ -1,49 +1,52 @@
-# Rebuttal Revision Closure Skill (`rebuttal-revision-closure`)
+# Peer-Review Rebuttal and Controlled Baseline Revision Skill (`rebuttal-revision-closure`)
 
-Offline, deterministic peer-review rebuttal and controlled manuscript-baseline revision skill for Harbor DeepSeek Harness execution.
+Offline, deterministic peer-review rebuttal and manuscript revision closure workflow supporting raw `.pdf`, `.docx`, `.md`, and `.txt` inputs, parent+sub-item comment extraction, triple-bound edit auditing, drift-proof re-anchoring, multi-round prior-commitment continuity, and 5-field `result.json` sealing.
 
 ## Purpose and Scope
 
-Designed for controlled peer-review revision tasks where an agent receives a baseline manuscript summary (`materials/manuscript-baseline.md`) and a structured reviewer/editor comment list (`materials/reviewer-comments.md`). The skill enforces:
-
-1. **Multi-format comment & sub-item 1:1:1 closure**: Parses `E.1`, `R1.1`, `R1.1a`, `R1.1(b)`, `Comment 1`, Chinese `审稿人1意见1`, and nested `(a)`/`(b)`/`(1)`/`(2)` sub-requirements, verifying an explicit canonical disposition tag for every item.
-2. **Triple-bound edit verification**: Validates that every quoted revision exists verbatim in `manuscript-revised.md`, sits inside the exact claimed `[L12-L16]` / `[§Section L12-L16]` anchor span, and overlaps genuine token-level changes in the `baseline -> revised` diff (blocking whitespace-only reflow and unchanged baseline quotes masquerading as edits).
-3. **Missing-evidence tri-partite closure**: Audits `missing_evidence_list.md` to confirm every `AUTHOR_INPUT_NEEDED` / `PARTIAL` / `NOT_FEASIBLE` item documents a boundary rationale, an existing-material alternative clarification, and a concrete author confirmation item.
-4. **Four-tier tone, reviewer isolation, anti-fabrication, and anti-AI prose auditing**: Blocks fabricated experiments/acceptance claims, hostile rebukes, overpromising, and cross-reviewer leaks while flagging AI boilerplate with exact line numbers.
-5. **5-field `output_contract` generation**: Emits `preserved_facts`, `evidence_map`, and `change_log` patch snippets ready for `result_guard.py --finalize`.
+1. **Zero-dependency native document extraction & `/input` bootstrapping (`scripts/doc_extract.py` + `--extract-review-items`)**: Automatically discovers manuscript and reviewer-comment files under `/input/`, decodes `.pdf` (`pdftotext` -> `pypdf` -> `pdfplumber` -> pure-stdlib `zlib` fallback), `.docx` (pure-stdlib OOXML paragraphs, tables, footnotes), and multi-encoding text, and emits `review_items.json` preserving both parent items and nested sub-items across standard, non-standard (`Reviewer #2`, `Q1`/`W1`, `问题一`, numbered lists), and unnumbered prose (`AUTO-1..N`) formats with a `comment_parse_underflow` self-check.
+2. **Triple-bound edit verification + substantive token quota + `CLARIFY_EXISTING` grounding**: Requires every edit-claiming response to simultaneously bind a verbatim revised quote, a valid `[§Section Lstart-Lend]` anchor containing that quote, and `>= 3` non-stopword diff tokens inside that span—while requiring `CLARIFY_EXISTING` and `DISAGREE_WITH_EVIDENCE` responses to quote or anchor real existing manuscript text.
+3. **Drift-proof anchoring (`--extract-anchors` + `--reanchor`) & multi-round continuity (`--previous-ledger`)**: Generates `[§Section Lstart-Lend]` tags with `quote_sha1` hashes, automatically recomputes drifted line numbers after late manuscript edits, and verifies prior-round verified edits remain intact in subsequent rounds (`prior_commitment_unmet`).
+4. **Baseline DOI & statistical preservation + substantive 3-element missing-evidence closure**: Blocks silently dropped baseline DOIs or unexplained statistical token removals and enforces substantive 3-part missing-evidence entries (`>= 80` chars with concrete section/data specificity).
+5. **Four-tier tone, reviewer isolation, anti-fabrication & 5-field contract**: Audits `ACCEPT`/`CLARIFY`/`POLITE_DISAGREE`/`APPEAL`, blocks cross-reviewer leaks, overpromises, rebukes, and empty-thanks replies, and exports `rebuttal_ledger.json`, `rebuttal_closure_report.md`, and a 5-field `contract_patch.json`.
 
 ## Directory Layout
 
-- `SKILL.md`: Agent execution protocol, invariants, and completion criteria.
-- `scripts/rebuttal_closure_checker.py`: Zero-dependency Python 3.12 closure, diff, anchor, evidence, and tone auditor.
+- `SKILL.md`: Agent execution protocol, hard invariants, and completion criteria.
+- `scripts/doc_extract.py`: Zero-dependency PDF/DOCX/text extractor with page/line offset provenance.
+- `scripts/rebuttal_closure_checker.py`: Review-item extractor, anchor extractor, re-anchorer, and deterministic closure auditor.
 - `scripts/{preflight_probe,result_guard,budget_guard,block_indexer,gap_gate,final_audit}.py`: Common Harbor M1-M6 runtime guards.
-- `references/disposition-and-evidence.md`: Disposition taxonomy, sub-item splitting, and 3-part missing-evidence rules.
-- `references/tone-and-isolation.md`: Four-tier tone calibration, claim-strength verbs, reviewer isolation, and prose discipline.
-- `references/output-contract-and-qa.md`: Exact `result.json` 5-field contract and pre-seal QA checklist.
-- `examples/synthetic_example.md`: Minimal illustrative interface example.
+- `references/{disposition-and-evidence,tone-and-isolation,output-contract-and-qa}.md`: Methodological rules, tone templates, and 5-field schema.
+- `examples/synthetic_example.md`: Self-contained minimal end-to-end walkthrough (marked explicitly as illustrative example).
 
-## Dependencies and Runtime Requirements
-
-- Python 3.12 standard library only (`argparse`, `difflib`, `json`, `re`, `pathlib`). Zero third-party packages and zero network access required.
-
-## CLI Usage
+## Quick Start CLI Usage
 
 ```bash
+# 1. Auto-extract baseline & review items from /input (PDF/DOCX/MD/TXT)
 python3 scripts/rebuttal_closure_checker.py \
-  --baseline /input/materials/manuscript-baseline.md \
-  --comments /input/materials/reviewer-comments.md \
-  --revised /app/output/manuscript-revised.md \
-  --response /app/output/response-letter.md \
+  --extract-review-items --from-input /input --work-dir /app/work --out-json /app/work/review_items.json
+
+# 2. Extract exact [§Section Lstart-Lend] + quote_sha1 anchors from baseline->revised diff
+python3 scripts/rebuttal_closure_checker.py \
+  --extract-anchors --baseline /app/work/baseline_extracted.md --revised /app/output/manuscript-revised.md \
+  --out-json /app/work/extracted_anchors.json
+
+# 3. Auto-reanchor drifted line numbers if revised manuscript is edited later
+python3 scripts/rebuttal_closure_checker.py \
+  --reanchor --revised /app/output/manuscript-revised.md --response /app/output/response-letter.md \
+  --out-response /app/output/response-letter.md --out-json /app/work/reanchor_report.json
+
+# 4. Run full triple-bound & multi-round closure audit
+python3 scripts/rebuttal_closure_checker.py \
+  --baseline /app/work/baseline_extracted.md --comments /app/work/comments_extracted.md \
+  --revised /app/output/manuscript-revised.md --response /app/output/response-letter.md \
   --missing-evidence /app/output/missing_evidence_list.md \
-  --case-id "<CASE_ID>" \
-  --out-json /app/output/rebuttal_ledger.json \
-  --out-report /app/output/rebuttal_closure_report.md \
-  --out-contract-patch /app/work/contract_patch.json
+  --previous-ledger /app/work/round1_rebuttal_ledger.json \
+  --case-id "<CASE_ID>" --out-json /app/output/rebuttal_ledger.json \
+  --out-report /app/output/rebuttal_closure_report.md --out-contract-patch /app/work/contract_patch.json
 ```
 
-Exit code `0` indicates `"passed": true` (zero hard errors). Non-zero exit indicates at least one blocking closure, diff, anchor, evidence, fabrication, or isolation failure.
+## Dependencies and Limitations
 
-## Limitations and Boundaries
-
-- Operates strictly on text/Markdown baselines and summaries supplied in `/input/`; does not perform external literature search, wet-lab experiments, or live journal submission.
-- Semantic scientific validity of domain arguments remains the responsibility of the author/agent; the checker deterministically enforces structural completeness, verbatim grounding, diff truth, evidence logging, and tone/isolation guardrails.
+- Python 3.12 standard library only (zero third-party dependencies, zero network access; optional acceleration if `pdftotext`, `pypdf`, or `pdfplumber` is preinstalled).
+- Operates strictly within controlled baseline scope; never fabricates external experiments, cohorts, or editor decisions. Offline comparison benchmarks in companion folders reflect local self-tests on open-access papers, not official hidden platform whiteboards.

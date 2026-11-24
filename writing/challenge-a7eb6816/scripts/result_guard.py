@@ -160,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--case-id", default="case-01", help="Case ID for initialization.")
     parser.add_argument("--task-id", default="", help="Optional task ID.")
     parser.add_argument("--patch-json", default="", help="JSON string patch to merge.")
+    parser.add_argument("--patch-file", default="", help="Path to JSON patch file to merge (shell-safe for long payloads).")
     parser.add_argument("--finalize", action="store_true", help="Mark status ok/partial_with_gaps.")
     parser.add_argument("--validate", action="store_true", help="Validate result JSON.")
     args = parser.parse_args(argv)
@@ -169,8 +170,11 @@ def main(argv: list[str] | None = None) -> int:
         res = init_result(target_path, case_id=args.case_id, task_id=args.task_id)
         print(json.dumps(res, ensure_ascii=False))
         return 0
-    if args.patch_json or args.finalize:
-        patch = json.loads(args.patch_json) if args.patch_json else {}
+    if args.patch_json or args.patch_file or args.finalize:
+        if args.patch_file:
+            patch = json.loads(Path(args.patch_file).read_text(encoding="utf-8"))
+        else:
+            patch = json.loads(args.patch_json) if args.patch_json else {}
         res = update_result(target_path, patch, finalize=args.finalize)
         print(json.dumps({"ok": True, "status": res["status"]}, ensure_ascii=False))
         return 0

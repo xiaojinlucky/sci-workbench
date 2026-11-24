@@ -1,53 +1,74 @@
-# Minimal Synthetic Invocation Example (`rebuttal-revision-closure`)
+# Minimal End-to-End Illustrative Walkthrough (`rebuttal-revision-closure`)
 
-> **Notice**: This is a synthetic interface illustration only and does not represent any official evaluation case or test answer.
+> **Example Notice**: This file is a self-contained illustrative example demonstrating the CLI workflow and schemas. It is not an official formal test case or prepared benchmark answer.
 
-## Synthetic Input Excerpts
+## 1. Illustrative Input Files
 
-### `materials/manuscript-baseline.md`
+### `mini-baseline.md`
 ```markdown
-# Methods
-Samples (n = 40) were evaluated using Assay X.
-
-# Results
-Assay X proved causal improvement across all patient cohorts (p = 0.012).
+# Study Summary
+## Methods
+We analyzed 240 retrospective records (2018-2022) from public registry data (DOI: 10.1000/example.2022.01).
+## Results
+Event rates rose from 12.4% to 18.7% (p < 0.01), proving that household exposure directly caused the increase.
 ```
 
-### `materials/reviewer-comments.md`
+### `mini-comments.md`
 ```markdown
-- R1.1a: Clarify the Assay X detection threshold in Methods.
-- R1.1b: Soften the causal claim in Results because the design is observational.
-- R1.2: Add an independent multicenter validation cohort (n >= 200).
+## Reviewer #1
+R1.1 Please address two issues:
+(a) Soften the causal claim in Results because the design is retrospective.
+(b) Provide a new prospective multicenter cohort validating this mechanism.
+R1.2 Clarify the study period and sample size in Methods.
 ```
 
-## CLI Invocation
+## 2. Command Sequence
 
 ```bash
-python /skills/weekly-skill/scripts/rebuttal_closure_checker.py \
-  --baseline /input/materials/manuscript-baseline.md \
-  --comments /input/materials/reviewer-comments.md \
-  --revised /app/output/manuscript-revised.md \
-  --response /app/output/response-letter.md \
-  --missing-evidence /app/output/missing_evidence_list.md \
-  --case-id "SYNTHETIC-EXAMPLE-01" \
-  --out-json /app/output/rebuttal_ledger.json \
-  --out-report /app/output/rebuttal_closure_report.md \
-  --out-contract-patch /app/work/contract_patch.json
+python3 scripts/rebuttal_closure_checker.py \
+  --extract-review-items --from-input ./input --work-dir ./work --out-json ./work/review_items.json
+
+python3 scripts/rebuttal_closure_checker.py \
+  --extract-anchors --baseline ./work/baseline_extracted.md --revised ./output/manuscript-revised.md \
+  --out-json ./work/extracted_anchors.json
+
+python3 scripts/rebuttal_closure_checker.py \
+  --baseline ./work/baseline_extracted.md --comments ./work/comments_extracted.md \
+  --revised ./output/manuscript-revised.md --response ./output/response-letter.md \
+  --missing-evidence ./output/missing_evidence_list.md --case-id "example-001" \
+  --out-json ./output/rebuttal_ledger.json --out-report ./output/rebuttal_closure_report.md \
+  --out-contract-patch ./work/contract_patch.json
 ```
 
-## Illustrative Output Snippet (`rebuttal_ledger.json`, synthetic example)
+## 3. Illustrative Output Snippets
 
-```json
-{
-  "passed": true,
-  "expected_comment_ids": ["R1.1a", "R1.1b", "R1.2"],
-  "answered_comment_ids": ["R1.1a", "R1.1b", "R1.2"],
-  "missing_responses": [],
-  "triple_bound_edits_verified": 2,
-  "missing_evidence_closed_count": 1,
-  "fabrication_hits": [],
-  "rebuke_hits": [],
-  "cross_reviewer_leaks": [],
-  "errors": []
-}
+### `output/manuscript-revised.md` (edited excerpt)
+```markdown
+Event rates rose from 12.4% to 18.7% (p < 0.01), suggesting an observational association with household exposure; prospective multicenter validation remains outside the present retrospective registry scope.
+```
+
+### `output/response-letter.md` (excerpt)
+```markdown
+### R1.1(a)
+Disposition: SOFTEN_CLAIM
+We replaced causal wording with observational association framing in [§Results L5].
+> Event rates rose from 12.4% to 18.7% (p < 0.01), suggesting an observational association with household exposure; prospective multicenter validation remains outside the present retrospective registry scope.
+
+### R1.1(b)
+Disposition: PARTIAL
+Collecting a new prospective multicenter cohort lies outside this controlled retrospective baseline scope. We added an explicit scope limitation in [§Results L5] and logged required author inputs in `missing_evidence_list.md`.
+> prospective multicenter validation remains outside the present retrospective registry scope.
+
+### R1.2
+Disposition: CLARIFY_EXISTING
+The retrospective sample size (240 records) and period (2018-2022) are reported in [§Methods L3].
+> We analyzed 240 retrospective records (2018-2022) from public registry data (DOI: 10.1000/example.2022.01).
+```
+
+### `output/missing_evidence_list.md` (excerpt)
+```markdown
+### R1.1(b)
+- **Boundary Rationale**: Prospective multicenter cohort collection is outside the controlled retrospective registry baseline scope and cannot be performed offline.
+- **Existing-Material Alternative**: Added explicit observational-scope limitation in [§Results L5] without fabricating prospective cohort data.
+- **Author Confirmation Required**: Authors must confirm whether prospective validation data exist in an external dataset or retain the stated limitation for editorial review.
 ```

@@ -58,69 +58,514 @@ def _escape_latex_text(text: str) -> str:
     return "".join(out)
 
 
-def _scaffold_tex_from_prose(input_dir: Path, emitted_dir: Path, case: dict[str, Any]) -> tuple[Path | None, list[str]]:
-    """When /input contains only Markdown/text drafts (no .tex), synthesize a compilable LaTeX scaffold."""
+def _convert_inline_markdown(text: str) -> str:
+    """Convert inline Markdown formatting (math, citations, bold, italic, code) safely into LaTeX."""
+    # Protect inline $...$ math spans first
+    parts = re.split(r"(\$[^$\n]+?\$)", text)
+    out: list[str] = []
+    for idx, part in enumerate(parts):
+        if idx % 2 == 1:
+            out.append(part)
+            continue
+        # Temporarily tokenize [@key], `code`, **bold**, *italic*
+        placeholders: list[tuple[str, str]] = []
+
+        def _stash(latex_frag: str) -> str:
+            tok = f"ZZLTXTOK{len(placeholders)}ZZ"
+            placeholders.append((tok, latex_frag))
+            return tok
+
+        s = re.sub(r"\[@([A-Za-z0-9_.:-]+(?:\s*,\s*@?[A-Za-z0-9_.:-]+)*)\]",
+                   lambda m: _stash(r"\cite{" + ",".join(k.strip().lstrip("@") for k in m.group(1).split(",")) + "}"), part)
+        s = re.sub(r"`([^`\n]+)`", lambda m: _stash(r"\texttt{" + _escape_latex_text(m.group(1)) + "}"), s)
+        s = re.sub(r"\*\*([^*\n]+)\*\*", lambda m: _stash(r"\textbf{" + _escape_latex_text(m.group(1)) + "}"), s)
+        s = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", lambda m: _stash(r"\textit{" + _escape_latex_text(m.group(1)) + "}"), s)
+        s = _escape_latex_text(s)
+        for tok, frag in placeholders:
+            s = s.replace(tok, frag)
+        out.append(s)
+    return "".join(out)
+
+
+def _render_md_table_to_latex(table_lines: list[str], table_idx: int, twocolumn: bool = False) -> list[str]:
+    """Convert a Markdown pipe table into booktabs + tabularx (or longtable when >18 data rows)."""
+    rows: list[list[str]] = []
+    for ln in table_lines:
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if all(re.fullmatch(r":?-{2,}:?", c or "-") for c in cells):
+            continue
+        rows.append(cells)
+    if not rows:
+        return []
+    ncols = max(len(r) for r in rows)
+    norm_rows = [r + [""] * (ncols - len(r)) for r in rows]
+    header = norm_rows[0]
+    data = norm_rows[1:]
+    col_spec = "l" + "X" * max(1, ncols - 1) if ncols > 1 else "X"
+    use_long = len(data) > 18 and not twocolumn
+
+    out: list[str] = []
+    if use_long:
+        out.append(f"\\begin{{longtable}}{{{'l' * ncols}}}")
+        out.append(f"\\caption{{Table {table_idx}}}\\label{{tab:scaffold_{table_idx}}}\\\\")
+        out.append("\\toprule")
+        out.append(" & ".join(_convert_inline_markdown(c) for c in header) + r" \\")
+        out.append("\\midrule")
+        out.append("\\endfirsthead")
+        out.append("\\toprule")
+        out.append(" & ".join(_convert_inline_markdown(c) for c in header) + r" \\")
+        out.append("\\midrule")
+        out.append("\\endhead")
+        for r in data:
+            out.append(" & ".join(_convert_inline_markdown(c) for c in r) + r" \\")
+        out.append("\\bottomrule")
+        out.append("\\end{longtable}")
+    else:
+        env = "table*" if (twocolumn and ncols >= 4) else "table"
+        out.append(f"\\begin{{{env}}}[htbp]")
+        out.append("\\centering")
+        out.append(f"\\caption{{Table {table_idx}}}\\label{{tab:scaffold_{table_idx}}}")
+        out.append(f"\\begin{{tabularx}}{{\\linewidth}}{{{col_spec}}}")
+        out.append("\\toprule")
+        out.append(" & ".join(_convert_inline_markdown(c) for c in header) + r" \\")
+        out.append("\\midrule")
+        for r in data:
+            out.append(" & ".join(_convert_inline_markdown(c) for c in r) + r" \\")
+        out.append("\\bottomrule")
+        out.append("\\end{tabularx}")
+        out.append(f"\\end{{{env}}}")
+    return out
+
+
+INSTRUCTION_FILENAMES = {
+    "readme.md", "task.md", "prompt.md", "instructions.md", "rubric.md",
+    "case.json", "manifest.json", "public-manifest.json",
+}
+
+FACT_NUM_RE = re.compile(
+    r"(?:\b\d+(?:\.\d+)?\s*(?:%|‰|ms|s|min|h|hr|mg|g|kg|ml|mL|L|mm|cm|m|nm|µm|um|°C|K|MPa|GPa|kPa|Pa|Hz|kHz|MHz|mV|V|mA|A|pt|px)\b"
+    r"|\bp\s*[<=>≤≥]\s*0?\.\d+|\bn\s*=\s*\d+(?:,\d+)*|\b(?:OR|HR|RR|CI|SD|AUC|R\^2|F1)\s*[=:]\s*-?\d+(?:\.\d+)?)",
+    re.I,
+)
+FACT_CITE_RE = re.compile(r"\\cite[a-zA-Z*]*\{([^}]+)\}|\[@([A-Za-z0-9_.:-]+)\]")
+
+
+def _extract_prose_metadata(draft_files: list[Path], case: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Extract real title and author(s) strictly from case.json or manuscript draft headers (never fabricate)."""
+    raw_title = case.get("title") or (case.get("source") or {}).get("title")
+    title = str(raw_title).strip() if isinstance(raw_title, str) and raw_title.strip() else None
+
+    raw_authors = case.get("authors") or case.get("author") or (case.get("source") or {}).get("authors") or (case.get("source") or {}).get("author")
+    author: str | None = None
+    if isinstance(raw_authors, list):
+        cleaned = [str(a).strip() for a in raw_authors if str(a).strip()]
+        if cleaned:
+            author = " \\and ".join(cleaned)
+    elif isinstance(raw_authors, str) and raw_authors.strip():
+        author = raw_authors.strip()
+
+    for df in draft_files:
+        lines = df.read_text(encoding="utf-8", errors="replace").splitlines()[:40]
+        for ln in lines:
+            st = ln.strip()
+            if not title and st.startswith("# "):
+                cand = st[2:].strip()
+                if cand:
+                    title = cand
+            if not author:
+                am = re.match(r"^(?:authors?|作者)\s*[:：]\s*(.+)$", st, re.I)
+                if am and am.group(1).strip():
+                    author = am.group(1).strip()
+    return title, author
+
+
+def _scaffold_tex_from_prose(
+    input_dir: Path,
+    emitted_dir: Path,
+    case: dict[str, Any],
+    template: str = "article",
+) -> tuple[Path | None, list[str], list[dict[str, Any]]]:
+    """Synthesize a structured LaTeX manuscript ONLY from genuine prose drafts (never task.md, never 'Draft Author')."""
     draft_files = sorted(
         p for p in input_dir.rglob("*")
         if p.is_file()
         and p.suffix.lower() in {".md", ".txt"}
-        and p.name.lower() not in {"readme.md", "task.md"}
+        and p.name.lower() not in INSTRUCTION_FILENAMES
         and not p.is_symlink()
         and p.resolve().is_relative_to(input_dir.resolve())
         and not any(part.startswith(".") for part in p.relative_to(input_dir).parts)
     )
+    scaffold_gaps: list[dict[str, Any]] = []
     if not draft_files:
-        # Fall back to task.md if it is the only prose input
-        task_md = input_dir / "task.md"
-        if task_md.is_file():
-            draft_files = [task_md]
-        else:
-            return None, []
+        scaffold_gaps.append({
+            "code": "TEX_MISSING_MANUSCRIPT_SOURCE",
+            "message": "No pre-existing .tex entry or manuscript prose source (.md/.txt) found in input; task.md/instructions are excluded from manuscript content.",
+        })
+        return None, [], scaffold_gaps
 
-    title = str(case.get("title") or (case.get("source") or {}).get("title") or "Scientific Manuscript Draft")
+    title, author = _extract_prose_metadata(draft_files, case)
+    if not title:
+        scaffold_gaps.append({
+            "code": "TEX_MISSING_TITLE_METADATA",
+            "message": "No manuscript title found in case.json or draft H1 heading; left blank instead of fabricating a placeholder title.",
+        })
+    if not author:
+        scaffold_gaps.append({
+            "code": "TEX_MISSING_AUTHOR_METADATA",
+            "message": "No author metadata found in case.json or draft header; left blank instead of fabricating 'Draft Author'.",
+        })
+
+    tpl = (template or "article").lower()
+    twocol = tpl in {"ieeetran", "acmart"}
     body_lines: list[str] = []
     used_sources: list[str] = []
+    uses_tables = False
+    uses_longtable = False
+    uses_figures = False
+    table_counter = 0
+    fig_counter = 0
+    sec_counter = 0
+    consumed_h1_title = False
+
     for df in draft_files:
         rel = df.relative_to(input_dir).as_posix()
         used_sources.append(rel)
-        raw = df.read_text(encoding="utf-8", errors="replace")
-        for ln in raw.splitlines():
-            st = ln.strip()
-            if not st:
+        lines = df.read_text(encoding="utf-8", errors="replace").splitlines()
+        i = 0
+        in_itemize = False
+        in_enum = False
+        in_display_math = False
+        while i < len(lines):
+            st = lines[i].strip()
+            # Skip metadata header lines already lifted to preamble
+            if i < 10 and re.match(r"^(?:authors?|作者)\s*[:：]\s*.+$", st, re.I):
+                i += 1
+                continue
+            # Display math block $$...$$
+            if st.startswith("$$"):
+                if in_itemize:
+                    body_lines.append("\\end{itemize}")
+                    in_itemize = False
+                if in_enum:
+                    body_lines.append("\\end{enumerate}")
+                    in_enum = False
+                if st.endswith("$$") and len(st) > 4:
+                    body_lines.append("\\[\n" + st[2:-2].strip() + "\n\\]")
+                else:
+                    body_lines.append("\\[" if not in_display_math else "\\]")
+                    in_display_math = not in_display_math
+                i += 1
+                continue
+            if in_display_math:
+                body_lines.append(lines[i])
+                i += 1
+                continue
+
+            # Markdown pipe table block
+            if st.startswith("|") and st.endswith("|") and st.count("|") >= 2:
+                if in_itemize:
+                    body_lines.append("\\end{itemize}")
+                    in_itemize = False
+                if in_enum:
+                    body_lines.append("\\end{enumerate}")
+                    in_enum = False
+                tbl_buf: list[str] = []
+                while i < len(lines) and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+                    tbl_buf.append(lines[i].strip())
+                    i += 1
+                table_counter += 1
+                rendered_tbl = _render_md_table_to_latex(tbl_buf, table_counter, twocolumn=twocol)
+                if rendered_tbl:
+                    uses_tables = True
+                    if any("\\begin{longtable}" in x for x in rendered_tbl):
+                        uses_longtable = True
+                    body_lines.extend(rendered_tbl)
+                continue
+
+            # Markdown image ![caption](path)
+            img_m = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)$", st)
+            if img_m:
+                if in_itemize:
+                    body_lines.append("\\end{itemize}")
+                    in_itemize = False
+                if in_enum:
+                    body_lines.append("\\end{enumerate}")
+                    in_enum = False
+                fig_counter += 1
+                uses_figures = True
+                cap = _convert_inline_markdown(img_m.group(1).strip() or f"Figure {fig_counter}")
+                img_path = img_m.group(2).strip()
+                body_lines.extend([
+                    "\\begin{figure}[htbp]",
+                    "\\centering",
+                    f"\\includegraphics[width=0.95\\linewidth]{{{img_path}}}",
+                    f"\\caption{{{cap}}}\\label{{fig:scaffold_{fig_counter}}}",
+                    "\\end{figure}",
+                ])
+                i += 1
+                continue
+
+            # Lists
+            bm = re.match(r"^[-*+]\s+(.+)$", st)
+            nm = re.match(r"^\d+[.)]\s+(.+)$", st)
+            if bm:
+                if in_enum:
+                    body_lines.append("\\end{enumerate}")
+                    in_enum = False
+                if not in_itemize:
+                    body_lines.append("\\begin{itemize}")
+                    in_itemize = True
+                body_lines.append(f"  \\item {_convert_inline_markdown(bm.group(1).strip())}")
+                i += 1
+                continue
+            if nm:
+                if in_itemize:
+                    body_lines.append("\\end{itemize}")
+                    in_itemize = False
+                if not in_enum:
+                    body_lines.append("\\begin{enumerate}")
+                    in_enum = True
+                body_lines.append(f"  \\item {_convert_inline_markdown(nm.group(1).strip())}")
+                i += 1
+                continue
+
+            if in_itemize:
+                body_lines.append("\\end{itemize}")
+                in_itemize = False
+            if in_enum:
+                body_lines.append("\\end{enumerate}")
+                in_enum = False
+
+            if not st or st.startswith("<!--"):
                 body_lines.append("")
             elif st.startswith("# "):
-                if title == "Scientific Manuscript Draft":
-                    title = st[2:].strip()
+                if not consumed_h1_title and title and st[2:].strip() == title:
+                    consumed_h1_title = True
                 else:
-                    body_lines.append(f"\\section{{{_escape_latex_text(st[2:].strip())}}}")
+                    sec_counter += 1
+                    body_lines.append(f"\\section{{{_convert_inline_markdown(st[2:].strip())}}}\\label{{sec:s{sec_counter}}}")
             elif st.startswith("## "):
-                body_lines.append(f"\\section{{{_escape_latex_text(st[3:].strip())}}}")
+                sec_counter += 1
+                body_lines.append(f"\\section{{{_convert_inline_markdown(st[3:].strip())}}}\\label{{sec:s{sec_counter}}}")
             elif st.startswith("### "):
-                body_lines.append(f"\\subsection{{{_escape_latex_text(st[4:].strip())}}}")
+                sec_counter += 1
+                body_lines.append(f"\\subsection{{{_convert_inline_markdown(st[4:].strip())}}}\\label{{sec:s{sec_counter}}}")
             else:
-                body_lines.append(_escape_latex_text(st))
+                body_lines.append(_convert_inline_markdown(st))
+            i += 1
 
-    has_cjk = any(0x3400 <= ord(c) <= 0x9FFF for c in ("\n".join(body_lines) + title))
-    preamble = [
-        "\\documentclass[11pt]{article}",
-        "\\usepackage[utf8]{inputenc}" if not has_cjk else "\\usepackage{xeCJK}",
-        "\\usepackage{amsmath,booktabs}",
-        "\\usepackage[margin=22mm]{geometry}",
+        if in_itemize:
+            body_lines.append("\\end{itemize}")
+        if in_enum:
+            body_lines.append("\\end{enumerate}")
+
+    has_cjk = any(0x3400 <= ord(c) <= 0x9FFF for c in ("\n".join(body_lines) + (title or "")))
+    preamble: list[str] = []
+    if has_cjk or tpl == "ctexart":
+        preamble.append("% !TeX program = xelatex")
+        preamble.append("\\documentclass[11pt]{ctexart}" if tpl == "ctexart" else "\\documentclass[11pt]{article}")
+        if tpl != "ctexart":
+            preamble.extend(["\\usepackage{fontspec}", "\\usepackage{xeCJK}"])
+    elif tpl == "ieeetran":
+        preamble.append("\\documentclass[journal]{IEEEtran}")
+        preamble.append("\\usepackage[utf8]{inputenc}")
+    elif tpl == "acmart":
+        preamble.append("\\documentclass[sigconf]{acmart}")
+    else:
+        preamble.append("\\documentclass[11pt]{article}")
+        preamble.append("\\usepackage[utf8]{inputenc}")
+        preamble.append("\\usepackage[margin=22mm]{geometry}")
+
+    pkgs = ["amsmath", "booktabs"]
+    if uses_tables:
+        pkgs.append("tabularx")
+    if uses_longtable:
+        pkgs.append("longtable")
+    if uses_figures:
+        pkgs.append("graphicx")
+    preamble.append(f"\\usepackage{{{','.join(pkgs)}}}")
+    preamble.extend([
         "\\widowpenalty=10000",
         "\\clubpenalty=10000",
-        f"\\title{{{_escape_latex_text(title)}}}",
-        "\\author{Draft Author}",
+        "\\displaywidowpenalty=10000",
+    ])
+    if title:
+        preamble.append(f"\\title{{{_convert_inline_markdown(title)}}}")
+    else:
+        preamble.append("% TITLE_METADATA_MISSING: supply explicit title before submission")
+        preamble.append("\\title{}")
+    if author:
+        preamble.append(f"\\author{{{_convert_inline_markdown(author)}}}")
+    else:
+        preamble.append("% AUTHOR_METADATA_MISSING: supply explicit author names before submission")
+        preamble.append("\\author{}")
+    preamble.extend([
         "\\date{}",
         "\\begin{document}",
-        "\\maketitle",
-    ]
+    ])
+    if title or author:
+        preamble.append("\\maketitle")
     if not any(ln.strip() for ln in body_lines):
-        body_lines.append("Scaffold generated from supplied non-TeX input materials.")
+        scaffold_gaps.append({
+            "code": "TEX_EMPTY_MANUSCRIPT_BODY",
+            "message": "Supplied prose draft contained no body text after metadata extraction.",
+        })
+        return None, used_sources, scaffold_gaps
     tex_content = "\n".join(preamble + [""] + body_lines + ["", "\\end{document}", ""])
     emitted_dir.mkdir(parents=True, exist_ok=True)
     scaffold_path = emitted_dir / "main.tex"
     scaffold_path.write_text(tex_content, encoding="utf-8")
-    return scaffold_path, used_sources
+    return scaffold_path, used_sources, scaffold_gaps
+
+
+def extract_and_verify_preserved_facts(
+    input_root: Path,
+    source_rel_paths: list[str],
+    emitted_dir: Path,
+    manifest: list[dict[str, Any]],
+    pdf_path: Path | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build item-level fact provenance (claim/number/table_cell/citation -> input file:line -> TeX line & PDF readback)."""
+    extracted: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    def _add_fact(ftype: str, text: str, sfile: str, sline: int) -> None:
+        clean = " ".join(text.split()).strip()
+        if not clean or len(clean) < 2:
+            return
+        k = (ftype, clean.lower())
+        if k in seen_keys or len(extracted) >= 80:
+            return
+        seen_keys.add(k)
+        extracted.append({
+            "fact_id": f"F{len(extracted) + 1:03d}",
+            "fact_type": ftype,
+            "text": clean[:160],
+            "source_file": sfile,
+            "source_line": sline,
+        })
+
+    for rel in source_rel_paths:
+        p = input_root / rel
+        if not p.is_file() or p.suffix.lower() not in {".md", ".txt", ".tex", ".bib"}:
+            continue
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        is_tex = p.suffix.lower() == ".tex"
+        for lno, raw in enumerate(lines, 1):
+            st = raw.strip()
+            if not st or (is_tex and st.startswith("%")):
+                continue
+            # Citations
+            for cm in FACT_CITE_RE.finditer(st):
+                keys = (cm.group(1) or cm.group(2) or "").split(",")
+                for ck in keys:
+                    if ck.strip():
+                        _add_fact("citation", ck.strip(), rel, lno)
+            # Markdown or TeX table cells with quantitative content
+            if (st.startswith("|") and st.endswith("|") and not re.match(r"^\|[\s|:-]+\|$", st)):
+                cells = [c.strip() for c in st.strip("|").split("|") if c.strip()]
+                for c in cells:
+                    if re.search(r"\d", c):
+                        _add_fact("table_cell", c, rel, lno)
+            elif is_tex and "&" in st and "\\\\" in st:
+                cells = [re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", c).strip() for c in st.split("\\\\")[0].split("&")]
+                for c in cells:
+                    if re.search(r"\d", c):
+                        _add_fact("table_cell", c, rel, lno)
+            # Quantitative numbers / metrics
+            for nm in FACT_NUM_RE.finditer(st):
+                _add_fact("number", nm.group(0), rel, lno)
+            # Headings / claims
+            if st.startswith("## ") or st.startswith("### "):
+                _add_fact("claim", st.lstrip("#").strip(), rel, lno)
+            elif is_tex:
+                sm = re.search(r"\\(?:sub)?section\*?\{([^}]{4,90})\}", st)
+                if sm:
+                    _add_fact("claim", sm.group(1).strip(), rel, lno)
+
+    # Read back emitted .tex files with line numbers
+    tex_lines_index: list[tuple[str, int, str, str]] = []
+    for m in manifest:
+        if m["source"].endswith(".tex"):
+            tp = emitted_dir / m["source"]
+            if tp.is_file():
+                for lno, ln in enumerate(tp.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                    norm_ln = " ".join(ln.replace("\\%", "%").replace("\\_", "_").split()).lower()
+                    tex_lines_index.append((f"editable/{m['source']}", lno, ln, norm_ln))
+
+    # Optional compiled PDF text readback
+    pdf_norm: str | None = None
+    if pdf_path and pdf_path.is_file():
+        pdf_raw = ""
+        if shutil.which("pdftotext"):
+            try:
+                pr = subprocess.run(["pdftotext", str(pdf_path), "-"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
+                if pr.returncode == 0:
+                    pdf_raw = pr.stdout
+            except OSError:
+                pass
+        if not pdf_raw:
+            try:
+                import pypdf  # type: ignore
+                reader = pypdf.PdfReader(str(pdf_path))
+                pdf_raw = "\n".join((pg.extract_text() or "") for pg in reader.pages)
+            except Exception:
+                pass
+        if pdf_raw.strip():
+            pdf_norm = " ".join(pdf_raw.split()).lower()
+
+    tex_verified = 0
+    pdf_verified = 0
+    unverified_items: list[dict[str, Any]] = []
+    for item in extracted:
+        needle = " ".join(item["text"].replace("\\%", "%").replace("\\_", "_").split()).lower()
+        # Strip surrounding markdown bold/italic for matching in TeX
+        needle_plain = re.sub(r"[*_`]", "", needle)
+        hit_file: str | None = None
+        hit_line: int | None = None
+        for tfile, tlno, _raw, nln in tex_lines_index:
+            if needle_plain in nln:
+                hit_file, hit_line = tfile, tlno
+                break
+        item["tex_file"] = hit_file
+        item["tex_line"] = hit_line
+        item["tex_verified"] = hit_file is not None
+        if item["tex_verified"]:
+            tex_verified += 1
+        else:
+            unverified_items.append(item)
+        if pdf_norm is not None:
+            # Citations render as [1] or author-year in PDF, so verify non-citation literals directly in PDF text
+            if item["fact_type"] == "citation":
+                item["pdf_verified"] = None
+            else:
+                ok_pdf = needle_plain in pdf_norm
+                item["pdf_verified"] = ok_pdf
+                if ok_pdf:
+                    pdf_verified += 1
+        else:
+            item["pdf_verified"] = None
+
+    fact_gaps: list[dict[str, Any]] = []
+    if unverified_items:
+        fact_gaps.append({
+            "code": "TEX_FACT_PRESERVATION_DRIFT",
+            "count": len(unverified_items),
+            "sample": unverified_items[:5],
+            "message": f"{len(unverified_items)} extracted input fact(s) were not found during final editable TeX readback.",
+        })
+
+    result = {
+        "original_input_immutable": True,
+        "source_file_count": len(manifest),
+        "total_tracked_facts": len(extracted),
+        "tex_verified_count": tex_verified,
+        "pdf_verified_count": pdf_verified if pdf_norm is not None else None,
+        "unverified_facts_count": len(unverified_items),
+        "items": extracted,
+        "source_hashes": {m["source"]: m["sha256"] for m in manifest},
+    }
+    return result, fact_gaps
 
 # Log / static patterns
 UNRESOLVED_RE = re.compile(
@@ -145,14 +590,16 @@ BIBTEX_OVERFLOW_RE = re.compile(
 UNDEFINED_CS_RE = re.compile(r"Undefined control sequence\b")
 FONT_MISSING_RE = re.compile(r"(?:Missing character:|Font .* not loadable|Package fontspec Error)", re.I)
 
-REF_CALL_RE = re.compile(r"\\(?:(auto|c|C|eq|page)?ref\*?)\s*\{([^{}]+)\}")
+REF_CALL_RE = re.compile(r"\\(?:(auto|name|c|C|cp|Cp|v|V|eq|page|sub)?(?:page)?ref\*?)\s*\{([^{}]+)\}")
 CITE_CALL_RE = re.compile(r"\\(?:[a-zA-Z]*cite[a-zA-Z]*\*?)(?:\[[^\]]*\])*\s*\{([^{}]+)\}")
 LABEL_DEF_RE = re.compile(r"\\label\s*\{([^{}]+)\}")
 BIB_ENTRY_RE = re.compile(r"@\s*(?!comment\b|preamble\b|string\b)[a-zA-Z]+\s*\{\s*([^,\s{}]+)\s*,", re.I)
 SECTION_CMD_RE = re.compile(r"\\(?:section|subsection|subsubsection|chapter)\*?\s*\{([^{}]+)\}")
 MAGIC_PROGRAM_RE = re.compile(r"(?mi)^\s*%\s*!\s*TeX\s+program\s*=\s*([a-z0-9_-]+)")
 MAGIC_BIB_RE = re.compile(r"(?mi)^\s*%\s*!\s*(?:BIB|TeX)\s+(?:TS-)?program\s*=\s*(biber|bibtex|bibtex8)", re.I)
-TWOCOLUMN_RE = re.compile(r"\\documentclass(?:\[[^\]]*\b(?:twocolumn|sigconf|conference|journal)\b[^\]]*\])?\{(?:IEEEtran|acmart|revtex|aaai|icml|cvpr|article)\}|\\twocolumn\b", re.I)
+TWOCOLUMN_RE = re.compile(r"\\documentclass(?:\[[^\]]*\b(?:twocolumn|sigconf|conference|journal)\b[^\]]*\])?\{(?:IEEEtran|acmart|revtex\d*|aaai|icml|cvpr|article)\}|\\twocolumn\b", re.I)
+PACKAGE_CLASH_RE = re.compile(r"Option clash for package\s+([^\s.]+)", re.I)
+LONGTABLE_OVERFLOW_RE = re.compile(r"(?:Package longtable Warning|Overfull \\hbox.*(?:tabular|longtable))", re.I)
 
 # Prose keyword -> expected label prefix mapping for semantic ref type check
 PROSE_TO_PREFIX = (
@@ -187,7 +634,7 @@ def strip_tex_comments(text: str) -> str:
 
 
 def choose_entry(root: Path, sources: list[Path], requested: str | None) -> tuple[Path | None, str | None]:
-    """Select a single compilable entry .tex file, preferring requested or main.tex."""
+    """Select a single compilable entry .tex file, preferring requested, main/paper.tex, or highest include fan-out."""
     documents: list[Path] = []
     for source in sources:
         if source.suffix.lower() != ".tex":
@@ -199,15 +646,23 @@ def choose_entry(root: Path, sources: list[Path], requested: str | None) -> tupl
         norm_req = requested.replace("\\", "/").lstrip("./")
         selected = next((p for p in documents if p.relative_to(root).as_posix() == norm_req), None)
         return selected, None if selected else f"Requested TeX entry is unavailable: {requested}"
-    main = root / "main.tex"
-    if main in documents:
-        return main, None
+    for preferred in ("main.tex", "paper.tex", "manuscript.tex", "article.tex"):
+        cand = root / preferred
+        if cand in documents:
+            return cand, None
     if len(documents) == 1:
         return documents[0], None
     if documents:
-        return None, "Several compilable TeX files exist: " + ", ".join(
-            sorted(path.relative_to(root).as_posix() for path in documents)
-        )
+        # Rank candidates by include fan-out, top-level depth, and non-supplementary naming
+        def _entry_score(p: Path) -> tuple[int, int, int, str]:
+            rel = p.relative_to(root).as_posix()
+            txt = p.read_text(encoding="utf-8", errors="ignore")
+            inc_count = len(re.findall(r"\\(?:input|include)\s*\{", txt))
+            is_supp = 1 if re.search(r"(?:supp|appendix|cover|response|rebuttal|template)", rel, re.I) else 0
+            depth = len(p.relative_to(root).parts)
+            return (-inc_count, is_supp, depth, rel)
+        ranked = sorted(documents, key=_entry_score)
+        return ranked[0], None
     return None, r"No supplied .tex contains a \documentclass declaration."
 
 
@@ -358,7 +813,7 @@ def classify_diagnostics(build_text: str) -> list[dict[str, Any]]:
         add(
             "biblatex_biber_version_mismatch", "fatal_error", "build_log", None,
             "BibLaTeX control file (.bcf) version conflicts with installed Biber binary.",
-            "Align BibLaTeX/Biber versions or switch to compatible natbib/bibtex backend if permitted by template.",
+            "Remove stale .bcf/.bbl files, align BibLaTeX/Biber versions, or switch to compatible natbib/bibtex backend if permitted by template.",
             True,
         )
     if BIBTEX_OVERFLOW_RE.search(build_text):
@@ -368,8 +823,23 @@ def classify_diagnostics(build_text: str) -> list[dict[str, Any]]:
             "Truncate excessive author lists with 'and others' per journal style or use biblatex+biber.",
             True,
         )
+    for m_clash in PACKAGE_CLASH_RE.finditer(build_text):
+        pkg = m_clash.group(1).strip()
+        add(
+            "package_option_clash", "fatal_error", f"{pkg}.sty", None,
+            f"Option clash for package {pkg}.",
+            f"Consolidate \\usepackage options for {pkg} or use \\PassOptionsToPackage before \\documentclass.",
+            True,
+        )
+    if re.search(r"(?:xeCJK|fontspec).*?(?:requires XeTeX|cannot be run under pdfTeX|Fatal fontspec error)", build_text, re.I):
+        add(
+            "cjk_font_or_engine_mismatch", "fatal_error", "build_log", None,
+            "CJK/fontspec package requires XeLaTeX or LuaLaTeX rather than pdfLaTeX.",
+            "Switch TeX engine to xelatex/lualatex and update % !TeX program directive.",
+            True,
+        )
     for asset in sorted({m for m in MISSING_TEX_ASSET_RE.findall(build_text) if "#" not in m}):
-        cat = "missing_package_or_cls" if asset.endswith((".sty", ".cls", ".def", ".clo")) else "missing_input_or_figure"
+        cat = "journal_class_missing" if asset.endswith(".cls") else ("missing_package_or_cls" if asset.endswith((".sty", ".def", ".clo")) else "missing_input_or_figure")
         add(
             cat, "fatal_error", asset, None,
             f"Required TeX asset not found: {asset}",
@@ -438,17 +908,18 @@ def audit_static_bib_and_refs(input_root: Path, sources: list[Path]) -> tuple[di
                     if lbl.split(":", 1)[0].lower() in {"sec", "sect", "section", "ch", "chap"}:
                         current_section_labels.add(lbl)
                 for rm in REF_CALL_RE.finditer(line):
-                    lbl = rm.group(2).strip()
                     prefix_ctx = line[: rm.start()]
-                    ref_calls.append({
-                        "file": rel,
-                        "line": lno,
-                        "label": lbl,
-                        "prefix_context": prefix_ctx[-48:],
-                        "full_line": line.strip()[:160],
-                        "current_section": current_section_title,
-                        "current_section_labels": sorted(current_section_labels),
-                    })
+                    for lbl in [x.strip() for x in rm.group(2).split(",") if x.strip()]:
+                        ref_calls.append({
+                            "file": rel,
+                            "line": lno,
+                            "label": lbl,
+                            "ref_cmd": rm.group(0).split("{", 1)[0],
+                            "prefix_context": prefix_ctx[-48:],
+                            "full_line": line.strip()[:160],
+                            "current_section": current_section_title,
+                            "current_section_labels": sorted(current_section_labels),
+                        })
                 for cm in CITE_CALL_RE.finditer(line):
                     for key in [k.strip() for k in cm.group(1).split(",") if k.strip()]:
                         cite_calls.append({"file": rel, "line": lno, "key": key})
@@ -456,6 +927,7 @@ def audit_static_bib_and_refs(input_root: Path, sources: list[Path]) -> tuple[di
     duplicate_labels = {k: v for k, v in labels.items() if len(v) > 1}
     undefined_labels = [r for r in ref_calls if r["label"] not in labels]
     missing_bib_keys = [c for c in cite_calls if bib_keys and c["key"] not in bib_keys]
+    missing_bib_file = bool(cite_calls and not bib_keys)
 
     ref_type_mismatches: list[dict[str, Any]] = []
     semantic_ref_warnings: list[dict[str, Any]] = []
@@ -505,6 +977,13 @@ def audit_static_bib_and_refs(input_root: Path, sources: list[Path]) -> tuple[di
             "code": "TEX_REF_TYPE_MISMATCH",
             "items": ref_type_mismatches,
             "message": f"{len(ref_type_mismatches)} cross-reference prose/label type mismatch(es) detected.",
+        })
+    if missing_bib_file:
+        uniq = sorted({c["key"] for c in cite_calls})
+        gaps.append({
+            "code": "TEX_MISSING_BIB_FILE",
+            "keys": uniq,
+            "message": f"Manuscript cites {len(uniq)} key(s) ({uniq[:8]}) but no valid .bib entries were found in the project.",
         })
     if missing_bib_keys:
         uniq = sorted({c["key"] for c in missing_bib_keys})
@@ -864,6 +1343,102 @@ def inspect_compiled_pdf(pdf_path: Path, output_dir: Path, meta: dict[str, Any],
     return info
 
 
+def _check_budget_remaining(work_dir: Path, min_sec_needed: int) -> tuple[bool, float | None]:
+    """Read budget_guard state if present so compilation never overruns the platform 900s wall-clock budget."""
+    state_file = work_dir / ".budget_state.json"
+    if not state_file.is_file():
+        return True, None
+    try:
+        st = json.loads(state_file.read_text(encoding="utf-8"))
+        started = float(st.get("started_at_epoch") or st.get("start_epoch") or 0)
+        limit = float(st.get("max_seconds") or st.get("wall_seconds") or 900)
+        if started > 0:
+            rem = limit - (time.time() - started)
+            return rem >= min_sec_needed, round(rem, 1)
+    except Exception:
+        pass
+    return True, None
+
+
+def apply_deterministic_safe_repairs(
+    emitted_dir: Path,
+    rel_entry: Path,
+    directives_meta: dict[str, Any],
+    manifest: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply strictly meaning-preserving deterministic TeX repairs in editable/ (never mutating /input)."""
+    repairs: list[dict[str, Any]] = []
+    entry_path = emitted_dir / rel_entry
+    if not entry_path.is_file():
+        return repairs
+    orig_text = entry_path.read_text(encoding="utf-8", errors="replace")
+    new_text = orig_text
+
+    # 1. Resolve magic-comment pdflatex conflict when fontspec/xeCJK/ctex requires xelatex
+    if directives_meta.get("magic_program") == "pdflatex" and directives_meta.get("unicode_needed"):
+        patched = re.sub(r"(?mi)^(\s*%\s*!\s*TeX\s+program\s*=\s*)pdflatex\b", r"\1xelatex", new_text, count=1)
+        if patched != new_text:
+            new_text = patched
+            repairs.append({"file": rel_entry.as_posix(), "rule": "fix_magic_program_unicode", "detail": "Updated conflicting % !TeX program = pdflatex to xelatex for fontspec/xeCJK compatibility."})
+
+    # 2. Enforce two-column widow/club penalties if unset
+    if directives_meta.get("is_twocolumn") and (
+        (directives_meta.get("widow_penalty") or 0) < 10000 or (directives_meta.get("club_penalty") or 0) < 10000
+    ):
+        if "\\begin{document}" in new_text and "\\widowpenalty=10000" not in new_text:
+            inject = "\\widowpenalty=10000\n\\clubpenalty=10000\n\\displaywidowpenalty=10000\n\\begin{document}"
+            new_text = new_text.replace("\\begin{document}", inject, 1)
+            repairs.append({"file": rel_entry.as_posix(), "rule": "inject_twocolumn_widow_club_penalty", "detail": "Added \\widowpenalty=10000, \\clubpenalty=10000, and \\displaywidowpenalty=10000 before \\begin{document}."})
+
+    # 3. Ensure required packages (booktabs/graphicx/tabularx/cleveref/amsmath) if macros are used in body
+    for macro_pat, pkg_name in (
+        (r"\\(?:toprule|midrule|bottomrule)\b", "booktabs"),
+        (r"\\includegraphics\b", "graphicx"),
+        (r"\\begin\{tabularx\}", "tabularx"),
+        (r"\\(?:cref|Cref|cpageref|Cpageref)\b", "cleveref"),
+    ):
+        if re.search(macro_pat, new_text) and not re.search(rf"\\usepackage(?:\[[^\]]*\])?\{{[^}}]*\b{pkg_name}\b", new_text):
+            if "\\begin{document}" in new_text:
+                new_text = new_text.replace("\\begin{document}", f"\\usepackage{{{pkg_name}}}\n\\begin{{document}}", 1)
+                repairs.append({"file": rel_entry.as_posix(), "rule": f"inject_missing_pkg_{pkg_name}", "detail": f"Added missing \\usepackage{{{pkg_name}}} required by manuscript macros."})
+
+    # 4. Replace fragile fixed \scalebox{0.x}{\begin{tabular}...\end{tabular}} with responsive \resizebox{\linewidth}{!}
+    if re.search(r"\\scalebox\{0\.\d+\}\s*\{\s*\\begin\{tabular\}", new_text):
+        patched = re.sub(r"\\scalebox\{0\.\d+\}(\s*\{\s*\\begin\{tabular\})", r"\\resizebox{\\linewidth}{!}\1", new_text)
+        if patched != new_text:
+            new_text = patched
+            if not re.search(r"\\usepackage(?:\[[^\]]*\])?\{[^}]*\bgraphicx\b", new_text) and "\\begin{document}" in new_text:
+                new_text = new_text.replace("\\begin{document}", "\\usepackage{graphicx}\n\\begin{document}", 1)
+            repairs.append({"file": rel_entry.as_posix(), "rule": "upgrade_scalebox_to_resizebox", "detail": "Upgraded fixed \\scalebox around tabular to column-aware \\resizebox{\\linewidth}{!}."})
+
+    # 5. Cap bare \includegraphics{file} without width option to prevent margin/column overflow
+    if re.search(r"\\includegraphics\s*\{([^}]+)\}", new_text):
+        patched = re.sub(r"\\includegraphics\s*\{([^}]+)\}", r"\\includegraphics[width=0.95\\linewidth]{\1}", new_text)
+        if patched != new_text:
+            new_text = patched
+            repairs.append({"file": rel_entry.as_posix(), "rule": "cap_unbounded_includegraphics", "detail": "Bounded bare \\includegraphics{...} with [width=0.95\\linewidth] to prevent float overflow."})
+
+    # 6. Strip redundant/conflicting prose type noun before \cref/\Cref (cleveref supplies type names automatically)
+    cref_conflict_re = re.compile(r"\b(?:Section|Sec\.|Figure|Fig\.|Table|Tab\.|Equation|Eq\.)\s*~?\s*(\\[cC]ref\*?\{[^{}]+\})")
+    if cref_conflict_re.search(new_text):
+        patched = cref_conflict_re.sub(r"\1", new_text)
+        if patched != new_text:
+            new_text = patched
+            repairs.append({"file": rel_entry.as_posix(), "rule": "strip_conflicting_prose_before_cref", "detail": "Removed redundant/mismatched prose noun before \\cref so cleveref renders exact label types automatically."})
+
+    if new_text != orig_text:
+        entry_path.write_text(new_text, encoding="utf-8")
+        # Refresh manifest SHA-256 for entry
+        with entry_path.open("rb") as fh:
+            new_digest = file_digest(fh, "sha256").hexdigest()
+        for row in manifest:
+            if row["source"] == rel_entry.as_posix():
+                row["sha256"] = new_digest
+                if "previous_sha256" in row:
+                    row["changed"] = row["previous_sha256"] != new_digest
+    return repairs
+
+
 def build_unified_diffs(input_root: Path, original_root: Path | None, sources: list[Path]) -> list[dict[str, Any]]:
     """Compute human-auditable line diffs for text files changed against original_root."""
     if not original_root:
@@ -902,6 +1477,8 @@ def run_pipeline(
     reference_expectations_path: Path | None,
     dry_run_audit: bool = False,
     render_previews: bool = True,
+    scaffold_template: str = "article",
+    auto_repair: bool = False,
 ) -> tuple[dict[str, Any], int]:
     output_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -947,9 +1524,10 @@ def run_pipeline(
     entry, entry_error = choose_entry(input_dir, sources, requested_entry)
     scaffolded_from_prose = False
     scaffold_sources: list[str] = []
+    scaffold_gaps: list[dict[str, Any]] = []
     compile_root = input_dir
     if entry is None and not requested_entry:
-        scaff_entry, scaffold_sources = _scaffold_tex_from_prose(input_dir, emitted, case)
+        scaff_entry, scaffold_sources, scaffold_gaps = _scaffold_tex_from_prose(input_dir, emitted, case, template=scaffold_template)
         if scaff_entry is not None:
             scaffolded_from_prose = True
             entry = scaff_entry
@@ -960,7 +1538,7 @@ def run_pipeline(
     artifacts: list[str] = ["result.json"]
     manifest: list[dict[str, Any]] = []
     findings: list[str] = []
-    gaps: list[dict[str, Any]] = []
+    gaps: list[dict[str, Any]] = list(scaffold_gaps)
     evidence_map: list[dict[str, Any]] = []
 
     # 1. Copy editable sources safely (never mutate /input) and hash every file
@@ -1014,25 +1592,48 @@ def run_pipeline(
         ref_validation, ref_gaps = validate_reference_expectations(input_dir, sources, None)
     gaps.extend(ref_gaps)
 
-    # 4. Directive inspection & isolated compilation
+    # 4. Directive inspection, optional safe auto-repair, budget guard & isolated compilation
     compilation: dict[str, Any] | None = None
     pdf_inspection: dict[str, Any] | None = None
     directives_meta: dict[str, Any] = {}
     compiled_pdf_name: str | None = None
+    auto_repairs_applied: list[dict[str, Any]] = []
 
     if entry_error:
         gaps.append({"code": "TEX_ENTRY_UNRESOLVED", "message": entry_error})
     else:
         assert entry is not None
+        rel_entry = entry.relative_to(compile_root) if entry.resolve().is_relative_to(compile_root.resolve()) else entry.relative_to(input_dir)
         inventory = "\n".join(
-            strip_tex_comments(p.read_text(encoding="utf-8", errors="ignore"))
-            for p in sources if p.suffix.lower() in {".tex", ".cls", ".sty"}
+            strip_tex_comments((emitted / m["source"]).read_text(encoding="utf-8", errors="ignore"))
+            for m in manifest if m["source"].endswith((".tex", ".cls", ".sty"))
         )
-        directives_meta = inspect_directives_and_packages(entry, inventory)
+        directives_meta = inspect_directives_and_packages(emitted / rel_entry, inventory)
+        if auto_repair:
+            auto_repairs_applied = apply_deterministic_safe_repairs(emitted, rel_entry, directives_meta, manifest)
+            if auto_repairs_applied:
+                # Refresh manifest hashes, directives, AND static bib/ref audit after deterministic safe repairs!
+                for mrow in manifest:
+                    ep = emitted / mrow["source"]
+                    if ep.is_file():
+                        with ep.open("rb") as fh:
+                            mrow["sha256"] = file_digest(fh, "sha256").hexdigest()
+                        if "previous_sha256" in mrow:
+                            mrow["changed"] = mrow["previous_sha256"] != mrow["sha256"]
+                inventory = "\n".join(
+                    strip_tex_comments((emitted / m["source"]).read_text(encoding="utf-8", errors="ignore"))
+                    for m in manifest if m["source"].endswith((".tex", ".cls", ".sty"))
+                )
+                directives_meta = inspect_directives_and_packages(emitted / rel_entry, inventory)
+                # Re-run static bib/ref audit on repaired editable/ so fixed gaps clear cleanly
+                bib_ref_codes = {g.get("code") for g in bib_ref_gaps}
+                gaps = [g for g in gaps if g.get("code") not in bib_ref_codes]
+                bib_ref_audit, bib_ref_gaps = audit_static_bib_and_refs(emitted, [emitted / m["source"] for m in manifest])
+                gaps.extend(bib_ref_gaps)
+                findings.append(f"Applied {len(auto_repairs_applied)} deterministic safe repair(s) in editable/: {[r['rule'] for r in auto_repairs_applied]}.")
         for c in directives_meta["conflicts"]:
             gaps.append(c)
 
-        rel_entry = entry.relative_to(compile_root) if entry.resolve().is_relative_to(compile_root.resolve()) else entry.relative_to(input_dir)
         findings.append(f"Entry: editable/{rel_entry.as_posix()}. Original /input files preserved intact.")
         evidence_map.append({
             "claim": f"Editable TeX entry staged at editable/{rel_entry.as_posix()}",
@@ -1040,7 +1641,14 @@ def run_pipeline(
             "sha256": next((m["sha256"] for m in manifest if m["source"] == rel_entry.as_posix()), None),
         })
 
-        if not dry_run_audit:
+        budget_ok, budget_rem = _check_budget_remaining(work_dir, min_sec_needed=timeout + 25)
+        if not dry_run_audit and not budget_ok:
+            gaps.append({
+                "code": "TEX_BUDGET_EXHAUSTED",
+                "remaining_seconds": budget_rem,
+                "message": f"Skipped TeX compilation to protect sandbox wall-clock budget (remaining={budget_rem}s < {timeout + 25}s).",
+            })
+        elif not dry_run_audit:
             with tempfile.TemporaryDirectory(prefix="latex-build-", dir=work_dir) as build_td:
                 build_root = Path(build_td)
                 for mrow in manifest:
@@ -1062,6 +1670,13 @@ def run_pipeline(
                     else None
                 )
                 compilation = compile_project(staged_entry, directives_meta, eff_engine, timeout)
+                # Tectonic offline cache miss -> automatic fallback to installed TeX Live engine
+                if compilation.get("offline_bundle_not_cached") and not requested_engine:
+                    fallback_eng = "xelatex" if directives_meta.get("unicode_needed") else "pdflatex"
+                    if shutil.which(fallback_eng):
+                        fb_comp = compile_project(staged_entry, directives_meta, fallback_eng, timeout)
+                        fb_comp["route_note"] = f"Fell back from uncached tectonic to {fallback_eng}."
+                        compilation = fb_comp
                 log_path = output_dir / "build_log.txt"
                 log_path.write_text(compilation.pop("log") or "No compiler invocation was available.\n", encoding="utf-8")
                 artifacts.append(log_path.name)
@@ -1145,9 +1760,18 @@ def run_pipeline(
         findings.append(f"Detected {len(bib_ref_audit['semantic_ref_warnings'])} semantic cross-reference warning(s) for author review.")
 
     # 6. Build full Harbor output_contract payload (case_id, deliverable, preserved_facts, evidence_map, change_log)
-    diffs = build_unified_diffs(compile_root if scaffolded_from_prose else input_dir, original_root, [emitted / m["source"] for m in manifest] if scaffolded_from_prose else sources)
+    fact_sources = scaffold_sources if scaffolded_from_prose else [m["source"] for m in manifest]
+    compiled_pdf_path = (output_dir / compiled_pdf_name) if compiled_pdf_name else None
+    preserved_facts_obj, fact_gaps = extract_and_verify_preserved_facts(
+        input_dir, fact_sources, emitted, manifest, pdf_path=compiled_pdf_path
+    )
+    preserved_facts_obj["defined_labels_count"] = bib_ref_audit["defined_labels_count"]
+    preserved_facts_obj["bib_keys_count"] = bib_ref_audit["bib_keys_count"]
+    gaps.extend(fact_gaps)
+
+    diffs = build_unified_diffs(emitted, original_root or (input_dir if not scaffolded_from_prose else None), [emitted / m["source"] for m in manifest])
     hard_build_codes = {
-        "TEX_ENTRY_UNRESOLVED", "TEX_COMPILER_MISSING", "TEX_BUILD_TIMEOUT",
+        "TEX_ENTRY_UNRESOLVED", "TEX_COMPILER_MISSING", "TEX_BUILD_TIMEOUT", "TEX_BUDGET_EXHAUSTED",
         "TEX_CACHE_NOT_READY", "TEX_BIBLATEX_BIBER_MISMATCH", "TEX_BIBTEX_CAPACITY_OVERFLOW",
         "TEX_DEPENDENCY_MISSING", "TEX_BUILD_FAILED", "TEX_TOOLCHAIN_ERROR",
     }
@@ -1172,18 +1796,14 @@ def run_pipeline(
             "build_log": "build_log.txt" if compilation is not None else None,
             "page_previews": [p["path"] for p in (pdf_inspection.get("rendered_previews", []) if pdf_inspection else [])],
         },
-        "preserved_facts": {
-            "original_input_immutable": True,
-            "source_file_count": len(manifest),
-            "defined_labels_count": bib_ref_audit["defined_labels_count"],
-            "bib_keys_count": bib_ref_audit["bib_keys_count"],
-            "source_hashes": {m["source"]: m["sha256"] for m in manifest},
-        },
+        "preserved_facts": preserved_facts_obj,
         "evidence_map": evidence_map,
         "change_log": {
             "compared_against_original": original_root is not None,
             "draft_scaffolded_from_markdown": scaffolded_from_prose,
+            "scaffold_template": scaffold_template if scaffolded_from_prose else None,
             "scaffold_sources": scaffold_sources,
+            "auto_repairs_applied": auto_repairs_applied,
             "modified_files": diffs,
             "human_confirmations_required": [g["message"] for g in gaps if "message" in g],
             "semantic_ref_warnings": bib_ref_audit["semantic_ref_warnings"],
@@ -1263,6 +1883,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=int, default=BUILD_TIMEOUT, help="Seconds per tool invocation (1-300)")
     parser.add_argument("--dry-run-audit", action="store_true", help="Run static source/bib/ref/directive audit without invoking TeX")
     parser.add_argument("--no-previews", action="store_true", help="Skip pdftoppm PNG page rendering")
+    parser.add_argument("--template", choices=("article", "ieeetran", "acmart", "ctexart"), default="article", help="Target journal/CJK template when auto-scaffolding from Markdown/text")
+    parser.add_argument("--auto-repair", action="store_true", help="Apply strictly meaning-preserving deterministic repairs in editable/ (magic-comment unicode fix, two-column widow/club penalty, missing core packages, scalebox->resizebox)")
     parser.add_argument("--allow-partial-exit0", action="store_true", help="Exit 0 even when partial_with_gaps are recorded (still writes full result.json)")
     args = parser.parse_args(argv)
 
@@ -1282,6 +1904,8 @@ def main(argv: list[str] | None = None) -> int:
         args.reference_expectations,
         dry_run_audit=args.dry_run_audit,
         render_previews=not args.no_previews,
+        scaffold_template=args.template,
+        auto_repair=args.auto_repair,
     )
     summary = {
         "case_id": payload["case_id"],

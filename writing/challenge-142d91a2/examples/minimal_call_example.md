@@ -15,6 +15,12 @@
 
 ## 2. CLI Invocation
 ```bash
+# Step 1: Extract /input constraints, facts, and plan seed (.pdf/.docx/.md/.json)
+python3 /skills/weekly-skill/scripts/proposal_feasibility_checker.py \
+  --input-dir /input \
+  --extract-plan-seed /app/work/plan_seed.json
+
+# Step 3: Validate 7 elements, DAG/CPM, budget, citations, and export .docx/.html
 python3 /skills/weekly-skill/scripts/proposal_feasibility_checker.py \
   --proposal /app/output/proposal.md \
   --plan-json /app/output/proposal_plan.json \
@@ -31,11 +37,19 @@ python3 /skills/weekly-skill/scripts/proposal_feasibility_checker.py \
 {
   "passed": true,
   "case_id": "SYNTH-PROP-01",
+  "proposal_extractor": "utf8_text",
+  "parse_mode": "headings",
   "seven_elements": {
     "missing_sections": [],
     "thin_sections": [],
     "known_unknown_verify_ok": true,
     "research_questions_count": 2
+  },
+  "source_grounding_verification": {
+    "checked_count": 4,
+    "verified_count": 4,
+    "ungrounded_count": 0,
+    "unparsed_pdfs": []
   },
   "schedule_and_cpm": {
     "total_months": 12,

@@ -1,36 +1,36 @@
 # Translational Science Writing Skill
 
-Offline, zero-dependency Python 3.12 workflow for adapting scientific manuscripts into audience-calibrated deliverables (`public_science`, `tech_report`, `grant_brief`, `policy_memo`, `industry_pitch`) with deterministic evidence-boundary and prose auditing.
+Offline, zero-dependency Python 3.12 workflow for adapting scientific manuscripts (`.pdf`, `.docx`, `.md`, `.txt`) into audience-calibrated deliverables (`public_science`, `tech_report`, `grant_brief`, `policy_memo`, `industry_pitch`) with automated `/input` source-brief extraction and deterministic evidence-boundary, figure/table, statistical, and prose auditing.
 
 ## What It Solves
 
-1. **5-audience calibration & Keep/Compress/Omit strategy**: Enforces audience-specific ceilings on jargon density, first-use acronym expansion, readability, and mandatory statistical/model context.
-2. **Zero numerical, unit & benchmark drift**: Distinguishes counts from percentages, recognizes bilingual magnitude equivalences (`12,000` <-> `1.2万`, `1.5 million` <-> `150万`), verifies derived ratios against traceable numerator/denominator pairs, and catches `p`-value strengthening or dropped control baselines.
-3. **4-tier evidence ladder hard gate**: Automatically classifies source evidence (`in_vitro_or_computational` < `animal_or_preclinical` < `observational_correlational` < `rct_or_clinical_causal`) and blocks both overclaiming (e.g., turning cell/mouse correlation into human therapy promises) and silent omission of experimental model boundaries.
-4. **Glossary lock & natural prose audit with scientific whitelist**: Locks cross-genre terminology, blocks promotional hype, corporate buzzwords, rhetorical false-pivot clichés, and AI signposts while protecting genuine scientific terminology (e.g., tumor killing, temperature rise, precipitation, vascularization).
-5. **Paragraph-by-paragraph traceability & author review handoff**: Validates `paragraph_trace.json` (blocking omission of key limitations or sample info) and exports `side_by_side_review.md` for rapid researcher verification.
+1. **Automated `/input` extraction & skeleton generation (`--extract-source-brief`)**: Natively reads `.pdf` (`pdftotext` -> `pdfplumber` -> `pypdf` -> stdlib `zlib` FlateDecode fallback), `.docx` (pure-stdlib OOXML), and UTF-8 text; automatically emits `source_brief.json`, an editable `paragraph_trace.json` skeleton, and a candidate `glossary_lock.json` draft so neither Agent nor researcher hand-builds complex JSON from scratch.
+2. **Zero numeric, unit, p-value & benchmark drift**: Recognizes bilingual magnitude equivalences (`12,000` <-> `1.2万`), verifies sentence-scoped derived ratios (tightened tolerance), detects unit swaps (`NUMERIC_UNIT_MISMATCH`), checks **per-value `p`-value multiset conservation**, scans internal source numeric contradictions, and preserves cross-disciplinary baselines (`control group`, `vehicle`, `comparative example` / `对比例`, `prior art` / `现有技术`).
+3. **Figure, table & citation anchor preservation (`figure_table_citation_preservation`)**: Extracts all source `Fig.`/`Table`/`图`/`表` anchors and blocks hallucinated display numbers, vague anonymous references, or untraced silent deletions.
+4. **Cross-disciplinary 4-tier evidence ladder + proximity hedging**: Classifies both clinical/biomedical (`in_vitro` < `animal/preclinical` < `observational` < `RCT`) and engineering/materials/patent (`computational` < `bench/patent example` < `pilot` < `industrial deployment`) sources; blocks direct overclaims, unhedged translational promises within ±85 chars (`UNHEDGED_TRANSLATIONAL_PROMISE`), and omitted model boundaries.
+5. **Calibrated natural prose & side-by-side author handoff**: Blocks promotional hype, corporate buzzwords, AI signposts, and em-dash overuse while protecting scientific terminology and legitimate scientific contrast sentences; exports `side_by_side_review.md`.
 
 ## Requirements
 
-- Python 3.12+ standard library only (zero third-party packages, zero network calls).
-- Compatible with offline Linux sandboxes (`/input`, `/app/work`, `/app/output`).
+- Python 3.12+ standard library only (zero mandatory third-party packages, zero network calls). Optional `pdftotext` / `pdfplumber` / `pypdf` accelerate complex PDF extraction when present; stdlib `zlib` and OOXML fallbacks run offline without them.
+- Compatible with offline Linux execution sandboxes (`/input`, `/app/work`, `/app/output`) and portable local paths via `SKILL_ROOT`.
 
 ## Package Layout
 
 ```text
 .
-├── SKILL.md                                         # Agent entrypoint & 4-step workflow
-├── README.md                                        # Overview & maintenance guide
+├── SKILL.md                                         # Agent entrypoint, audience table & 4-step workflow
+├── README.md                                        # Overview, verification & boundaries
 ├── references/
 │   ├── output_contract_spec.md                      # 5-field result.json contract
-│   ├── audience_matrix_and_style_rules.md           # 5-audience matrix & natural prose rules
-│   └── evidence_ladder_and_omission_rules.md        # 4-tier evidence ladder & trace schema
+│   ├── audience_matrix_and_style_rules.md           # 5-audience matrix & calibrated prose rules
+│   └── evidence_ladder_and_omission_rules.md        # Cross-disciplinary 4-tier ladder & trace schema
 ├── examples/
 │   └── minimal_workflow_example.md                  # Illustrative synthetic walkthrough
 └── scripts/
-    ├── translational_fidelity_auditor.py            # Core fidelity, ladder, prose & review engine
+    ├── translational_fidelity_auditor.py            # Native PDF/DOCX extractor + source-brief + fidelity auditor
     ├── preflight_probe.py                           # Sandbox probe (M1)
-    ├── result_guard.py                              # Atomic result.json guard (M2)
+    ├── result_guard.py                              # Atomic result.json guard with --patch-file (M2)
     ├── budget_guard.py                              # Step/time budget ledger (M3)
     ├── block_indexer.py                             # Input block indexer (M4)
     ├── gap_gate.py                                  # Grounding provenance verifier (M5)
@@ -45,5 +45,5 @@ python3 scripts/translational_fidelity_auditor.py --help
 
 ## Boundaries & Maintenance
 
-- Supports UTF-8 text/Markdown source and target files (Chinese, English, and bilingual scientific prose).
-- Automated checks catch structural, numerical, evidentiary, and stylistic violations; final domain analogies and press/regulatory sign-off remain with the original researcher via `side_by_side_review.md`.
+- **Multi-format scope**: Natively handles `.pdf`, `.docx`, `.md`, and `.txt` sources (Chinese, English, and bilingual). Scanned image-only PDFs without an embedded text layer require external OCR and are honestly reported (`chars == 0`) rather than guessed.
+- **Deterministic vs human boundary**: Automated rules enforce numeric/unit/p-value conservation, figure/table preservation, explicit tier escalation, proximity hedging, glossary lock, and AI-cliché blocking; final domain metaphors and press/regulatory approval remain with the original researcher via `side_by_side_review.md`.

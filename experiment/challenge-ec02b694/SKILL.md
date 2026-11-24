@@ -65,7 +65,9 @@ python3 "$SCRIPTS/budget_guard.py" --state /app/work/.budget_state.json --init
 python3 "$SCRIPTS/result_guard.py" --path /app/output/result.json --init --case-id "<CASE_ID>" --task-id "challenge-ec02b694"
 python3 "$SCRIPTS/block_indexer.py" --scan /input --out /app/work/blocks.json
 
-# 1b. Pre-validate domain_spec.json and candidates_3v.json schema + source_ref anchors
+# 1b. Auto-extract source_ref-anchored domain_spec/contract_spec/candidates_3v from raw /input narrative sources (missing values stay null / NOT_FOUND_IN_SOURCE), then pre-validate
+python3 "$SCRIPTS/source_to_plan_extractor.py" \
+  --input-dir /input --blocks /app/work/blocks.json --mode ec02b694 --out-dir /app/work
 python3 "$SCRIPTS/validate_and_sync_result.py" validate-input \
   --input /app/work/domain_spec.json --mode ec02b694 --out /app/work/domain_schema_audit.json
 python3 "$SCRIPTS/validate_and_sync_result.py" validate-input \

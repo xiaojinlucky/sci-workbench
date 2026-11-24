@@ -71,7 +71,9 @@ python3 "$SCRIPTS/budget_guard.py" --state /app/work/.budget_state.json --init
 python3 "$SCRIPTS/result_guard.py" --path /app/output/result.json --init --case-id "<CASE_ID>" --task-id "challenge-cf1995b5"
 python3 "$SCRIPTS/block_indexer.py" --scan /input --out /app/work/input_blocks.json
 
-# 2. Construct /app/work/parsed_goal.json from /input/* and pre-validate schema + source_ref anchors
+# 2. Auto-extract source_ref-anchored draft from raw /input narrative files (unfound fields stay null / NOT_FOUND_IN_SOURCE), then validate schema
+python3 "$SCRIPTS/source_to_plan_extractor.py" \
+  --input-dir /input --blocks /app/work/input_blocks.json --mode cf1995b5 --out /app/work/parsed_goal.json
 python3 "$SCRIPTS/validate_and_sync_result.py" validate-input \
   --input /app/work/parsed_goal.json --mode cf1995b5 --out /app/work/input_schema_audit.json
 

@@ -1,0 +1,127 @@
+{
+  "ILLUSTRATIVE_EXAMPLE_ONLY": true,
+  "illustrative_example_notice": "ILLUSTRATIVE EXAMPLE ONLY — NOT A FORMAL BENCHMARK CASE OR MEASURED LAB RUN",
+  "case_id": "illustrative-cat-01",
+  "title": "CO2 Hydrogenation Catalyst Loading and Temperature Protocol Optimization",
+  "research_type": "engineering_optimization",
+  "hypothesis": {
+    "statement": "Adjusting Cu-ZnO-Al2O3 reaction temperature (200-240 C) at 30 bar increases methanol selectivity above 82% without exceeding 6% CO byproduct.",
+    "iv": "Reaction temperature (200, 220, 240 C) and space velocity (3000, 4500 h^-1)",
+    "dv": "Methanol selectivity and space-time yield",
+    "dv_unit": "% selectivity; g_MeOH/(kg_cat*h)",
+    "measurement_method": "Online GC-FID/TCD calibrated with 5-point external gas standard",
+    "falsification_criterion": "Methanol selectivity < 78% or CO byproduct > 8% across all feasible points",
+    "confounders": ["blank_reactor_conversion", "catalyst_batch_deactivation"]
+  },
+  "statistical_design": {
+    "inference_unit": "Independent packed catalyst bed run",
+    "technical_unit": "Repeated online GC injections per steady-state run",
+    "planned_biological_replicates": 4,
+    "randomization_strategy": "Randomized run order stratified by catalyst synthesis batch",
+    "blocking_factors": ["catalyst_batch_deactivation"],
+    "expected_cohen_d": 1.8,
+    "alpha": 0.05,
+    "target_power": 0.8
+  },
+  "controls": [
+    {"name": "inert_SiC_blank", "type": "blank", "addresses_confounder": "blank_reactor_conversion", "source_ref": "SOP-CAT-01@v2.0"},
+    {"name": "commercial_CZA_ref", "type": "positive", "addresses_confounder": "assay_sensitivity", "source_ref": "SOP-CAT-01@v2.0"}
+  ],
+  "design_cells": [
+    {"arm": "inert_SiC_blank", "block_or_timepoint": "Batch_1", "is_control": true},
+    {"arm": "inert_SiC_blank", "block_or_timepoint": "Batch_2", "is_control": true},
+    {"arm": "commercial_CZA_ref", "block_or_timepoint": "Batch_1", "is_control": true},
+    {"arm": "commercial_CZA_ref", "block_or_timepoint": "Batch_2", "is_control": true},
+    {"arm": "T220_GHSV3000", "block_or_timepoint": "Batch_1", "is_control": false},
+    {"arm": "T220_GHSV3000", "block_or_timepoint": "Batch_2", "is_control": false}
+  ],
+  "sop_references": [
+    {"sop_id": "SOP-CAT-01", "sop_version": "v2.0", "source_ref": "example_sop_sheet"}
+  ],
+  "eln_handover": {
+    "experiment_id_pattern": "CAT-{YYYYMMDD}-{ARM}-BED{REP}",
+    "raw_data_binding": "raw_gc/{experiment_id}/chromatograms.csv",
+    "deviation_log_fields": ["planned_setting", "actual_setting", "timestamp_utc", "validity_impact"]
+  },
+  "objectives": [
+    {"name": "methanol_selectivity_pct", "direction": "maximize", "weight": 0.65, "scale_min": 60, "scale_max": 100, "min_acceptable": 78.0},
+    {"name": "co_byproduct_pct", "direction": "minimize", "weight": 0.35, "scale_min": 0, "scale_max": 20, "max_acceptable": 8.0}
+  ],
+  "prospective_contract": {
+    "budget_cap_usd": 3800.0,
+    "deadline_days": 12.0,
+    "max_samples": 40,
+    "setup_cost_usd": 300.0,
+    "per_sample_cost_usd": 35.0,
+    "labor_rate_per_day": 180.0,
+    "rework_reserve_rate": 0.1,
+    "base_prep_days": 1.0,
+    "qc_days": 1.0,
+    "biosafety_approved": null,
+    "ethics_approval_required": false,
+    "equipment_booking_confirmed": null,
+    "vendor_quote_confirmed": null,
+    "resources": {
+      "fixed_bed_reactor": {"status": "available", "rate_per_hr": 40.0, "booking_lead_days": 2.0, "lead_days": 0.0, "substitutable": false, "source_ref": "contract:reactor"},
+      "gc_fid_tcd": {"status": "available", "rate_per_hr": 30.0, "booking_lead_days": 1.0, "lead_days": 0.0, "substitutable": true, "source_ref": "contract:gc"}
+    },
+    "parameter_domains": {
+      "temperature_c": {"min": 180.0, "max": 260.0, "safety_max": 245.0, "step": 10.0, "unit": "C", "source_ref": "reactor_manual"},
+      "pressure_bar": {"min": 10.0, "max": 40.0, "safety_max": 35.0, "step": 5.0, "unit": "bar", "source_ref": "reactor_manual"}
+    },
+    "coupled_constraints": []
+  },
+  "finite_candidates": [
+    {
+      "version": "v1_high_temp",
+      "rationale": "Literature upper-bound transfer",
+      "treatment_arms": 4,
+      "biological_replicates": 4,
+      "technical_replicates": 1,
+      "qc_extra_samples": 4,
+      "labor_days": 5.0,
+      "parameters": {"temperature_c": 250.0, "pressure_bar": 30.0},
+      "predicted_metrics": {"methanol_selectivity_pct": 80.0, "co_byproduct_pct": 10.5},
+      "steps": [
+        {"id": "calcine_load", "duration_days": 2.0, "resource": "fixed_bed_reactor", "hours": 16.0, "sop_id": "SOP-CAT-01", "sop_version": "v2.0", "depends_on": []},
+        {"id": "gc_quant", "duration_days": 2.0, "resource": "gc_fid_tcd", "hours": 12.0, "sop_id": "SOP-CAT-01", "sop_version": "v2.0", "depends_on": ["calcine_load"]}
+      ],
+      "stop_loss": "Halt if carbon balance < 94% or hot-spot excursion > 245 C",
+      "fallback_path": "Dilute catalyst bed 1:3 with inert SiC and lower temperature by 20 C"
+    },
+    {
+      "version": "v2_compact_grid",
+      "rationale": "Safety-bounded compact design reducing arms to 3",
+      "treatment_arms": 3,
+      "biological_replicates": 4,
+      "technical_replicates": 1,
+      "qc_extra_samples": 2,
+      "labor_days": 3.5,
+      "parameters": {"temperature_c": 220.0, "pressure_bar": 30.0},
+      "predicted_metrics": {"methanol_selectivity_pct": 85.2, "co_byproduct_pct": 5.1},
+      "steps": [
+        {"id": "calcine_load", "duration_days": 1.5, "resource": "fixed_bed_reactor", "hours": 12.0, "sop_id": "SOP-CAT-01", "sop_version": "v2.0", "depends_on": []},
+        {"id": "gc_quant", "duration_days": 1.5, "resource": "gc_fid_tcd", "hours": 8.0, "sop_id": "SOP-CAT-01", "sop_version": "v2.0", "depends_on": ["calcine_load"]}
+      ],
+      "stop_loss": "Halt if carbon balance < 95% or blank conversion > 1.5%",
+      "fallback_path": "Route effluent to backup offline GC-TCD and re-verify calibration slope"
+    },
+    {
+      "version": "v3_staged_optimal",
+      "rationale": "Balanced 3-arm design with parallel QC calibration",
+      "treatment_arms": 3,
+      "biological_replicates": 4,
+      "technical_replicates": 1,
+      "qc_extra_samples": 4,
+      "labor_days": 4.0,
+      "parameters": {"temperature_c": 230.0, "pressure_bar": 30.0},
+      "predicted_metrics": {"methanol_selectivity_pct": 87.4, "co_byproduct_pct": 4.8},
+      "steps": [
+        {"id": "calcine_load", "duration_days": 2.0, "resource": "fixed_bed_reactor", "hours": 14.0, "sop_id": "SOP-CAT-01", "sop_version": "v2.0", "depends_on": []},
+        {"id": "gc_quant", "duration_days": 1.5, "resource": "gc_fid_tcd", "hours": 10.0, "sop_id": "SOP-CAT-01", "sop_version": "v2.0", "depends_on": ["calcine_load"]}
+      ],
+      "stop_loss": "Halt if carbon balance < 95%, RSD > 5% across replicates, or hot-spot > 245 C",
+      "fallback_path": "Switch GC-FID to backup offline GC-TCD and drop to 220 C safety set-point"
+    }
+  ]
+}

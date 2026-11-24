@@ -1,0 +1,92 @@
+{
+  "ILLUSTRATIVE_EXAMPLE_ONLY": true,
+  "illustrative_example_notice": "ILLUSTRATIVE EXAMPLE ONLY — NOT A FORMAL BENCHMARK OUTPUT",
+  "case_id": "illustrative-anomaly-01",
+  "trends": [
+    {
+      "metric": "Assay recovery (%)",
+      "summary": "Batch_1 and Batch_2 maintain stable recovery around 98.4% (IQR 2.1%), whereas Batch_3 shifts systematically downward to median 84.1% (one-way F=26.4, eta_sq=0.68).",
+      "evidence_source": "outlier_report.json (Sheet: Assay_Summary)",
+      "baseline_or_interval": "Across 3 analytical batches vs certified reference standard (100% nominal)"
+    }
+  ],
+  "anomalies": [
+    {
+      "source_file": "assay_workbook.xlsx",
+      "location": "Sheet Assay_Summary, row 14",
+      "target_id": "S_014",
+      "dimension": "sample",
+      "observed_value": "42.3%",
+      "reference_baseline": "Batch_1 median 98.6% (IQR 1.8%)",
+      "threshold_rule": "IQR_1.5=[95.4, 101.9] and |MAD_Z|=21.4 > 3.5",
+      "deviation_magnitude": "-56.3 percentage points"
+    },
+    {
+      "source_file": "assay_workbook.xlsx",
+      "location": "Sheet Assay_Summary, Batch_3 rows 17-24",
+      "target_id": "Batch_3",
+      "dimension": "batch",
+      "observed_value": "median 84.1%",
+      "reference_baseline": "Pooled Batch_1/2 median 98.4%",
+      "threshold_rule": "one_way_F=26.4 >= 4.0 and shift/IQR=7.1 >= 1.5",
+      "deviation_magnitude": "-14.3 percentage points systematic offset"
+    }
+  ],
+  "causal_hypotheses": [
+    {
+      "rank": 1,
+      "attribution_layer": "batch_channel_or_plate_effect",
+      "hypothesis": "Calibration slope drift or fresh mobile-phase lot preparation shifted all Batch_3 recoveries downward.",
+      "supporting_evidence": ["All 8 valid Batch_3 samples shifted uniformly (-12% to -16%)", "Within-Batch_3 IQR remained tight (2.4%)"],
+      "excluding_evidence": ["Does not explain isolated extreme drop in Batch_1 sample S_014 (42.3%)"],
+      "correlation_vs_causation_caveat": "Batch clustering shows association with run day/lot, not yet confirmed as reagent vs column drift.",
+      "falsification_test": "Compare Batch_3 internal-standard peak area and calibration curve slope in Sheet Cal_Curves against Batch_1/2."
+    },
+    {
+      "rank": 2,
+      "attribution_layer": "operator_or_protocol_deviation",
+      "hypothesis": "Sample S_014 experienced a dilution or injection volume error (approx. 2x under-injection).",
+      "supporting_evidence": ["Observed 42.3% is near half of Batch_1 median while neighboring wells S_013/S_015 are 98.2%/99.1%"],
+      "excluding_evidence": ["No blanket Batch_1 calibration failure"],
+      "correlation_vs_causation_caveat": "Single-sample drop could also stem from vial septum air bubble or matrix precipitation.",
+      "falsification_test": "Inspect raw autosampler injection pressure trace and ELN dilution log for S_014."
+    }
+  ],
+  "verification_checklist": [
+    {
+      "target_file_or_log": "assay_workbook.xlsx Sheet Cal_Curves & mobile_phase_lot_log",
+      "action": "Compare Batch_3 calibration slope and internal-standard response against Batch_1/2 acceptance window (95-105%)",
+      "decision_rule": "If Batch_3 internal standard dropped > 10%, flag Batch_3 for re-injection with fresh calibration."
+    },
+    {
+      "target_file_or_log": "autosampler_log.txt row S_014 & ELN entry EXP-014",
+      "action": "Check recorded injection volume, pressure trace, and manual dilution weight for S_014",
+      "decision_rule": "If volume/weight deviates > 5% from protocol, document as confirmed preparation deviation and exclude from efficacy mean."
+    }
+  ],
+  "next_experiments": [
+    {
+      "target_hypothesis_or_gap": "Batch_3 systematic calibration offset",
+      "change": "Inject 3 archived QC standards from Batch_1 alongside Batch_3 retained vials under the current mobile phase."
+    }
+  ],
+  "retained_ambiguities": [
+    "Workbook Sheet Methods lists LOQ as 0.5 ug/mL while manuscript section 2.3 states 0.25 mg/L (0.25 ug/mL); both retained pending author verification."
+  ],
+  "data_gaps_summary": {
+    "analysis_status": "partial",
+    "valid_reading_count": 22,
+    "explicit_zero_count": 1,
+    "below_lod_count": 1,
+    "saturated_count": 0,
+    "data_gap_count": 2
+  },
+  "six_element_traceability": {
+    "hypothesis_variables": "Assay recovery (%) across 3 production batches",
+    "controls": "Certified reference standard + solvent blank (explicit zero)",
+    "equipment_materials": "HPLC-UV system + Batch_1/2/3 mobile phase lots",
+    "time_cost": "3 QC re-injections (~45 min instrument time)",
+    "parameter_ranges": "Nominal acceptance window 95-105% recovery",
+    "risks_anomalies": "1 isolated low outlier (S_014), 1 systematic batch shift (Batch_3), 2 data gaps (1 missing, 1 BLQ)"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "ILLUSTRATIVE_EXAMPLE_ONLY": true,
+  "notice": "Illustrative output schema example for challenge-7be76e91 — NOT a formal competition case or confirmed vendor quote.",
+  "case_id": "illustrative-cmp-01",
+  "selected_version": "v2_explicit_zero_setup_pareto",
+  "all_infeasible": false,
+  "incomplete_comparison_warning": true,
+  "pareto_frontier_versions": ["v2_explicit_zero_setup_pareto"],
+  "unresolved_with_reasons": [
+    {
+      "version": "v1_missing_cost_trap",
+      "disposition": "unresolved_incomplete_evidence",
+      "unresolved_fields": ["one_time_setup_cost", "unpriced_probe.unit_cost"],
+      "reason": "Kept out of forced ranking until missing cost, schedule, approval, or comparison scores are verified (missing != zero)."
+    }
+  ],
+  "rejected_with_reasons": [
+    {
+      "version": "v3_over_safety_temp",
+      "disposition": "rejected_hard_constraints",
+      "rejection_reasons": ["degas_temp_c=240.0 outside feasible [80.0, 220.0]"]
+    }
+  ],
+  "sensitivity_analysis": {
+    "selected_version": "v2_explicit_zero_setup_pareto",
+    "rank_stability_rate": "5/5",
+    "budget_slack_usd": 1619.0,
+    "deadline_slack_days": 7.0
+  },
+  "prospective_boundary_notice": "Normalized cost/schedule rankings evaluate organizer prospective contracts only; they are not confirmed vendor quotes, booked instrument slots, or granted approvals."
+}

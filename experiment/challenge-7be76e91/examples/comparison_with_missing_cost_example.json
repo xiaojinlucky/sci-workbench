@@ -1,0 +1,73 @@
+{
+  "ILLUSTRATIVE_EXAMPLE_ONLY": true,
+  "illustrative_example_notice": "ILLUSTRATIVE EXAMPLE ONLY — EXPLICIT ZERO VS MISSING COST/APPROVAL FIREWALL",
+  "case_id": "illustrative-cmp-01",
+  "title": "3-Route Catalyst Surface Characterization Comparison",
+  "prospective_contract": {
+    "budget_cap_usd": 3500.0,
+    "deadline_days": 14.0,
+    "labor_rate_per_day": 150.0,
+    "rework_reserve_rate": 0.1,
+    "biosafety_approved": true,
+    "ethics_approval_required": false,
+    "resources": {
+      "xps_core": {"status": "available", "rate_per_hr": 90.0, "booking_lead_days": 2.0, "lead_days": 0.0},
+      "bet_core": {"status": "available", "rate_per_hr": 45.0, "booking_lead_days": 1.0, "lead_days": 0.0},
+      "unpriced_probe": {"status": "needs_procurement", "unit_cost": null, "lead_days": 4.0}
+    },
+    "parameter_domains": {
+      "degas_temp_c": {"min": 80.0, "max": 250.0, "safety_max": 220.0}
+    }
+  },
+  "candidate_plans": [
+    {
+      "version": "v1_missing_cost_trap",
+      "source_ref": "plans.md#v1",
+      "primary_readout": "Active site density (umol/g)",
+      "inference_unit": "Independent synthesis batch",
+      "controls": ["blank_support", "ref_cu_std"],
+      "one_time_setup_cost": null,
+      "labor_days": 2.0, "prep_days": 1.0, "qc_turnaround_days": 1.0,
+      "parameters": {"degas_temp_c": 180.0},
+      "steps": [
+        {"id": "probe", "duration_days": 1.0, "resource": "unpriced_probe", "units": 2, "depends_on": []},
+        {"id": "bet", "duration_days": 1.0, "resource": "bet_core", "hours": 4.0, "depends_on": ["probe"]}
+      ],
+      "risk_level": "low",
+      "scientific_fit_score": 0.92, "evidence_score": 0.90
+    },
+    {
+      "version": "v2_explicit_zero_setup_pareto",
+      "source_ref": "plans.md#v2",
+      "primary_readout": "Active site density (umol/g)",
+      "inference_unit": "Independent synthesis batch",
+      "controls": ["blank_support", "ref_cu_std"],
+      "one_time_setup_cost": 0.0,
+      "labor_days": 3.0, "prep_days": 1.0, "qc_turnaround_days": 1.0,
+      "parameters": {"degas_temp_c": 180.0},
+      "steps": [
+        {"id": "bet", "duration_days": 2.0, "resource": "bet_core", "hours": 8.0, "depends_on": []},
+        {"id": "xps", "duration_days": 2.0, "resource": "xps_core", "hours": 10.0, "depends_on": ["bet"]}
+      ],
+      "risk_level": "low",
+      "risk_trigger": "Reference binding energy drift > 0.2 eV",
+      "fallback_plan": "Re-calibrate C 1s peak and repeat spot scan",
+      "scientific_fit_score": 0.90, "evidence_score": 0.88
+    },
+    {
+      "version": "v3_over_safety_temp",
+      "source_ref": "plans.md#v3",
+      "primary_readout": "Active site density (umol/g)",
+      "inference_unit": "Independent synthesis batch",
+      "controls": ["blank_support", "ref_cu_std"],
+      "one_time_setup_cost": 150.0,
+      "labor_days": 3.0, "prep_days": 1.0, "qc_turnaround_days": 1.0,
+      "parameters": {"degas_temp_c": 240.0},
+      "steps": [
+        {"id": "xps", "duration_days": 2.0, "resource": "xps_core", "hours": 12.0, "depends_on": []}
+      ],
+      "risk_level": "medium",
+      "scientific_fit_score": 0.86, "evidence_score": 0.84
+    }
+  ]
+}

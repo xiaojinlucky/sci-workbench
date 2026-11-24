@@ -1,0 +1,68 @@
+{
+  "ILLUSTRATIVE_EXAMPLE_ONLY": true,
+  "illustrative_example_notice": "ILLUSTRATIVE EXAMPLE ONLY — NEUTRAL BENCH INTERACTION-REVERSAL FIXTURE",
+  "domain_spec": {
+    "parameters": {
+      "knob_temp_c": {"min": 180.0, "max": 250.0, "safety_max": 240.0, "step": 10.0, "unit": "C", "source_ref": "bench_manual#p2"},
+      "knob_flow_sccm": {"min": 20.0, "max": 70.0, "step": 10.0, "unit": "sccm", "source_ref": "bench_manual#p3"}
+    },
+    "coupled_constraints": [],
+    "linear_constraints": [
+      {"name": "heater_duty_cap", "terms": {"knob_temp_c": 1.0, "knob_flow_sccm": 0.5}, "op": "<=", "rhs": 265.0}
+    ]
+  },
+  "pilot_data": {
+    "response_metric": "conversion_pct",
+    "objective_direction": "maximize",
+    "factors": ["knob_temp_c", "knob_flow_sccm"],
+    "runs": [
+      {"run_id": "R1", "knob_temp_c": 190, "knob_flow_sccm": 20, "conversion_pct": 81.0},
+      {"run_id": "R2", "knob_temp_c": 190, "knob_flow_sccm": 20, "conversion_pct": 82.4},
+      {"run_id": "R3", "knob_temp_c": 230, "knob_flow_sccm": 20, "conversion_pct": 52.0},
+      {"run_id": "R4", "knob_temp_c": 230, "knob_flow_sccm": 20, "conversion_pct": 53.5},
+      {"run_id": "R5", "knob_temp_c": 190, "knob_flow_sccm": 60, "conversion_pct": 57.0},
+      {"run_id": "R6", "knob_temp_c": 190, "knob_flow_sccm": 60, "conversion_pct": 58.2},
+      {"run_id": "R7", "knob_temp_c": 230, "knob_flow_sccm": 60, "conversion_pct": 91.5},
+      {"run_id": "R8", "knob_temp_c": 230, "knob_flow_sccm": 60, "conversion_pct": 92.8}
+    ]
+  },
+  "contract_spec": {
+    "currency": "USD",
+    "budget_cap": 1500.0,
+    "time_limit_hours": 24.0,
+    "setup_cost": 150.0,
+    "machine_hour_rate": 40.0,
+    "unit_prices": {"gas_cartridge": 35.0, "qc_std": 20.0}
+  },
+  "candidates_3v": {
+    "plans": [
+      {
+        "plan_id": "v1_unsafe_high",
+        "parameters": {"knob_temp_c": 250.0, "knob_flow_sccm": 60.0},
+        "planned_runs": 4, "machine_hours": 3.0,
+        "resource_usage": {"gas_cartridge": 2, "qc_std": 1},
+        "search_strategy": "grid",
+        "stopping_criterion": "Complete 4 runs or halt on heater alarm > 240 C",
+        "predicted_response": 94.0, "predicted_uncertainty": 5.0
+      },
+      {
+        "plan_id": "v2_low_cost_safe",
+        "parameters": {"knob_temp_c": 190.0, "knob_flow_sccm": 20.0},
+        "planned_runs": 3, "machine_hours": 2.5,
+        "resource_usage": {"gas_cartridge": 1, "qc_std": 1},
+        "search_strategy": "sequential_doe",
+        "stopping_criterion": "Stop when confirmation SD < 1.5% over 3 independent runs",
+        "predicted_response": 81.7, "predicted_uncertainty": 1.4
+      },
+      {
+        "plan_id": "v3_interaction_joint_pareto",
+        "parameters": {"knob_temp_c": 230.0, "knob_flow_sccm": 60.0},
+        "planned_runs": 4, "machine_hours": 3.0,
+        "resource_usage": {"gas_cartridge": 2, "qc_std": 1},
+        "search_strategy": "rsm_ccd",
+        "stopping_criterion": "Stop when 4-run confirmation mean >= 90% with half-width <= 2.0%",
+        "predicted_response": 92.15, "predicted_uncertainty": 1.3
+      }
+    ]
+  }
+}

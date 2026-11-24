@@ -1,0 +1,76 @@
+{
+  "illustrative_example_notice": "ILLUSTRATIVE EXAMPLE ONLY — NOT A FORMAL BENCHMARK CASE",
+  "case_id": "illustrative-feas-01",
+  "title": "3-Version LC-MS Metabolomics Cohort Feasibility Review",
+  "prospective_contract": {
+    "evaluation_date": "2026-11-24",
+    "budget_cap_usd": 4200.0,
+    "deadline_days": 18.0,
+    "sample_pool_available": 40,
+    "sample_stability_days": 14.0,
+    "approval_lead_days": 4.0,
+    "labor_rate_per_day": 150.0,
+    "biosafety_approved": true,
+    "ethics_approval_required": true,
+    "ethics_approved": true,
+    "compliance_source_ref": "contract.json:compliance",
+    "resources": {
+      "lc_ms_core": {"status": "available", "rate_per_hr": 60.0, "booking_lead_days": 2.0, "lead_days": 0.0, "spec_precision": 0.01, "maintenance_status": "current", "source_ref": "equip.md#lc_ms"},
+      "isotope_std": {"status": "needs_procurement", "unit_cost": 180.0, "lead_days": 6.0, "quote_valid_until": "2026-12-30", "source_ref": "quotes.md#iso"},
+      "unpriced_kit": {"status": "needs_procurement", "unit_cost": null, "lead_days": 5.0, "source_ref": "quotes.md#unpriced"}
+    },
+    "parameter_domains": {
+      "column_temp_c": {"min": 25.0, "max": 60.0, "safety_max": 50.0, "step": 5.0, "unit": "C", "source_ref": "lc_manual#p14"}
+    }
+  },
+  "candidate_plans": [
+    {
+      "version": "v1_unpriced",
+      "source_ref": "plans.md#v1",
+      "hypothesis": "Drug X reduces plasma lactate >= 20% at 24h.",
+      "variables": {"iv": "Drug X dose", "dv": "Plasma lactate", "dv_unit": "mM"},
+      "inference_unit": "Independent patient serum aliquot",
+      "controls": ["vehicle_blank", "lactate_pos_std"],
+      "arms": 4, "biological_replicates": 4, "technical_replicates": 1, "qc_extra_samples": 4,
+      "one_time_setup_cost": 200.0, "labor_days": 3.0, "prep_days": 1.0, "qc_days": 1.0,
+      "parameters": {"column_temp_c": 40.0},
+      "steps": [
+        {"id": "prep", "duration_days": 1.0, "resource": "unpriced_kit", "units": 2, "sop_id": "SOP-LC-01", "sop_version": "v2.0", "depends_on": []},
+        {"id": "lcms", "duration_days": 2.0, "resource": "lc_ms_core", "hours": 10.0, "required_precision": 0.02, "sop_id": "SOP-LC-01", "sop_version": "v2.0", "depends_on": ["prep"]}
+      ],
+      "risks": [{"name": "carryover", "trigger": "Blank > 2% LLOQ", "mitigation": "Run dual methanol wash"}]
+    },
+    {
+      "version": "v2_overtemp",
+      "source_ref": "plans.md#v2",
+      "hypothesis": "Drug X reduces plasma lactate >= 20% at 24h.",
+      "variables": {"iv": "Drug X dose", "dv": "Plasma lactate", "dv_unit": "mM"},
+      "inference_unit": "Independent patient serum aliquot",
+      "controls": ["vehicle_blank", "lactate_pos_std"],
+      "arms": 4, "biological_replicates": 4, "technical_replicates": 1, "qc_extra_samples": 4,
+      "one_time_setup_cost": 200.0, "labor_days": 3.0, "prep_days": 1.0, "qc_days": 1.0,
+      "parameters": {"column_temp_c": 55.0},
+      "steps": [
+        {"id": "std", "duration_days": 1.0, "resource": "isotope_std", "units": 2, "sop_id": "SOP-LC-01", "sop_version": "v2.0", "depends_on": []},
+        {"id": "lcms", "duration_days": 2.0, "resource": "lc_ms_core", "hours": 10.0, "required_precision": 0.02, "sop_id": "SOP-LC-01", "sop_version": "v2.0", "depends_on": ["std"]}
+      ],
+      "risks": [{"name": "carryover", "trigger": "Blank > 2% LLOQ", "mitigation": "Run dual methanol wash"}]
+    },
+    {
+      "version": "v3_conditional_ok",
+      "source_ref": "plans.md#v3",
+      "hypothesis": "Drug X reduces plasma lactate >= 20% at 24h.",
+      "variables": {"iv": "Drug X dose", "dv": "Plasma lactate", "dv_unit": "mM"},
+      "inference_unit": "Independent patient serum aliquot",
+      "controls": ["vehicle_blank", "lactate_pos_std"],
+      "arms": 4, "biological_replicates": 4, "technical_replicates": 1, "qc_extra_samples": 4,
+      "one_time_setup_cost": 200.0, "labor_days": 3.0, "prep_days": 1.0, "qc_days": 1.0,
+      "parameters": {"column_temp_c": 40.0},
+      "steps": [
+        {"id": "std", "duration_days": 1.0, "resource": "isotope_std", "units": 2, "sop_id": "SOP-LC-01", "sop_version": "v2.0", "depends_on": []},
+        {"id": "lcms", "duration_days": 2.0, "resource": "lc_ms_core", "hours": 10.0, "required_precision": 0.02, "sop_id": "SOP-LC-01", "sop_version": "v2.0", "depends_on": ["std"]}
+      ],
+      "risks": [{"name": "carryover", "trigger": "Blank > 2% LLOQ", "mitigation": "Run dual methanol wash"}]
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "ILLUSTRATIVE_EXAMPLE_ONLY": true,
+  "notice": "Illustrative output schema example for challenge-cf1995b5 — NOT a formal competition case or measured run.",
+  "case_id": "illustrative-cat-01",
+  "recommended_plan_version": "v3_staged_optimal",
+  "all_infeasible": false,
+  "control_audit": {
+    "ok": true,
+    "research_type": "engineering_optimization",
+    "control_count": 2,
+    "unmatched_confounders": [],
+    "power_audit": {
+      "method": "two_sided_normal_approximation",
+      "cohen_d": 1.8,
+      "planned_independent_units_per_arm": 4,
+      "achieved_power_approx": 0.7224,
+      "recommended_min_units_per_arm": 5,
+      "underpowered": true,
+      "power_method_assumptions_and_limits": [
+        "Assumes independent biological/experimental units, equal group variance, and approximate normality.",
+        "For n < 10 per arm, normal approximation slightly overestimates exact non-central t-test power (+1 to +2 units recommended)."
+      ]
+    },
+    "estimability_audit": {"structure": "complete_factorial", "missing_cell_count": 0},
+    "sop_pin_audit": {"ok": true, "version_conflicts": []}
+  },
+  "confirmation_items": [
+    {"item": "Biosafety approval", "contract_key": "biosafety_approved", "status": "UNVERIFIED_REQUIRED"},
+    {"item": "Instrument booking confirmation", "contract_key": "equipment_booking_confirmed", "status": "UNVERIFIED_REQUIRED"},
+    {"item": "Vendor pricing & lead-time confirmation", "contract_key": "vendor_quote_confirmed", "status": "UNVERIFIED_REQUIRED"}
+  ],
+  "prospective_boundary_notice": "Candidate optimization evaluates organizer prospective contracts over finite parameter domains; it is a planning scenario only — NOT an executed lab run, vendor quote, or safety approval."
+}

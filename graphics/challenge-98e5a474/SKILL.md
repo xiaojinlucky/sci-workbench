@@ -40,8 +40,10 @@ python3 "$SCRIPTS/budget_guard.py" --init
 python3 "$SCRIPTS/result_guard.py" --path /app/output/result.json --init --case-id "<CASE_ID>" --task-id "<TASK_ID>"
 python3 "$SCRIPTS/block_indexer.py" --scan /input --out /app/work/input_blocks.json
 
-# Step 2 (Mode A — Generate New Schematic with 300 dpi default or --preset lineart_600dpi + auto-seal):
-# Extract entities, containers, typed edges, optional CSV/JSON table, and asset licenses into /app/work/schematic_spec.json
+# Step 2a: Deterministically extract hierarchical containers, entities, values & typed relations directly from raw /input
+python3 "$SCRIPTS/extract_schematic_spec.py" --input-dir /input --out /app/work/schematic_spec.json
+
+# Step 2b (Mode A — Generate New Schematic with 300 dpi default or --preset lineart_600dpi + auto-seal):
 python3 "$SCRIPTS/schematic_spec_builder.py" \
   --spec /app/work/schematic_spec.json \
   --data-table /input/data.csv \

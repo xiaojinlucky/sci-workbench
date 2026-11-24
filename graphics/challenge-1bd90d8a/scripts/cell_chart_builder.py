@@ -689,6 +689,12 @@ def build_chart(
                         ax.plot([x1, x1, x2, x2], [y_cur, y_cur + h_tick, y_cur + h_tick, y_cur], color="#222222", lw=0.75, zorder=6)
                         ax.text((x1 + x2) / 2.0, y_cur + h_tick + 0.015 * y_span, str(sitem["p_label"]), ha="center", va="bottom", fontsize=6.8, color="#111111")
                         y_cur += step
+                    else:
+                        prov.setdefault("gaps", []).append({
+                            "code": "SIGNIFICANCE_TARGET_UNMATCHED",
+                            "severity": "warning",
+                            "message": f"Significance comparison ({ga}/{sa} vs {gb}/{sb}) did not match plotted bars; never silently dropped.",
+                        })
                 lo, hi = ax.get_ylim()
                 if y_cur + 0.06 * y_span > hi:
                     ax.set_ylim(lo, y_cur + 0.08 * y_span)
@@ -818,6 +824,49 @@ def build_chart(
     actual_h_mm = round(float(declared_h_in) * 25.4, 2)
     phys_match = bool(abs(actual_w_mm - float(width_mm)) <= 1.5 and abs(actual_h_mm - float(height_mm)) <= 1.5)
 
+    # Unified bidirectional mark_id -> {figure, source_rows, column} map across all 6 chart types
+    mark_to_row: dict[str, dict[str, Any]] = {}
+    if prov_extra.get("groups"):
+        vcol = str(spec.get("value_col", ""))
+        for idx_g, rec in enumerate(prov_extra["groups"], 1):
+            m_id = f"{stem}:{chart_type}:{rec.get('group')}:{rec.get('series')}:{idx_g}"
+            rows_1b = list(rec.get("source_rows") or (rec.get("provenance") or {}).get("csv_lines") or [])
+            mark_to_row[m_id] = {
+                "figure": stem,
+                "chart_type": chart_type,
+                "group": rec.get("group"),
+                "series": rec.get("series"),
+                "column": vcol,
+                "source_rows": rows_1b,
+                "n": rec.get("n"),
+            }
+    elif prov_extra.get("csv_lines_plotted"):
+        mark_to_row[f"{stem}:{chart_type}:points"] = {
+            "figure": stem,
+            "chart_type": chart_type,
+            "column": f"{spec.get('x_col', '')},{spec.get('y_col', '')}",
+            "source_rows": list(prov_extra["csv_lines_plotted"]),
+            "n": len(prov_extra["csv_lines_plotted"]),
+        }
+    elif prov_extra.get("rows_with_in_plot"):
+        for rinfo in prov_extra["rows_with_in_plot"]:
+            if rinfo.get("in_plot"):
+                mark_to_row[f"{stem}:dotplot:{rinfo.get('term')}"] = {
+                    "figure": stem,
+                    "chart_type": "dotplot",
+                    "column": f"{spec.get('x_col', '')},{spec.get('size_col', '')},{spec.get('color_col', '')}",
+                    "source_rows": [int(rinfo["line"])],
+                }
+    elif prov_extra.get("row_label_mapping"):
+        for idx_r, (orig_lbl, disp_lbl) in enumerate(prov_extra["row_label_mapping"].items(), start=2):
+            mark_to_row[f"{stem}:heatmap:row:{disp_lbl}"] = {
+                "figure": stem,
+                "chart_type": "heatmap",
+                "column": ",".join(list((prov_extra.get("col_label_mapping") or {}).keys())),
+                "source_rows": [idx_r],
+                "original_row_label": orig_lbl,
+            }
+
     prov_payload = {
         "source_table": str(table_path.name),
         "source_table_sha256": _sha256(table_path),
@@ -833,6 +882,7 @@ def build_chart(
         "restyle_from": restyle_from,
         "warnings": prov.get("warnings", []),
         "gaps": prov.get("gaps", []),
+        "mark_to_row_provenance": mark_to_row,
         **prov_extra,
     }
     _def = lambda o: o.item() if hasattr(o, "item") else str(o)
@@ -873,6 +923,8 @@ def build_chart(
         "editability": editability,
         "drawio_layout": drawio_chk,
         "suite_audit": suite_rep,
+        "gaps": prov.get("gaps", []),
+        "mark_to_row_count": len(mark_to_row),
         "artifacts": [svg_p.name, drawio_p.name, png_p.name, pdf_p.name, prov_p.name],
     }
 
@@ -920,14 +972,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.case_json:
         case_p = Path(args.case_json)
         result_p = Path(args.result_out) if args.result_out else (out_dir / "result.json")
-        uncert = list((res.get("portable_svg") or {}).get("warnings") or [])
+        uncert = [w for w in list((res.get("portable_svg") or {}).get("warnings") or []) if "CJK" in w]
+        for g in (res.get("gaps") or []):
+            uncert.append(f"{g.get('code', 'GAP')}: {g.get('message', '')}" if isinstance(g, dict) else str(g))
         res["result_seal"] = seal_case_result(
             case_p, result_p, task_id="source-bound-scientific-chart-builder",
             artifacts=list(res.get("artifacts") or []),
             sources=[str(spec.get("table", "")), str(spec_p.name)],
-            uncertainty=[w for w in uncert if "CJK" in w],
+            uncertainty=uncert,
             change_records=[{"op": "restyle_chart" if restyle_from else "build_chart", "chart_type": res.get("chart_type"), "restyle_from": restyle_from}],
-            metrics={"declared_width_mm": res.get("declared_width_mm"), "actual_svg_width_mm": res.get("actual_svg_width_mm"), "physical_dimension_locked": res.get("physical_dimension_locked")},
+            metrics={"declared_width_mm": res.get("declared_width_mm"), "actual_svg_width_mm": res.get("actual_svg_width_mm"), "physical_dimension_locked": res.get("physical_dimension_locked"), "mark_to_row_count": res.get("mark_to_row_count")},
             status="ok" if res.get("ok") else "failed",
         )
     print(json.dumps(res, indent=2, ensure_ascii=False))

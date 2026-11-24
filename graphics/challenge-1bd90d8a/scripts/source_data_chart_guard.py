@@ -5,11 +5,59 @@ from __future__ import annotations
 
 import argparse
 import csv
+import difflib
 import json
 import math
+import re
 import statistics
 from pathlib import Path
 from typing import Any
+
+_ILLEGAL_ENTITY_RE = re.compile(r"^(?:QC_|post_basic|tmp_|debug_)|[^\w\s\-/.+()%µμ°αβγΔ]", re.I)
+_SPECIES_BINOMIAL_RE = re.compile(r"^[A-Z][a-z]{2,}\s+[a-z]{3,}$")
+
+
+def audit_entity_nomenclature(
+    labels: list[str],
+    *,
+    lexicon_path: Path | None = None,
+    species: str = "",
+) -> dict[str, Any]:
+    """Validate scientific entity naming consistency (HGNC/MGI gene casing, species binomials, lexicon match & typo detection)."""
+    mismatches: list[dict[str, str]] = []
+    canonical: set[str] = set()
+    aliases: dict[str, str] = {}
+    if lexicon_path is not None and lexicon_path.is_file():
+        lex = json.loads(lexicon_path.read_text(encoding="utf-8-sig"))
+        if isinstance(lex, list):
+            canonical = {str(x).strip() for x in lex if str(x).strip()}
+        elif isinstance(lex, dict):
+            canonical = {str(x).strip() for x in (lex.get("canonical") or lex.get("entities") or []) if str(x).strip()}
+            aliases = {str(k).strip().lower(): str(v).strip() for k, v in (lex.get("aliases") or {}).items()}
+
+    uniq = list(dict.fromkeys(str(x).strip() for x in labels if str(x).strip()))
+    seen_lower: dict[str, str] = {}
+    for lbl in uniq:
+        if _ILLEGAL_ENTITY_RE.search(lbl):
+            mismatches.append({"code": "ENTITY_NAME_MISMATCH", "label": lbl, "reason": "contains illegal/backend symbol or prefix"})
+        low = lbl.lower()
+        if low in seen_lower and seen_lower[low] != lbl:
+            mismatches.append({"code": "ENTITY_NAME_MISMATCH", "label": lbl, "reason": f"inconsistent casing vs {seen_lower[low]!r}"})
+        seen_lower[low] = lbl
+        if low in aliases and aliases[low] != lbl:
+            mismatches.append({"code": "ENTITY_NAME_MISMATCH", "label": lbl, "reason": f"non-canonical alias; expected {aliases[low]!r}"})
+        elif canonical and lbl not in canonical:
+            close = difflib.get_close_matches(lbl, sorted(canonical), n=1, cutoff=0.78)
+            hint = f" (did you mean {close[0]!r}?)" if close else ""
+            mismatches.append({"code": "ENTITY_NAME_MISMATCH", "label": lbl, "reason": f"not in authorized entity lexicon{hint}"})
+        if species.lower() in ("human", "homo_sapiens", "hsa") and re.fullmatch(r"[A-Za-z][a-z]{1,4}[0-9]{1,3}[A-Za-z]?", lbl):
+            mismatches.append({"code": "ENTITY_NAME_MISMATCH", "label": lbl, "reason": f"human HGNC gene symbol should be uppercase ({lbl.upper()})"})
+        if " " in lbl and len(lbl.split()) == 2 and all(w.isalpha() for w in lbl.split()):
+            w1, w2 = lbl.split()
+            if w1[0].islower() and w2.islower() and len(w1) > 4 and len(w2) > 4:
+                mismatches.append({"code": "ENTITY_NAME_MISMATCH", "label": lbl, "reason": f"species binomial genus should be capitalized ({w1.capitalize()} {w2})"})
+
+    return {"checked": len(uniq), "passed": len(mismatches) == 0, "mismatches": mismatches}
 
 SENTINEL_STRINGS = {"", "na", "n/a", "nan", "null", "none", "nd", "bdl", "."}
 SUSPICIOUS_SENTINELS = {888.0, 999.0, -999.0, -9999.0, 9999.0}
@@ -241,12 +289,14 @@ def audit_source_data(
             "has_negative": any(v < 0.0 for v in vals),
             "explicit_zero_count": sum(1 for v in vals if v == 0.0),
             "raw_values": vals,
+            "source_rows": row_nums,
             "provenance": {
                 "source_file": table_path.name,
                 "group_col": group_col,
                 "series_col": series_col or None,
                 "value_col": value_col,
                 "csv_lines": row_nums,
+                "source_rows": row_nums,
                 "statistical_unit": statistical_unit,
                 "aggregation": "mean +- error with raw points" if show_points else "summary only",
             },
@@ -312,6 +362,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-error-bars", action="store_true")
     parser.add_argument("--allow-summary-only", action="store_true")
     parser.add_argument("--fail-on-sentinel", action="store_true")
+    parser.add_argument("--entity-lexicon", default="", help="Optional JSON canonical entity/gene/species lexicon for ENTITY_NAME_MISMATCH check")
+    parser.add_argument("--species", default="", help="Optional species convention ('human' HGNC / 'mouse' MGI)")
     parser.add_argument("--out", default="", help="Optional provenance JSON output path")
     args = parser.parse_args(argv)
 
@@ -328,6 +380,13 @@ def main(argv: list[str] | None = None) -> int:
         fail_on_sentinel=args.fail_on_sentinel,
         statistical_unit=args.statistical_unit,
     )
+    lex_p = Path(args.entity_lexicon) if args.entity_lexicon else None
+    all_lbls = [g["group"] for g in rep.get("groups", [])] + [g["series"] for g in rep.get("groups", []) if g.get("series") != "default"]
+    ent_aud = audit_entity_nomenclature(all_lbls, lexicon_path=lex_p, species=args.species)
+    rep["entity_nomenclature_audit"] = ent_aud
+    if not ent_aud["passed"]:
+        rep["errors"].extend(f"{m['code']}: {m['label']} ({m['reason']})" for m in ent_aud["mismatches"])
+        rep["ok"] = False
     encoded = json.dumps(rep, indent=2, ensure_ascii=False)
     if args.out:
         out_p = Path(args.out)

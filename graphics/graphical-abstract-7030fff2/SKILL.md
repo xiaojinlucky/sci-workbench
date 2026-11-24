@@ -45,7 +45,11 @@ python3 "$SCRIPTS/budget_guard.py" --init
 python3 "$SCRIPTS/result_guard.py" --path /app/output/result.json --init --case-id "<CASE_ID>" --task-id "<TASK_ID>"
 python3 "$SCRIPTS/block_indexer.py" --scan /input --out /app/work/input_blocks.json
 
-# Step 2: Compose 4-stage mm-locked Graphical Abstract (.svg, .drawio, 300 dpi .png, .pdf, _caption_draft.md, _manifest.json) + auto-seal
+# Step 2a: Deterministically extract a grounded 4-stage GA spec draft directly from raw /input (PDF/HTML/MD/TXT/CSV + case.json)
+python3 "$SCRIPTS/draft_ga_spec.py" --input-dir /input --out /app/work/ga_spec.json
+
+# Step 2b: Compose 4-stage mm-locked Graphical Abstract (.svg, .drawio, 300 dpi .png, .pdf, _caption_draft.md, _manifest.json) + auto-seal
+# (Or pass --from-input /input directly for single-command extraction + composition)
 python3 "$SCRIPTS/ga_narrative_composer.py" --spec /app/work/ga_spec.json --dpi 300 --case-json /input/case.json --out-dir /app/output --stem graphical_abstract
 
 # Step 3: Narrative, grounding, color-consistency, edge-clipping & editability audit

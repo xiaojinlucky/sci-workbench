@@ -69,8 +69,10 @@ def _add_el(parent: _StdET.Element, tag: str, attrib: dict[str, str] | None = No
 
 
 def _load_data_table(table_path: Path | None) -> dict[str, dict[str, str]]:
-    if table_path is None or not table_path.is_file():
+    if table_path is None:
         return {}
+    if not table_path.is_file():
+        raise FileNotFoundError(f"MISSING_DATA_TABLE: Explicit --data-table file does not exist: {table_path}")
     ext = table_path.suffix.lower()
     rows: dict[str, dict[str, str]] = {}
     if ext == ".json":
@@ -131,34 +133,77 @@ def build_schematic_svg(
     usable_w = width - 2 * pad_x
     usable_h = height - top_y - legend_h - 16.0
 
-    # Compute container boxes
+    # Build explicit parent-child container tree & reject unknown parents, cycles, and unknown node containers
     cont_boxes: dict[str, tuple[float, float, float, float]] = {}
     dividers_x: list[float] = []
     if containers:
+        cont_by_id = {str(c["id"]): c for c in containers}
+        children_map: dict[str, list[dict[str, Any]]] = {cid: [] for cid in cont_by_id}
+        top_containers: list[dict[str, Any]] = []
+        for c in containers:
+            cid = str(c["id"])
+            pid = str(c.get("parent") or c.get("parent_container") or "").strip()
+            if pid:
+                if pid not in cont_by_id:
+                    raise ValueError(f"UNKNOWN_PARENT_CONTAINER: Container {cid!r} references undeclared parent {pid!r}")
+                # Cycle detection
+                seen_anc = {cid}
+                cur_p = pid
+                while cur_p:
+                    if cur_p in seen_anc:
+                        raise ValueError(f"CONTAINER_CYCLE_ERROR: Cyclic container nesting detected involving {cid!r}")
+                    seen_anc.add(cur_p)
+                    cur_p = str(cont_by_id[cur_p].get("parent") or cont_by_id[cur_p].get("parent_container") or "").strip()
+                children_map[pid].append(c)
+            else:
+                top_containers.append(c)
+
         layout_dir = str(spec.get("container_layout", "columns")).lower()
-        n_c = len(containers)
+        n_c = max(1, len(top_containers))
         gap = 28.0 if layout_dir != "rows" else 18.0
         if layout_dir == "rows":
             ch = (usable_h - gap * (n_c - 1)) / n_c
-            for i, c in enumerate(containers):
+            for i, c in enumerate(top_containers):
                 cid = str(c["id"])
                 cont_boxes[cid] = (pad_x, top_y + i * (ch + gap), usable_w, ch)
         else:
             cw = (usable_w - gap * (n_c - 1)) / n_c
-            for i, c in enumerate(containers):
+            for i, c in enumerate(top_containers):
                 cid = str(c["id"])
                 bx = pad_x + i * (cw + gap)
                 cont_boxes[cid] = (bx, top_y, cw, usable_h)
                 if i > 0:
                     dividers_x.append(bx - gap / 2.0)
+
+        # Recursively allocate nested child container boxes inside their parent box
+        def _place_children(parent_id: str) -> None:
+            kids = children_map.get(parent_id) or []
+            if not kids:
+                return
+            px, py, pw, ph = cont_boxes[parent_id]
+            inner_x, inner_y = px + 12.0, py + 34.0
+            inner_w, inner_h = max(60.0, pw - 24.0), max(50.0, ph - 46.0)
+            kid_gap = 12.0
+            kh = (inner_h - kid_gap * (len(kids) - 1)) / len(kids)
+            for ki, kc in enumerate(kids):
+                kcid = str(kc["id"])
+                cont_boxes[kcid] = (inner_x, inner_y + ki * (kh + kid_gap), inner_w, kh)
+                _place_children(kcid)
+
+        for tc in top_containers:
+            _place_children(str(tc["id"]))
     else:
         cont_boxes["_root"] = (pad_x, top_y, usable_w, usable_h)
 
     by_cont: dict[str, list[dict[str, Any]]] = {cid: [] for cid in cont_boxes}
     first_cid = next(iter(cont_boxes))
     for n in nodes:
-        cid = str(n.get("container", first_cid))
-        if cid not in by_cont:
+        raw_cid = n.get("container")
+        if raw_cid is not None and str(raw_cid).strip() != "":
+            cid = str(raw_cid).strip()
+            if cid not in by_cont:
+                raise ValueError(f"UNKNOWN_CONTAINER_REFERENCE: Node {n.get('id')!r} references undeclared container {cid!r}")
+        else:
             cid = first_cid
         by_cont[cid].append(n)
 
@@ -507,7 +552,20 @@ def main(argv: list[str] | None = None) -> int:
     case_p = Path(args.case_json) if args.case_json else None
     result_p = Path(args.result_out) if args.result_out else (out_dir / "result.json")
 
-    build_info = build_schematic_svg(spec, svg_p, data_table=dt_path)
+    try:
+        build_info = build_schematic_svg(spec, svg_p, data_table=dt_path)
+    except (FileNotFoundError, ValueError) as exc:
+        err_msg = str(exc)
+        seal_rep = None
+        if case_p is not None:
+            seal_rep = seal_case_result(
+                case_p, result_p, task_id="scientific-schematic-generator-editor",
+                artifacts=[], sources=[str(spec_p.name)], uncertainty=[err_msg],
+                change_records=[{"op": "build_schematic_blocked", "reason": err_msg}],
+                metrics={"blocked": True}, status="partial_with_gaps",
+            )
+        print(json.dumps({"ok": False, "error": err_msg, "result_seal": seal_rep}, indent=2, ensure_ascii=False))
+        return 1
     license_rep = audit_asset_licenses(spec, svg_path=svg_p)
     lic_p.write_text(json.dumps(license_rep, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 

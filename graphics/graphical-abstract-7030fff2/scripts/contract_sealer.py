@@ -144,7 +144,7 @@ def seal_case_result(
         "artifacts": sorted(set(artifacts)),
         "editable_sources": [a for a in artifacts if a.endswith((".svg", ".drawio", ".tex"))],
         "rendered_exports": [a for a in artifacts if a.endswith((".png", ".pdf"))],
-        "sources": sorted(set(s for s in sources if s)),
+        "sources": sorted(set((Path(s).name if (len(s) > 2 and (s[1] == ":" or s.startswith("/"))) else s) for s in sources if s)),
         "uncertainty": uncertainty,
         "change_records": change_records,
         "metrics": metrics or {},
@@ -161,8 +161,10 @@ def seal_case_result(
         "limitations": payload["uncertainty"],
     }
     for field in contract_fields:
-        if field not in payload:
-            payload[field] = alias_map.get(field, payload.get("artifacts") if "artifact" in field else "recorded")
+        if field in alias_map:
+            payload[field] = alias_map[field]
+        elif field not in payload:
+            payload[field] = payload.get("artifacts") if "artifact" in field else "recorded"
 
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

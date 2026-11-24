@@ -47,7 +47,10 @@ python3 "$SCRIPTS/budget_guard.py" --init
 python3 "$SCRIPTS/result_guard.py" --path /app/output/result.json --init --case-id "<CASE_ID>" --task-id "<TASK_ID>"
 python3 "$SCRIPTS/block_indexer.py" --scan /input --out /app/work/input_blocks.json
 
-# Step 2: Lint topology, ports, step order & operating parameter gaps before rendering
+# Step 2a: Deterministically extract zones, apparatus units, operating parameters, ports & missing_params from raw /input
+python3 "$SCRIPTS/extract_route_spec.py" --input-dir /input --out /app/work/route_spec.json
+
+# Step 2b: Lint topology, ports, step order & operating parameter gaps before rendering
 python3 "$SCRIPTS/apparatus_route_linter.py" --spec /app/work/route_spec.json --out /app/work/lint_pre.json
 
 # Step 3: Build layered SVG, native bound .drawio, parameterized TikZ (.tex + .meta.json), 300 dpi PNG, PDF, and auto-seal result.json

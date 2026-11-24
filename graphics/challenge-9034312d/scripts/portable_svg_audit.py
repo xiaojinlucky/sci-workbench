@@ -90,6 +90,8 @@ def audit_portable_svg(
     has_non_ascii_text = False
     cjk_missing_fallback: list[str] = []
     _CJK_FONTS = ("noto sans cjk", "wenquanyi", "source han", "yahei", "simhei", "simsun", "pingfang", "heiti", "songti", "dengxian", "cjk")
+    box_widths: dict[str, float] = {}
+    label_checks: list[tuple[str, str, float]] = []
 
     for elem in root.iter():
         tag = _local(elem.tag)
@@ -111,10 +113,26 @@ def audit_portable_svg(
             counts["paths"] += 1
         elif low_tag in {"rect", "circle", "ellipse", "line", "polyline", "polygon"}:
             counts["primitives"] += 1
+            if eid and (eid.startswith("node-") or eid.startswith("unit-")):
+                w_raw = elem.get("width")
+                rx_raw = elem.get("rx")
+                try:
+                    if w_raw:
+                        box_widths[eid.split("-", 1)[1]] = float(w_raw)
+                    elif rx_raw and low_tag == "ellipse":
+                        box_widths[eid.split("-", 1)[1]] = float(rx_raw) * 2.0
+                except ValueError:
+                    pass
         elif low_tag == "text":
             txt_content = "".join(elem.itertext()).strip()
             if txt_content:
                 counts["editable_texts"] += 1
+                if eid and (eid.startswith("nodelabel-") or eid.startswith("unitlabel-")):
+                    try:
+                        fs_v = float(re.sub(r"[^0-9.]", "", elem.get("font-size") or "10.0") or "10.0")
+                    except ValueError:
+                        fs_v = 10.0
+                    label_checks.append((eid.split("-", 1)[1], txt_content, fs_v))
                 ff = (elem.get("font-family") or "").strip()
                 if ff:
                     font_families.add(ff)
@@ -178,6 +196,16 @@ def audit_portable_svg(
             f"CJK_FONT_FALLBACK_WARNING: {len(cjk_missing_fallback)} CJK <text> node(s) lack explicit CJK font fallback in font-family: {cjk_missing_fallback[:5]}"
         )
 
+    overflowing_labels: list[dict[str, Any]] = []
+    for key_id, txt_val, fs_v in label_checks:
+        bw = box_widths.get(key_id)
+        if bw is not None and bw > 0:
+            est_w = sum(fs_v * (1.02 if "\u4e00" <= ch <= "\u9fff" else 0.58) for ch in txt_val)
+            if est_w > bw - 6.0:
+                overflowing_labels.append({"id": key_id, "text": txt_val[:36], "est_text_w": round(est_w, 1), "box_w": round(bw, 1)})
+    if overflowing_labels:
+        warnings.append(f"TEXT_BOX_OVERFLOW_RISK: {len(overflowing_labels)} node label(s) approach or exceed parent box width: {[x['id'] for x in overflowing_labels[:5]]}")
+
     return {
         "passed": len(blockers) == 0,
         "viewBox": root.get("viewBox"),
@@ -189,6 +217,10 @@ def audit_portable_svg(
             "has_non_ascii_text": has_non_ascii_text,
             "has_cjk_text": has_cjk_text,
             "cjk_missing_fallback": cjk_missing_fallback[:10],
+        },
+        "text_overflow_audit": {
+            "checked_labels": len(label_checks),
+            "overflowing_labels": overflowing_labels[:10],
         },
         "blockers": list(dict.fromkeys(blockers)),
         "warnings": list(dict.fromkeys(warnings)),

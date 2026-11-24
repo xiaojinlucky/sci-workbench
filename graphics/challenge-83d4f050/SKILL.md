@@ -49,7 +49,10 @@ python3 "$SCRIPTS/budget_guard.py" --init
 python3 "$SCRIPTS/result_guard.py" --path /app/output/result.json --init --case-id "<CASE_ID>" --task-id "<TASK_ID>"
 python3 "$SCRIPTS/block_indexer.py" --scan /input --out /app/work/input_blocks.json
 
-# Step 2: Lint nomenclature, compartment polarity, and edge provenance before rendering
+# Step 2a: Deterministically extract grounded entities, compartments, regulatory edges & coverage audit directly from raw /input
+python3 "$SCRIPTS/extract_pathway_spec.py" --input-dir /input --out /app/work/pathway_spec.json
+
+# Step 2b: Lint nomenclature, compartment polarity, and edge provenance before rendering
 python3 "$SCRIPTS/pathway_topology_linter.py" --spec /app/work/pathway_spec.json --out /app/work/lint_pre.json
 
 # Step 3: Build layered SVG + native Draw.io + 300 dpi librsvg PNG/PDF (+ optional expression CSV/JSON + auto-seal)

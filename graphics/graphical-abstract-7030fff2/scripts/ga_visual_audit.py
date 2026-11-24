@@ -101,7 +101,15 @@ def audit_ga(
                     used_colors.add(str(b["color"]).upper())
                 if "unit" in b and not str(b["unit"]).strip() and float(b.get("value", 0.0)) != 0.0:
                     warnings.append(f"Panel {pid} mini_bar {b.get('label')!r} has empty unit string")
+            for n in (p.get("diagram") or {}).get("nodes") or []:
+                if isinstance(n, dict) and n.get("color"):
+                    used_colors.add(str(n["color"]).upper())
+            for n in p.get("nodes") or []:
+                if isinstance(n, dict) and n.get("color"):
+                    used_colors.add(str(n["color"]).upper())
             for m in p.get("metrics_strip") or []:
+                if isinstance(m, dict) and m.get("color"):
+                    used_colors.add(str(m["color"]).upper())
                 if not str(m.get("source_ref") or src_ref).strip():
                     ungrounded_panels.append(f"{pid}:{m.get('metric')}")
 
@@ -119,7 +127,7 @@ def audit_ga(
             palette_vals = set(entity_colors.values())
             unmapped = sorted(c for c in used_colors if c not in palette_vals)
             if unmapped:
-                warnings.append(f"Colors used in panels not declared in entity_colors legend: {unmapped}")
+                errors.append(f"UNDECLARED_LEGEND_COLOR: Colors used in panels not declared in entity_colors legend: {unmapped}")
     else:
         layer_ids = [el.get("id", "") for el in root.iter() if el.get("id", "").startswith("layer-panel-")]
         if len(layer_ids) < 3:

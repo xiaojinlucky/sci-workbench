@@ -1,0 +1,101 @@
+{
+  "schema": "graphical_abstract_spec_v2",
+  "title": "SYNTHETIC EXAMPLE: Single-Atom Ni-N4 Catalyst Boosts Selective CO2-to-CO Electroreduction",
+  "subtitle": "Materials/electrochemistry 4-stage summary from HER competition to durable industrial current density",
+  "width_mm": 174.0,
+  "height_mm": 98.0,
+  "layout": "1x4",
+  "takeaway": "Atomically dispersed Ni-N4-C delivers 96.4% CO Faradaic efficiency at 200 mA/cm2 for 100 h.",
+  "entity_colors": {
+    "HER_Loss": "#D77C70",
+    "Ni_N4_Site": "#547FA3",
+    "CO_Selectivity": "#4E9187",
+    "Stability_Gain": "#D19A45",
+    "Bare_Support": "#967A9C"
+  },
+  "caption_notes": [
+    "SYNTHETIC EXAMPLE — NOT CASE OUTPUT. Demonstrates non-biology electrocatalysis/materials domain.",
+    "Flow-cell 1 M KHCO3 electrolyte, n = 3 independent membrane electrode assemblies; error bars represent SD."
+  ],
+  "panels": [
+    {
+      "id": "p1_question",
+      "stage": "question",
+      "badge": "1 | Bottleneck",
+      "title": "Competing H2 Evolution",
+      "accent": "#D77C70",
+      "source_ref": "SYNTH-MAT-Fig1A",
+      "source_block_id": "BLK-0001",
+      "diagram": {
+        "nodes": [
+          {"label": "Bulk Ni Nanoparticles", "color": "#967A9C", "shape": "roundrect"},
+          {"label": "CO* Poisoning + HER", "color": "#D77C70", "shape": "pill"}
+        ],
+        "links": [{"from": 0, "to": 1, "relation": "activate", "label": "strong bind"}]
+      },
+      "bullets": [
+        "Bulk Ni binds *CO too tightly and favors H2",
+        "CO Faradaic efficiency drops below 25%"
+      ],
+      "highlight": "FE(CO) < 25% on bulk Ni"
+    },
+    {
+      "id": "p2_method",
+      "stage": "method",
+      "badge": "2 | Catalyst Design",
+      "title": "Pyrolyzed Ni-N4-C Sites",
+      "accent": "#547FA3",
+      "source_ref": "SYNTH-MAT-Methods",
+      "source_block_id": "BLK-0002",
+      "diagram": {
+        "nodes": [
+          {"label": "Isolated Ni-N4 Center", "color": "#547FA3", "shape": "roundrect"},
+          {"label": "H* Adsorption Barrier", "color": "#D77C70", "shape": "roundrect"}
+        ],
+        "links": [{"from": 0, "to": 1, "relation": "inhibit", "label": "suppresses"}]
+      },
+      "bullets": [
+        "ZIF-8 host pyrolyzed at 900 C under Ar flow",
+        "EXAFS confirms Ni-N coordination number 4.1"
+      ],
+      "highlight": "1.2 wt% single-atom Ni"
+    },
+    {
+      "id": "p3_result",
+      "stage": "result",
+      "badge": "3 | Core Result",
+      "title": "CO Faradaic Efficiency",
+      "accent": "#4E9187",
+      "source_ref": "SYNTH-MAT-Fig3B",
+      "source_block_id": "BLK-0003",
+      "mini_bars": [
+        {"label": "N-C Support", "value": 8.4, "err": 1.2, "unit": "%", "color": "#967A9C"},
+        {"label": "Bulk Ni", "value": 22.1, "err": 2.4, "unit": "%", "color": "#D77C70"},
+        {"label": "Ni-N4-C", "value": 96.4, "err": 1.1, "unit": "%", "color": "#4E9187"}
+      ],
+      "bullets": [
+        "96.4% CO selectivity at -0.8 V vs RHE",
+        "Partial current reaches 200 mA/cm2"
+      ],
+      "highlight": "96.4% FE(CO) at 200 mA/cm2"
+    },
+    {
+      "id": "p4_conclusion",
+      "stage": "conclusion",
+      "badge": "4 | Conclusion",
+      "title": "Durable Flow-Cell Output",
+      "accent": "#D19A45",
+      "source_ref": "SYNTH-MAT-Fig4D",
+      "source_block_id": "BLK-0004",
+      "metrics_strip": [
+        {"metric": "96.4%", "label": "CO Selectivity", "color": "#4E9187", "source_ref": "SYNTH-MAT-Fig3B"},
+        {"metric": "100 h", "label": "Stable Operation", "color": "#D19A45", "source_ref": "SYNTH-MAT-Fig4D"}
+      ],
+      "bullets": [
+        "Maintains >94% FE(CO) over 100 h electrolysis",
+        "Scalable membrane-electrode catalyst design"
+      ],
+      "highlight": "Industrial-Rate CO2RR"
+    }
+  ]
+}

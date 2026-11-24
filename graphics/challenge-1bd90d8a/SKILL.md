@@ -63,7 +63,10 @@ python3 "$SCRIPTS/budget_guard.py" --init
 python3 "$SCRIPTS/result_guard.py" --path /app/output/result.json --init --case-id "<CASE_ID>" --task-id "<TASK_ID>"
 python3 "$SCRIPTS/block_indexer.py" --scan /input --out /app/work/input_blocks.json
 
-# Step 2: Audit raw source table (Figure Data Profile + 5-Gate + sentinel/missing/zero check)
+# Step 2a: Deterministically inspect raw /input tables (5-Gate profile + chart-family inference + source-to-mark map)
+python3 "$SCRIPTS/draft_chart_spec.py" --input-dir /input --out /app/work/chart_spec.json
+
+# Step 2b: Audit raw source table (Figure Data Profile + 5-Gate + sentinel/missing/zero check)
 python3 "$SCRIPTS/source_data_chart_guard.py" \
   --table /input/data.csv --group-col group --value-col value --series-col condition \
   --fail-on-sentinel --out /app/work/source_prov.json

@@ -268,8 +268,8 @@ def lint_pathway_spec(
                     errors.append(f"Uncertain or unreferenced edge {ed_id!r} is missing from rendered SVG")
                 elif not svg_edge["dasharray"] or svg_edge["dasharray"].lower() == "none":
                     errors.append(f"Uncertain or unreferenced edge {ed_id!r} must be rendered dashed")
-                elif "arrow-transport" not in svg_edge["marker_end"]:
-                    errors.append(f"Uncertain or unreferenced edge {ed_id!r} must use open uncertainty marker")
+                elif svg_edge["polarity"] == "inhibit" and "inhibit" not in svg_edge["marker_end"]:
+                    errors.append(f"Uncertain inhibition edge {ed_id!r} must preserve T-bar polarity marker (#arrow-inhibit-uncertain)")
 
         missing_in_svg = sorted(set(ent_map) - svg_nodes)
         if missing_in_svg:

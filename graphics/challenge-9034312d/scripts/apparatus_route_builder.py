@@ -220,13 +220,51 @@ def build_apparatus_svg_and_tikz(spec: dict[str, Any], svg_out: Path, tex_out: P
             "font-size": "11", "font-weight": "bold", "fill": str(z.get("stroke", "#2E4E68")),
         }, str(z.get("label", zid)))
 
-    # Layer 3: Streams (with zone-divider clearance for labels)
+    # Layer 3: Streams (port-aware anchor binding + zone-divider clearance for labels)
     l_streams = _add_el(root, "g", {"id": "layer-streams", "data-layer-name": "streams"})
     used_types: list[str] = []
     placed_label_boxes: list[tuple[float, float, float, float]] = []
+    port_gaps: list[str] = []
+    port_bindings: list[dict[str, Any]] = []
+
+    def _port_anchor(ug: dict[str, Any], port_name: str, default_side: str, out_pad: float) -> tuple[float, float, bool]:
+        declared = [str(p) for p in (ug["unit"].get("ports") or [])]
+        matched = bool(port_name and port_name in declared)
+        if not port_name:
+            matched = True  # no explicit port requested
+        side = default_side
+        p_low = port_name.lower()
+        if p_low.startswith(("in:", "left:")):
+            side = "left"
+        elif p_low.startswith(("out:", "right:")):
+            side = "right"
+        elif p_low.startswith(("top:", "opt:", "light:", "ctrl:")):
+            side = "top"
+        elif p_low.startswith(("bot:", "bottom:", "waste:", "drain:")):
+            side = "bottom"
+        # Compute stable slot offset when multiple ports share the same side
+        same_side = [p for p in declared if (
+            (side == "left" and p.lower().startswith(("in:", "left:")))
+            or (side == "right" and p.lower().startswith(("out:", "right:")))
+            or (side == "top" and p.lower().startswith(("top:", "opt:", "light:", "ctrl:")))
+            or (side == "bottom" and p.lower().startswith(("bot:", "bottom:", "waste:", "drain:")))
+        )]
+        slot_idx = same_side.index(port_name) if port_name in same_side else 0
+        slot_cnt = max(1, len(same_side))
+        frac = (slot_idx + 1.0) / (slot_cnt + 1.0)
+        if side == "left":
+            return ug["x"] - out_pad, ug["y"] + ug["h"] * frac, matched
+        if side == "right":
+            return ug["x"] + ug["w"] + out_pad, ug["y"] + ug["h"] * frac, matched
+        if side == "top":
+            return ug["x"] + ug["w"] * frac, ug["y"] - out_pad, matched
+        return ug["x"] + ug["w"] * frac, ug["y"] + ug["h"] + out_pad, matched
+
     for idx, st in enumerate(streams):
         sid = str(st.get("id") or f"s{idx+1}")
         src, tgt = str(st["source"]), str(st["target"])
+        s_port = str(st.get("source_port", "")).strip()
+        t_port = str(st.get("target_port", "")).strip()
         stype = str(st.get("stream_type", "material")).lower().strip()
         if stype not in used_types:
             used_types.append(stype)
@@ -239,36 +277,42 @@ def build_apparatus_svg_and_tikz(spec: dict[str, Any], svg_out: Path, tex_out: P
         if (stype in ("feedback", "recycle") and not st.get("is_primary_forward")) or dx < -25.0:
             if sg["cy"] > top_y + usable_h * 0.52:
                 # Route lower-row feedback along right margin -> top corridor -> target top (zero box crossing!)
-                sx, sy = sg["x"] + sg["w"] + 2.0, sg["cy"]
+                sx, sy, sm = _port_anchor(sg, s_port, "right", 2.0)
+                tx, ty, tm = _port_anchor(tg, t_port, "top", 6.0)
                 rx = min(width - pad_x - 8.0, sg["x"] + sg["w"] + 20.0)
                 cy_top = top_y + 34.0
-                tx, ty = tg["cx"], tg["y"] - 6.0
                 d_path = f"M{sx:.1f},{sy:.1f} L{rx:.1f},{sy:.1f} L{rx:.1f},{cy_top:.1f} L{tx:.1f},{cy_top:.1f} L{tx:.1f},{ty:.1f}"
                 lx, ly, anchor = (rx + tx) / 2.0, cy_top - 6.0, "middle"
             else:
-                sx, sy = sg["cx"] - 14.0, sg["y"] - 2.0
-                tx, ty = tg["cx"] + 14.0, tg["y"] - 6.0
+                sx, sy, sm = _port_anchor(sg, s_port, "top", 2.0)
+                tx, ty, tm = _port_anchor(tg, t_port, "top", 6.0)
                 cy_ctrl = top_y + 30.0
                 d_path = f"M{sx:.1f},{sy:.1f} Q{(sx + tx)/2.0:.1f},{cy_ctrl:.1f} {tx:.1f},{ty:.1f}"
                 lx, ly, anchor = (sx + tx) / 2.0, 0.25 * sy + 0.5 * cy_ctrl + 0.25 * ty - 8.0, "middle"
         else:
             if abs(ux) >= abs(uy):
-                sx = sg["cx"] + (1.0 if ux >= 0 else -1.0) * (sg["w"] / 2.0 + 2.0)
-                sy = sg["cy"]
-                tx = tg["cx"] - (1.0 if ux >= 0 else -1.0) * (tg["w"] / 2.0 + 5.0)
-                ty = tg["cy"]
+                sx, sy, sm = _port_anchor(sg, s_port, "right" if ux >= 0 else "left", 2.0)
+                tx, ty, tm = _port_anchor(tg, t_port, "left" if ux >= 0 else "right", 5.0)
                 lx = (sx + tx) / 2.0
                 ly = (sy + ty) / 2.0 - 12.0
                 anchor = "middle"
             else:
-                sx = sg["cx"]
-                sy = sg["cy"] + (1.0 if uy >= 0 else -1.0) * (sg["h"] / 2.0 + 2.0)
-                tx = tg["cx"]
-                ty = tg["cy"] - (1.0 if uy >= 0 else -1.0) * (tg["h"] / 2.0 + 5.0)
+                sx, sy, sm = _port_anchor(sg, s_port, "bottom" if uy >= 0 else "top", 2.0)
+                tx, ty, tm = _port_anchor(tg, t_port, "top" if uy >= 0 else "bottom", 5.0)
                 lx = (sx + tx) / 2.0 + 12.0
                 ly = (sy + ty) / 2.0 + 3.0
                 anchor = "start"
             d_path = f"M{sx:.1f},{sy:.1f} L{tx:.1f},{ty:.1f}"
+
+        if not sm:
+            port_gaps.append(f"UNRESOLVED_PORT_BINDING: stream {sid} references undeclared source_port {s_port!r} on unit {src}")
+        if not tm:
+            port_gaps.append(f"UNRESOLVED_PORT_BINDING: stream {sid} references undeclared target_port {t_port!r} on unit {tgt}")
+        port_bindings.append({
+            "stream_id": sid, "source": src, "source_port": s_port or "implicit", "source_xy": [round(sx, 1), round(sy, 1)],
+            "target": tgt, "target_port": t_port or "implicit", "target_xy": [round(tx, 1), round(ty, 1)],
+            "resolved": bool(sm and tm),
+        })
 
         attrs = {
             "id": f"stream-{sid}", "d": d_path, "fill": "none",
@@ -276,9 +320,11 @@ def build_apparatus_svg_and_tikz(spec: dict[str, Any], svg_out: Path, tex_out: P
             "data-stream-type": stype, "data-source-ref": str(st.get("source_ref", "")),
             "data-drawio-cell-id": f"stream-{sid}",
             "data-source-unit-id": src, "data-target-unit-id": tgt,
+            "data-source-port": s_port or "implicit", "data-target-port": t_port or "implicit",
+            "data-routing-mode": "orthogonal_corridor" if d_path.count("L") >= 2 else ("quadratic" if "Q" in d_path else "straight"),
         }
-        if dash:
-            attrs["stroke-dasharray"] = dash
+        if dash or st.get("uncertain") or st.get("direction_confirmed") is False:
+            attrs["stroke-dasharray"] = dash or "5,3"
         _add_el(l_streams, "path", attrs)
         lbl = str(st.get("label", "")).strip()
         if lbl:
@@ -497,7 +543,11 @@ def build_apparatus_svg_and_tikz(spec: dict[str, Any], svg_out: Path, tex_out: P
         },
     }
     meta_out.write_text(json.dumps(meta_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return {"svg": str(svg_out), "tex": str(tex_out), "meta": str(meta_out), "units": len(unit_geom), "streams": len(streams)}
+    return {
+        "svg": str(svg_out), "tex": str(tex_out), "meta": str(meta_out),
+        "units": len(unit_geom), "streams": len(streams),
+        "port_bindings": port_bindings, "port_gaps": port_gaps,
+    }
 
 
 def _reroute_svg_streams(root: _StdET.Element, id_index: dict[str, _StdET.Element], moved_units: set[str]) -> list[dict[str, Any]]:
@@ -521,21 +571,40 @@ def _reroute_svg_streams(root: _StdET.Element, id_index: dict[str, _StdET.Elemen
         dist = max(math.hypot(dx, dy), 1e-6)
         ux, uy = dx / dist, dy / dist
         old_d = el.get("d") or ""
+        rmode = el.get("data-routing-mode") or ""
+        is_ortho = (rmode == "orthogonal_corridor") or (old_d.count("L") >= 2) or (el.get("data-stream-type") in ("feedback", "recycle") and "Q" not in old_d)
         if "Q" in old_d:
             px1, py1 = scx - 14.0, sy0 - 2.0
             px2, py2 = tcx + 14.0, ty0 - 6.0
             cy_c = min(py1, py2) - 44.0
             new_d = f"M{px1:.1f},{py1:.1f} Q{(px1 + px2) / 2.0:.1f},{cy_c:.1f} {px2:.1f},{py2:.1f}"
+            new_lx, new_ly = (px1 + px2) / 2.0, 0.25 * py1 + 0.5 * cy_c + 0.25 * py2 - 8.0
+        elif is_ortho:
+            # Preserve orthogonal corridor routing — NEVER flatten feedback/return paths to straight lines!
+            px1, py1 = sx0 + sw + 2.0, scy
+            rx = max(px1 + 18.0, tx0 + tw + 18.0)
+            cy_top = min(sy0, ty0) - 28.0
+            px2, py2 = tcx, ty0 - 6.0
+            new_d = f"M{px1:.1f},{py1:.1f} L{rx:.1f},{py1:.1f} L{rx:.1f},{cy_top:.1f} L{px2:.1f},{cy_top:.1f} L{px2:.1f},{py2:.1f}"
+            new_lx, new_ly = (rx + px2) / 2.0, cy_top - 6.0
         elif abs(ux) >= abs(uy):
             px1 = scx + (1.0 if ux >= 0 else -1.0) * (sw / 2.0 + 2.0)
             px2 = tcx - (1.0 if ux >= 0 else -1.0) * (tw / 2.0 + 5.0)
             new_d = f"M{px1:.1f},{scy:.1f} L{px2:.1f},{tcy:.1f}"
+            new_lx, new_ly = (px1 + px2) / 2.0, (scy + tcy) / 2.0 - 12.0
         else:
             py1 = scy + (1.0 if uy >= 0 else -1.0) * (sh / 2.0 + 2.0)
             py2 = tcy - (1.0 if uy >= 0 else -1.0) * (th / 2.0 + 5.0)
             new_d = f"M{scx:.1f},{py1:.1f} L{tcx:.1f},{py2:.1f}"
+            new_lx, new_ly = (scx + tcx) / 2.0 + 12.0, (py1 + py2) / 2.0 + 3.0
         el.set("d", new_d)
-        rerouted.append({"op": "reroute_stream", "id": el.get("id"), "old_d": old_d, "new_d": new_d})
+        # Synchronize attached streamlabel coordinates with the rerouted path!
+        sid_clean = (el.get("id") or "").removeprefix("stream-")
+        lbl_el = id_index.get(f"streamlabel-{sid_clean}")
+        if lbl_el is not None:
+            lbl_el.set("x", f"{new_lx:.1f}")
+            lbl_el.set("y", f"{new_ly:.1f}")
+        rerouted.append({"op": "reroute_stream", "id": el.get("id"), "preserved_orthogonal": is_ortho, "label_synced": lbl_el is not None, "old_d": old_d, "new_d": new_d})
     return rerouted
 
 
@@ -730,7 +799,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     lint_pre = lint_route_spec(spec)
     if not lint_pre["passed"]:
-        print(json.dumps({"mode": "build", "ok": False, "schema_validation": schema_rep, "lint_pre": lint_pre}, indent=2, ensure_ascii=False))
+        seal_fail = None
+        if case_p is not None:
+            diag_gaps = list(lint_pre.get("blocking_errors") or []) + [str(g.get("message", "")) for g in (lint_pre.get("gaps") or [])]
+            seal_fail = seal_case_result(
+                case_p, result_p, task_id="apparatus-and-technical-route-builder",
+                artifacts=[], sources=[str(args.spec)],
+                uncertainty=diag_gaps,
+                change_records=[{"op": "lint_pre_blocked", "errors": len(lint_pre.get("blocking_errors") or [])}],
+                metrics={"lint_pre_passed": False, "blocking_error_count": len(lint_pre.get("blocking_errors") or [])},
+                status="partial_with_gaps",
+            )
+        print(json.dumps({"mode": "build", "ok": False, "schema_validation": schema_rep, "lint_pre": lint_pre, "result_seal": seal_fail}, indent=2, ensure_ascii=False))
         return 1
 
     built = build_apparatus_svg_and_tikz(spec, svg_p, tex_p, meta_p)

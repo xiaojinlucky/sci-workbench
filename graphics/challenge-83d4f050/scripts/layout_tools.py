@@ -200,6 +200,54 @@ def analyze_layout(xml_text: str, min_spacing: float = 4.0) -> dict[str, Any]:
             if not (a["is_text"] ^ b["is_text"]) and 0.0 < dist < min_spacing:
                 spacing_violations.append({"a": a["id"], "b": b["id"], "dist": round(dist, 2)})
 
+    # Edge-edge crossing audit across Draw.io connectors with distinct endpoints
+    node_centers = {n["id"]: (n["x"] + n["w"] / 2.0, n["y"] + n["h"] / 2.0) for n in nodes}
+    edge_segs: list[tuple[str, str, str, tuple[float, float], tuple[float, float]]] = []
+    for cell in root.findall(".//mxCell"):
+        if cell.get("edge") != "1":
+            continue
+        eid = cell.get("id", "")
+        src = cell.get("source", "")
+        tgt = cell.get("target", "")
+        if src in node_centers and tgt in node_centers:
+            pts = [node_centers[src]]
+            geom = cell.find("mxGeometry")
+            if geom is not None:
+                arr = geom.find("Array")
+                if arr is not None:
+                    for pt in arr.findall("mxPoint"):
+                        pts.append((_as_float(pt.get("x")), _as_float(pt.get("y"))))
+            pts.append(node_centers[tgt])
+            for k in range(len(pts) - 1):
+                edge_segs.append((eid, src, tgt, pts[k], pts[k + 1]))
+
+    def _ccw(p1: tuple[float, float], p2: tuple[float, float], p3: tuple[float, float]) -> float:
+        return (p3[1] - p1[1]) * (p2[0] - p1[0]) - (p2[1] - p1[1]) * (p3[0] - p1[0])
+
+    def _segs_intersect(a1, a2, b1, b2) -> bool:
+        d1 = _ccw(b1, b2, a1)
+        d2 = _ccw(b1, b2, a2)
+        d3 = _ccw(a1, a2, b1)
+        d4 = _ccw(a1, a2, b2)
+        return ((d1 > 1e-6 and d2 < -1e-6) or (d1 < -1e-6 and d2 > 1e-6)) and (
+            (d3 > 1e-6 and d4 < -1e-6) or (d3 < -1e-6 and d4 > 1e-6)
+        )
+
+    edge_crossings: list[dict[str, str]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for i in range(len(edge_segs)):
+        e1, s1, t1, p1, p2 = edge_segs[i]
+        for j in range(i + 1, len(edge_segs)):
+            e2, s2, t2, q1, q2 = edge_segs[j]
+            if e1 == e2 or len({s1, t1} & {s2, t2}) > 0:
+                continue
+            pair = (min(e1, e2), max(e1, e2))
+            if pair in seen_pairs:
+                continue
+            if _segs_intersect(p1, p2, q1, q2):
+                seen_pairs.add(pair)
+                edge_crossings.append({"edge_a": e1, "edge_b": e2})
+
     return {
         "canvas": {"width": page_width, "height": page_height},
         "total_vertices": len(nodes),
@@ -207,4 +255,5 @@ def analyze_layout(xml_text: str, min_spacing: float = 4.0) -> dict[str, Any]:
         "overlaps": overlaps,
         "out_of_bounds": out_of_bounds,
         "spacing_violations": spacing_violations,
+        "edge_crossings": edge_crossings,
     }

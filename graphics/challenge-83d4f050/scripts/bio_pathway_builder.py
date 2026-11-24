@@ -62,7 +62,7 @@ _POLARITY_STYLE = {
     "activate": ("#2E6B8E", "url(#arrow-activate)", ""),
     "inhibit": ("#B85F56", "url(#arrow-inhibit)", ""),
     "bind": ("#4E9187", "url(#arrow-bind)", ""),
-    "modify": ("#D19A45", "url(#arrow-activate)", ""),
+    "modify": ("#D19A45", "url(#arrow-modify)", ""),
     "transport": ("#547FA3", "url(#arrow-transport)", "6,4"),
     "transcribe": ("#967A9C", "url(#arrow-transcribe)", "4,3"),
     "secrete": ("#83A47B", "url(#arrow-transport)", "6,4"),
@@ -177,6 +177,10 @@ def build_pathway_svg(spec: dict[str, Any], svg_out: Path, *, data_table: Path |
     right_corridor = 68.0
     top_y = 74.0 if subtitle else 50.0
     legend_h = 84.0 if has_expr else 64.0
+    n_fb_est = sum(1 for e in edges if bool(e.get("feedback")))
+    right_corridor = max(float(spec.get("right_corridor", 110.0)), 54.0 + max(n_fb_est, 1) * 20.0)
+    if right_corridor > 140.0:
+        width = max(width, float(spec.get("width", 1120)) + (right_corridor - 110.0))
     usable_w = width - 2 * pad_x
     band_w = usable_w - right_corridor
     usable_h = height - top_y - legend_h - 18.0
@@ -223,14 +227,18 @@ def build_pathway_svg(spec: dict[str, Any], svg_out: Path, *, data_table: Path |
             c_idx = idx % cols
             eid = str(ent["id"])
             has_val = eid in table_rows
-            w = float(ent.get("width", min(cell_w * 0.78, max(106.0, len(str(ent["name"])) * 8.2 + 30.0))))
-            h = float(ent.get("height", 46.0 if has_val else 38.0))
+            # High-density auto-compaction so dense compartments never burst their bounding box
+            compact_mode = (rows * (46.0 if has_val else 38.0) + 34.0) > bh
+            default_h = (36.0 if has_val else 30.0) if compact_mode else (46.0 if has_val else 38.0)
+            w = float(ent.get("width", min(cell_w * 0.78, max(98.0 if compact_mode else 106.0, len(str(ent["name"])) * 7.8 + 26.0))))
+            h = float(ent.get("height", min(default_h, max(28.0, cell_h * 0.76))))
             cx = float(ent["x"]) if "x" in ent else (bx + 22.0 + (c_idx + 0.5) * cell_w)
             cy = float(ent["y"]) if "y" in ent else (by + 28.0 + (r_idx + 0.5) * cell_h)
             node_geom[eid] = {
                 "ent": ent, "cx": cx, "cy": cy, "w": w, "h": h,
                 "x": cx - w / 2.0, "y": cy - h / 2.0, "comp": cid,
                 "rank": comp_rank_by_id.get(cid, 2),
+                "compacted": compact_mode,
             }
 
     root = _StdET.Element(f"{{{SVG_NS}}}svg", {
@@ -243,8 +251,12 @@ def build_pathway_svg(spec: dict[str, Any], svg_out: Path, *, data_table: Path |
     defs = _add_el(root, "defs")
     m_act = _add_el(defs, "marker", {"id": "arrow-activate", "markerWidth": "10", "markerHeight": "10", "refX": "9", "refY": "3.5", "orient": "auto"})
     _add_el(m_act, "path", {"d": "M0,0 L9,3.5 L0,7 Z", "fill": "#2E6B8E"})
+    m_mod = _add_el(defs, "marker", {"id": "arrow-modify", "markerWidth": "10", "markerHeight": "10", "refX": "9", "refY": "3.5", "orient": "auto"})
+    _add_el(m_mod, "path", {"d": "M0,0 L9,3.5 L0,7 Z", "fill": "#D19A45"})
     m_inh = _add_el(defs, "marker", {"id": "arrow-inhibit", "markerWidth": "8", "markerHeight": "14", "refX": "4", "refY": "7", "orient": "auto"})
     _add_el(m_inh, "line", {"x1": "4", "y1": "1", "x2": "4", "y2": "13", "stroke": "#B85F56", "stroke-width": "2.4"})
+    m_inh_u = _add_el(defs, "marker", {"id": "arrow-inhibit-uncertain", "markerWidth": "10", "markerHeight": "14", "refX": "5", "refY": "7", "orient": "auto"})
+    _add_el(m_inh_u, "line", {"x1": "5", "y1": "1", "x2": "5", "y2": "13", "stroke": "#B85F56", "stroke-width": "2.2", "stroke-dasharray": "3,2"})
     m_bind = _add_el(defs, "marker", {"id": "arrow-bind", "markerWidth": "8", "markerHeight": "8", "refX": "4", "refY": "4", "orient": "auto"})
     _add_el(m_bind, "circle", {"cx": "4", "cy": "4", "r": "3", "fill": "#4E9187"})
     m_tr = _add_el(defs, "marker", {"id": "arrow-transport", "markerWidth": "10", "markerHeight": "10", "refX": "9", "refY": "3.5", "orient": "auto"})
@@ -312,7 +324,10 @@ def build_pathway_svg(spec: dict[str, Any], svg_out: Path, *, data_table: Path |
         uncertain = bool(edge.get("uncertain", False))
         col, marker_ref, dash = _POLARITY_STYLE.get(pol, ("#2E6B8E", "url(#arrow-activate)", ""))
         if uncertain:
-            col, marker_ref, dash = _POLARITY_STYLE["transport"]
+            # Separate polarity from certainty: NEVER replace inhibit T-bar with an open arrow!
+            dash = "4,3"
+            if pol == "inhibit":
+                marker_ref = "url(#arrow-inhibit-uncertain)"
         sg, tg = node_geom[s_id], node_geom[t_id]
         dx, dy = tg["cx"] - sg["cx"], tg["cy"] - sg["cy"]
         dist = max(math.hypot(dx, dy), 1e-6)
@@ -377,22 +392,40 @@ def build_pathway_svg(spec: dict[str, Any], svg_out: Path, *, data_table: Path |
                 "font-size": "9.0", "fill": col, "font-weight": "bold", "text-anchor": anchor,
             }, elabel)
 
-    # Layer 4: Biological Entities (Nodes) with optional diverging expression coloring
+    # Layer 4: Biological Entities (Nodes) with optional diverging expression + padj significance encoding
     layer_nodes = _add_el(root, "g", {"id": "layer-nodes", "data-layer-name": "nodes"})
     data_bound_count = 0
     na_count = 0
     zero_count = 0
+    sig_count = 0
+    clamped_nodes: list[dict[str, Any]] = []
     for eid, g in node_geom.items():
         ent = g["ent"]
         etype = str(ent.get("entity_type", "protein")).lower()
         fc, ec, tc, shape = _ENTITY_STYLE.get(etype, ("#66A9B4", "#35666E", "#FFFFFF", "roundrect"))
         fc = str(ent.get("color", fc))
         val_txt = ""
+        sig_star = ""
+        node_sw = "1.6"
         if eid in table_rows:
             row = table_rows[eid]
             raw_v = row.get(expr_col, "")
             num_v = _parse_float(raw_v)
             fc, tc = _diverging_color(num_v, clamp=expr_clamp)
+            if num_v is not None and abs(num_v) > expr_clamp:
+                clamped_nodes.append({
+                    "node_id": eid,
+                    "raw_value": num_v,
+                    "clamped_to": expr_clamp if num_v > 0 else -expr_clamp,
+                    "unit": expr_unit,
+                })
+            padj_raw = next((row[k] for k in row if k.strip().lower() in ("padj", "fdr", "qval", "p_adj")), "")
+            padj_v = _parse_float(padj_raw) if padj_raw else None
+            if padj_v is not None and padj_v < 0.05:
+                sig_count += 1
+                sig_star = "***" if padj_v < 0.001 else ("**" if padj_v < 0.01 else "*")
+                node_sw = "2.4"
+                ec = "#1E293B"
             if num_v is None:
                 val_txt = "NA"
                 na_count += 1
@@ -400,7 +433,7 @@ def build_pathway_svg(spec: dict[str, Any], svg_out: Path, *, data_table: Path |
                 if num_v == 0.0:
                     zero_count += 1
                 sign = "+" if num_v > 0 else ""
-                val_txt = f"{sign}{num_v:.2f} {expr_unit}"
+                val_txt = f"{sign}{num_v:.2f} {expr_unit}{(' ' + sig_star) if sig_star else ''}"
             data_bound_count += 1
 
         attrs_common = {
@@ -411,12 +444,14 @@ def build_pathway_svg(spec: dict[str, Any], svg_out: Path, *, data_table: Path |
             "data-compartment": str(ent.get("compartment", "")),
             "data-source-ref": str(ent.get("source_ref", "")),
         }
+        if sig_star:
+            attrs_common["data-padj-sig"] = sig_star
         if shape == "ellipse":
             _add_el(layer_nodes, "ellipse", {
                 **attrs_common,
                 "cx": f"{g['cx']:.1f}", "cy": f"{g['cy']:.1f}",
                 "rx": f"{g['w']/2:.1f}", "ry": f"{g['h']/2:.1f}",
-                "fill": fc, "stroke": ec, "stroke-width": "1.6",
+                "fill": fc, "stroke": ec, "stroke-width": node_sw,
             })
         else:
             _add_el(layer_nodes, "rect", {
@@ -424,7 +459,7 @@ def build_pathway_svg(spec: dict[str, Any], svg_out: Path, *, data_table: Path |
                 "x": f"{g['x']:.1f}", "y": f"{g['y']:.1f}",
                 "width": f"{g['w']:.1f}", "height": f"{g['h']:.1f}",
                 "rx": "8" if shape == "roundrect" else "2",
-                "fill": fc, "stroke": ec, "stroke-width": "1.6",
+                "fill": fc, "stroke": ec, "stroke-width": node_sw,
             })
         txt_attrs = {
             "id": f"nodelabel-{eid}",
@@ -496,27 +531,32 @@ def build_pathway_svg(spec: dict[str, Any], svg_out: Path, *, data_table: Path |
         _add_el(layer_leg, "text", {
             "id": "expr-scale-title", "x": f"{pad_x + 14.0:.1f}", "y": f"{cy_bar + 10:.1f}",
             "font-family": "Arial, Liberation Sans, DejaVu Sans, sans-serif",
-            "font-size": "9.2", "font-weight": "bold", "fill": "#1A1A1A",
-        }, f"Node Fill ({expr_unit}, center=0):")
+            "font-size": "9.0", "font-weight": "bold", "fill": "#1A1A1A",
+        }, f"Fill ({expr_unit}, clamp ±{expr_clamp:g}):")
         swatches = [(-expr_clamp, f"-{expr_clamp:g}"), (-expr_clamp / 2, f"-{expr_clamp/2:g}"), (0.0, "0.0"), (expr_clamp / 2, f"+{expr_clamp/2:g}"), (expr_clamp, f"+{expr_clamp:g}")]
         sx0 = pad_x + 195.0
         for si, (sv, slbl) in enumerate(swatches):
             scol, _ = _diverging_color(sv, clamp=expr_clamp)
             _add_el(layer_leg, "rect", {"x": f"{sx0 + si * 58:.1f}", "y": f"{cy_bar:.1f}", "width": "16", "height": "12", "rx": "2", "fill": scol, "stroke": "#555555", "stroke-width": "0.6"})
             _add_el(layer_leg, "text", {"x": f"{sx0 + si * 58 + 20:.1f}", "y": f"{cy_bar + 10:.1f}", "font-family": "Arial, Liberation Sans, DejaVu Sans, sans-serif", "font-size": "8.8", "fill": "#333333"}, slbl)
-        # Explicit NA swatch separate from 0.0
-        nax = sx0 + len(swatches) * 58 + 18.0
-        _add_el(layer_leg, "rect", {"x": f"{nax:.1f}", "y": f"{cy_bar:.1f}", "width": "16", "height": "12", "rx": "2", "fill": "#737373", "stroke": "#333333", "stroke-width": "0.6"})
-        _add_el(layer_leg, "text", {"x": f"{nax + 20:.1f}", "y": f"{cy_bar + 10:.1f}", "font-family": "Arial, Liberation Sans, DejaVu Sans, sans-serif", "font-size": "8.8", "fill": "#333333"}, "NA (not measured)")
-        _add_el(layer_leg, "text", {"x": f"{nax + 135:.1f}", "y": f"{cy_bar + 10:.1f}", "font-family": "Arial, Liberation Sans, DejaVu Sans, sans-serif", "font-size": "8.8", "font-style": "italic", "fill": "#547FA3"}, "Italic = Gene | Upright = Protein")
+        # Explicit NA swatch separate from 0.0 + padj significance key
+        nax = sx0 + len(swatches) * 58 + 14.0
+        _add_el(layer_leg, "rect", {"x": f"{nax:.1f}", "y": f"{cy_bar:.1f}", "width": "14", "height": "12", "rx": "2", "fill": "#737373", "stroke": "#333333", "stroke-width": "0.6"})
+        _add_el(layer_leg, "text", {"x": f"{nax + 18:.1f}", "y": f"{cy_bar + 10:.1f}", "font-family": "Arial, Liberation Sans, DejaVu Sans, sans-serif", "font-size": "8.4", "fill": "#333333"}, "NA")
+        _add_el(layer_leg, "text", {"x": f"{nax + 44:.1f}", "y": f"{cy_bar + 10:.1f}", "font-family": "Arial, Liberation Sans, DejaVu Sans, sans-serif", "font-size": "8.4", "font-weight": "bold", "fill": "#1E293B"}, "* padj<0.05 (bold border)")
+        _add_el(layer_leg, "text", {"x": f"{nax + 178:.1f}", "y": f"{cy_bar + 10:.1f}", "font-family": "Arial, Liberation Sans, DejaVu Sans, sans-serif", "font-size": "8.4", "font-style": "italic", "fill": "#547FA3"}, "Italic=Gene | Upright=Protein")
 
     svg_out.parent.mkdir(parents=True, exist_ok=True)
     _StdET.indent(root, space="  ")
     svg_out.write_bytes(b'<?xml version="1.0" encoding="utf-8"?>\n' + _StdET.tostring(root, encoding="utf-8"))
+    compacted_comps = sorted({g["comp"] for g in node_geom.values() if g.get("compacted")})
     return {
         "svg": str(svg_out), "nodes": len(node_geom), "edges": len(edges),
         "compartments": len(comp_sorted), "data_bound_nodes": data_bound_count,
+        "significant_padj_nodes": sig_count,
         "explicit_zero_nodes": zero_count, "na_nodes": na_count,
+        "clamped_nodes": clamped_nodes,
+        "compacted_compartments": compacted_comps,
     }
 
 
@@ -727,6 +767,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.edit_svg:
             srcs = [str(args.edit_svg)]
         uncert = [str(g.get("message", g.get("code", ""))) for g in (lint_final.get("gaps") or [])]
+        for cn in ((summary.get("build") or {}).get("clamped_nodes") or []):
+            uncert.append(
+                f"CLAMP_TRUNCATION_DISCLOSURE: Node {cn['node_id']} raw value {cn['raw_value']} {cn['unit']} color-clamped at {cn['clamped_to']} (exact numeric label preserved on node)"
+            )
         if (summary["portable_svg"].get("font_audit") or {}).get("warnings"):
             uncert.extend(summary["portable_svg"]["font_audit"]["warnings"])
         arts = [svg_path.name, drawio_path.name, png_path.name, pdf_path.name]

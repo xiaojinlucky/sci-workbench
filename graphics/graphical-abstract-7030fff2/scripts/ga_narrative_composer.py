@@ -167,12 +167,17 @@ def _render_subpanel_svg(
     m_flw = _add_el(defs, "marker", {"id": "sub-arrow-flow", "viewBox": "0 0 10 10", "refX": "9", "refY": "5", "markerWidth": "5.5", "markerHeight": "5.5", "orient": "auto"})
     _add_el(m_flw, "path", {"d": "M 1 2 L 9 5 L 1 8", "fill": "none", "stroke": "#4E9187", "stroke-width": "1.6"})
 
-    # Card frame & header bar
-    _add_el(root, "rect", {
+    # Card frame & header bar (embed element-level provenance anchors)
+    card_attrs = {
         "id": f"card-bg-{pid}", "x": "0.8", "y": "0.8",
         "width": f"{pw - 1.6:.2f}", "height": f"{ph - 1.6:.2f}",
         "rx": "4.5", "fill": "#FAFBFD", "stroke": accent, "stroke-width": "1.05",
-    })
+    }
+    if panel.get("source_ref"):
+        card_attrs["data-source-ref"] = str(panel["source_ref"])
+    if panel.get("source_block_id"):
+        card_attrs["data-source-block"] = str(panel["source_block_id"])
+    _add_el(root, "rect", card_attrs)
     hdr_h = 13.8 if compact_h else (17.5 if narrow else 20.0)
     _add_el(root, "rect", {
         "id": f"card-hdr-{pid}", "x": "0.8", "y": "0.8",
@@ -283,26 +288,41 @@ def _render_subpanel_svg(
                     "id": f"minibar-{pid}-{bi+1}", "cx": f"{cx:.1f}", "cy": f"{zero_y:.1f}",
                     "r": "2.1", "fill": "#FFFFFF", "stroke": bcol, "stroke-width": "1.5",
                 })
-                val_y = zero_y - 4.8
+                top_y, bh = zero_y, 0.0
             else:
                 vy = _y_map(val)
                 top_y = min(vy, zero_y)
-                bh = max(2.2, abs(vy - zero_y))
-                _add_el(root, "rect", {
-                    "id": f"minibar-{pid}-{bi+1}", "x": f"{bx:.1f}", "y": f"{top_y:.1f}",
-                    "width": f"{bar_w:.1f}", "height": f"{bh:.1f}", "rx": "1.4",
-                    "fill": bcol, "stroke": "#1F2937", "stroke-width": "0.55",
-                })
-                if err > 0.0:
-                    ey_hi = _y_map(val + err)
-                    ey_lo = _y_map(val - err)
-                    _add_el(root, "line", {"id": f"minierr-{pid}-{bi+1}", "x1": f"{cx:.1f}", "y1": f"{ey_hi:.1f}", "x2": f"{cx:.1f}", "y2": f"{ey_lo:.1f}", "stroke": "#111827", "stroke-width": "0.75"})
-                    _add_el(root, "line", {"x1": f"{cx - 2.6:.1f}", "y1": f"{ey_hi:.1f}", "x2": f"{cx + 2.6:.1f}", "y2": f"{ey_hi:.1f}", "stroke": "#111827", "stroke-width": "0.75"})
-                    _add_el(root, "line", {"x1": f"{cx - 2.6:.1f}", "y1": f"{ey_lo:.1f}", "x2": f"{cx + 2.6:.1f}", "y2": f"{ey_lo:.1f}", "stroke": "#111827", "stroke-width": "0.75"})
-                    val_y = (ey_hi - 3.0) if val >= 0 else (ey_lo + val_fs + 1.5)
+                # Strict linear mapping: NEVER artificially inflate small bar heights!
+                bh = abs(vy - zero_y)
+                if bh >= 0.4:
+                    _add_el(root, "rect", {
+                        "id": f"minibar-{pid}-{bi+1}", "x": f"{bx:.1f}", "y": f"{top_y:.1f}",
+                        "width": f"{bar_w:.1f}", "height": f"{bh:.2f}", "rx": f"{min(1.4, bh / 2.0):.2f}",
+                        "fill": bcol, "stroke": "#1F2937", "stroke-width": "0.55",
+                    })
                 else:
-                    val_y = (top_y - 3.0) if val >= 0 else (top_y + bh + val_fs + 1.5)
-            unit = str(b.get("unit", "") if "unit" in b else "x").strip()
+                    # Sub-pixel non-zero value: mark true position with baseline indicator dot without distorting length
+                    _add_el(root, "circle", {
+                        "id": f"minibar-{pid}-{bi+1}", "cx": f"{cx:.1f}", "cy": f"{vy:.2f}",
+                        "r": "1.8", "fill": bcol, "stroke": "#1F2937", "stroke-width": "0.55",
+                    })
+            # Decouple error bar rendering from val == 0.0 so 0 +- err always renders accurately!
+            if err > 0.0:
+                ey_hi = _y_map(val + err)
+                ey_lo = _y_map(val - err)
+                _add_el(root, "line", {"id": f"minierr-{pid}-{bi+1}", "x1": f"{cx:.1f}", "y1": f"{ey_hi:.1f}", "x2": f"{cx:.1f}", "y2": f"{ey_lo:.1f}", "stroke": "#111827", "stroke-width": "0.75"})
+                _add_el(root, "line", {"x1": f"{cx - 2.6:.1f}", "y1": f"{ey_hi:.1f}", "x2": f"{cx + 2.6:.1f}", "y2": f"{ey_hi:.1f}", "stroke": "#111827", "stroke-width": "0.75"})
+                _add_el(root, "line", {"x1": f"{cx - 2.6:.1f}", "y1": f"{ey_lo:.1f}", "x2": f"{cx + 2.6:.1f}", "y2": f"{ey_lo:.1f}", "stroke": "#111827", "stroke-width": "0.75"})
+                val_y = (ey_hi - 3.0) if val >= 0 else (ey_lo + val_fs + 1.5)
+            else:
+                val_y = (zero_y - 4.8) if val == 0.0 else ((top_y - 3.0) if val >= 0 else (top_y + bh + val_fs + 1.5))
+            # NEVER invent default unit "x": missing unit must be disclosed explicitly as unit_unknown
+            has_unit_key = "unit" in b and str(b.get("unit", "")).strip() != ""
+            unit = str(b.get("unit", "")).strip() if has_unit_key else ""
+            if "unit" not in b:
+                panel.setdefault("_panel_gaps", []).append(
+                    f"MISSING_METRIC_UNIT: panel {pid} bar {b.get('label')!r} omits 'unit' (rendered unitless; unit_unknown)"
+                )
             val_txt = f"{val:g}{unit}"
             _add_el(root, "text", {
                 "id": f"minibar-val-{pid}-{bi+1}", "x": f"{cx:.1f}", "y": f"{val_y:.1f}",
@@ -349,11 +369,14 @@ def _render_subpanel_svg(
                 "width": f"{tile_w:.1f}", "height": f"{tile_h:.1f}", "rx": "4",
                 "fill": "#FFFFFF", "stroke": mc, "stroke-width": "1.0",
             })
+            m_txt = str(m.get("metric", ""))
+            m_base_fs = 8.8 if not narrow else 7.6
+            m_fs = max(6.5, min(m_base_fs, (tile_w - 6.0) / max(len(m_txt) * 0.58, 1.0)))
             _add_el(root, "text", {
                 "id": f"metric-val-{pid}-{mi+1}", "x": f"{tx + tile_w / 2.0:.1f}", "y": f"{ty + tile_h * 0.46:.1f}",
                 "font-family": "Arial, Liberation Sans, DejaVu Sans, sans-serif",
-                "font-size": f"{8.8 if not narrow else 7.6:.1f}", "font-weight": "bold", "fill": mc, "text-anchor": "middle",
-            }, str(m.get("metric", "")))
+                "font-size": f"{m_fs:.1f}", "font-weight": "bold", "fill": mc, "text-anchor": "middle",
+            }, m_txt)
             ml_lines, _ = _wrap_to_width(str(m.get("label", "")), tile_w - 5.0, 6.5, max_lines=2)
             _add_wrapped_text(
                 root, base_id=f"metric-lbl-{pid}-{mi+1}", x=tx + tile_w / 2.0, y_start=ty + tile_h * 0.72,
@@ -363,11 +386,44 @@ def _render_subpanel_svg(
     elif diagram or nodes:
         d_nodes = list(diagram.get("nodes") or nodes)
         d_links = list(diagram.get("links") or [])
-        n_cnt = min(len(d_nodes), 3)
-        horiz_mode = compact_h and n_cnt == 2 and inner_w >= 115.0
-        node_fs = 6.5 if (narrow or compact_h or n_cnt == 3) else 7.0
+        if len(d_nodes) > 4:
+            panel.setdefault("_panel_gaps", []).append(
+                f"MECHANISM_NODE_OVERFLOW_PARTIAL: panel {pid} has {len(d_nodes)} nodes; max 4 fit per micro-grid without clipping (split panel or enlarge canvas)"
+            )
+        n_cnt = min(len(d_nodes), 4)
+        grid_2x2_mode = n_cnt == 4
+        horiz_mode = (not grid_2x2_mode) and compact_h and n_cnt == 2 and inner_w >= 115.0
+        node_fs = 6.2 if grid_2x2_mode else (6.5 if (narrow or compact_h or n_cnt == 3) else 7.0)
         coords: list[tuple[float, float, float, float]] = []
-        if horiz_mode:
+        if grid_2x2_mode:
+            gap_h, gap_v = 10.0, 9.0
+            box_w = (inner_w - gap_h) / 2.0
+            box_h = min(22.0, (mid_h - gap_v - 4.0) / 2.0)
+            start_y = mid_y0 + max(1.0, (mid_h - (2 * box_h + gap_v)) / 2.0)
+            for ni in range(4):
+                nd = d_nodes[ni]
+                rr, cc = ni // 2, ni % 2
+                nx = pad_x + cc * (box_w + gap_h)
+                ny = start_y + rr * (box_h + gap_v)
+                ncol = str(nd.get("color", accent))
+                shape = str(nd.get("shape", "roundrect")).lower()
+                rx_val = f"{box_h / 2.0:.1f}" if shape in ("pill", "ellipse") else "3.8"
+                _add_el(root, "rect", {
+                    "id": f"motif-box-{pid}-{ni+1}",
+                    "x": f"{nx:.1f}", "y": f"{ny:.1f}", "width": f"{box_w:.1f}", "height": f"{box_h:.1f}",
+                    "rx": rx_val, "fill": ncol, "stroke": "#1E293B", "stroke-width": "0.6",
+                })
+                nl_lines, n_ov = _wrap_to_width(str(nd.get("label", "")), box_w - 5.0, node_fs, max_lines=2, bold=True)
+                if n_ov:
+                    overflows.append(f"panel {pid} node label {nd.get('label')!r} exceeds box width")
+                n_start_y = ny + box_h / 2.0 + (node_fs * 0.34 if len(nl_lines) == 1 else -node_fs * 0.14)
+                _add_wrapped_text(
+                    root, base_id=f"motif-lbl-{pid}-{ni+1}", x=nx + box_w / 2.0, y_start=n_start_y,
+                    lines=nl_lines[:2], font_pt=node_fs, line_step=node_fs + 0.9,
+                    fill="#FFFFFF", anchor="middle", weight="bold",
+                )
+                coords.append((nx, ny, box_w, box_h))
+        elif horiz_mode:
             gap_h = 16.0
             box_w = (inner_w - gap_h) / 2.0
             box_h = min(24.0, mid_h - 2.0)
@@ -421,29 +477,31 @@ def _render_subpanel_svg(
                 )
                 coords.append((nx, ny, box_w, box_h))
 
-        # Typed mechanism links (default sequential flow if none supplied)
-        if not d_links and n_cnt >= 2:
-            d_links = [{"from": i, "to": i + 1, "relation": "activate"} for i in range(n_cnt - 1)]
+        # Typed mechanism links: NEVER fabricate causal 'activate' arrows when links are omitted!
         for li, lk in enumerate(d_links):
             fi, ti = int(lk.get("from", 0)), int(lk.get("to", 1))
             if 0 <= fi < len(coords) and 0 <= ti < len(coords) and fi != ti:
                 x1, y1, w1, h1 = coords[fi]
                 x2, y2, w2, h2 = coords[ti]
-                rel = str(lk.get("relation", "activate")).lower()
+                rel = str(lk.get("relation", "flow")).lower()
                 if rel in ("inhibit", "block"):
                     scol, mref, dash = "#B85F56", "url(#sub-arrow-inh)", ""
-                elif rel in ("flow", "transport", "uncertain"):
+                elif rel in ("flow", "transport", "uncertain", "sequence"):
                     scol, mref, dash = "#4E9187", "url(#sub-arrow-flow)", "3,2"
                 else:
                     scol, mref, dash = "#2E6B8E", "url(#sub-arrow-act)", ""
-                if horiz_mode:
-                    lx1, ly1 = x1 + w1 + 1.0, y1 + h1 / 2.0
-                    lx2, ly2 = x2 - 2.2, y2 + h2 / 2.0
+                dx_n = (x2 + w2 / 2.0) - (x1 + w1 / 2.0)
+                dy_n = (y2 + h2 / 2.0) - (y1 + h1 / 2.0)
+                if abs(dx_n) >= abs(dy_n):
+                    lx1 = (x1 + w1 + 1.0) if dx_n >= 0 else (x1 - 1.0)
+                    lx2 = (x2 - 2.2) if dx_n >= 0 else (x2 + w2 + 2.2)
+                    ly1, ly2 = y1 + h1 / 2.0, y2 + h2 / 2.0
                     lbl_x, lbl_y, lbl_anc = (lx1 + lx2) / 2.0, min(y1, y2) - 2.2, "middle"
                 else:
-                    lx1, ly1 = pw / 2.0, y1 + h1 + 0.8
-                    lx2, ly2 = pw / 2.0, y2 - 2.0
-                    lbl_x, lbl_y, lbl_anc = pw / 2.0 + 5.0, (y1 + h1 + y2) / 2.0 + 2.2, "start"
+                    lx1, lx2 = x1 + w1 / 2.0, x2 + w2 / 2.0
+                    ly1 = (y1 + h1 + 0.8) if dy_n >= 0 else (y1 - 0.8)
+                    ly2 = (y2 - 2.0) if dy_n >= 0 else (y2 + h2 + 2.0)
+                    lbl_x, lbl_y, lbl_anc = (lx1 + lx2) / 2.0 + 4.0, (ly1 + ly2) / 2.0 + 2.2, "start"
                 la = {
                     "id": f"motif-link-{pid}-{li+1}",
                     "x1": f"{lx1:.1f}", "y1": f"{ly1:.1f}",
@@ -617,25 +675,34 @@ def compose_graphical_abstract(
             fill="#475569", anchor="start",
         )
 
-    # Shared cross-panel visual key strip
+    # Shared cross-panel visual key strip (bounded within canvas width so narrow 120mm canvases never clip)
     if entity_colors:
         l_leg = _add_el(root, "g", {"id": "layer-shared-legend", "data-layer-name": "shared-legend"})
         ly = by + 2.0
+        leg_fs = 6.5 if width_mm < 140 else 6.6
+        items_leg = [(str(k).replace("_", " "), str(v)) for k, v in entity_colors.items()]
+        usable_leg_w = to_pt(width_mm, "mm") - 2.0 * mx
+        item_widths = [11.5 + _text_width_pt(lbl, leg_fs) for lbl, _ in items_leg]
+        total_w = sum(item_widths) + 7.0 * max(0, len(items_leg) - 1)
+        if total_w > usable_leg_w and items_leg:
+            # Shorten labels gently & tighten gap so all items stay strictly inside canvas margins
+            max_lbl_chars = max(8, int((usable_leg_w / len(items_leg) - 15.0) / (leg_fs * 0.56)))
+            items_leg = [(lbl[:max_lbl_chars].rstrip() if len(lbl) > max_lbl_chars else lbl, col) for lbl, col in items_leg]
+            item_widths = [11.0 + _text_width_pt(lbl, leg_fs) for lbl, _ in items_leg]
+        gap_leg = min(8.0, max(3.5, (usable_leg_w - sum(item_widths)) / max(1, len(items_leg) - 1))) if len(items_leg) > 1 else 0.0
         lx = mx
-        leg_fs = 6.6
-        for ei, (ekey, ecol) in enumerate(entity_colors.items()):
-            lbl = str(ekey).replace("_", " ")
+        for ei, ((lbl, ecol), iw) in enumerate(zip(items_leg, item_widths)):
             _add_el(l_leg, "rect", {
                 "id": f"ga-leg-swatch-{ei+1}", "x": f"{lx:.1f}", "y": f"{ly - 6.0:.1f}",
-                "width": "7.5", "height": "7.5", "rx": "1.5",
-                "fill": str(ecol), "stroke": "#334155", "stroke-width": "0.5",
+                "width": "7.2", "height": "7.2", "rx": "1.5",
+                "fill": ecol, "stroke": "#334155", "stroke-width": "0.5",
             })
             _add_el(l_leg, "text", {
-                "id": f"ga-leg-lbl-{ei+1}", "x": f"{lx + 10.5:.1f}", "y": f"{ly + 0.2:.1f}",
+                "id": f"ga-leg-lbl-{ei+1}", "x": f"{lx + 9.5:.1f}", "y": f"{ly + 0.2:.1f}",
                 "font-family": "Arial, Liberation Sans, DejaVu Sans, sans-serif",
                 "font-size": f"{leg_fs:.1f}", "fill": "#1E293B",
             }, lbl)
-            lx += 14.0 + _text_width_pt(lbl, leg_fs) + 8.0
+            lx += iw + gap_leg
 
     # Directional inter-panel stage arrows (1->2->3->4 in both 1x4 and 2x2 layouts!)
     l_flow = _add_el(root, "g", {"id": "layer-narrative-flow", "data-layer-name": "narrative-flow"})
@@ -655,11 +722,17 @@ def compose_graphical_abstract(
         x1 = to_pt(margin_mm + panel_w_mm + 0.5, "mm")
         x2 = to_pt(margin_mm + panel_w_mm + gap_mm - 0.8, "mm")
         _add_el(l_flow, "line", {"id": "stage-arrow-1to2", "x1": f"{x1:.2f}", "y1": f"{y_r1:.2f}", "x2": f"{x2:.2f}", "y2": f"{y_r1:.2f}", "stroke": "#475569", "stroke-width": "1.5", "marker-end": "url(#ga-stage-arrow)"})
-        # Diagonal / vertical bridge: Row 1 -> Row 2 (2 -> 3 via gutter)
+        # Stepped bridge from Panel 2 (top-right) -> Panel 3 (bottom-left) cleanly through center gutter!
         y_gap1 = to_pt(header_mm + panel_h_mm + 0.5, "mm")
         y_gap2 = to_pt(header_mm + panel_h_mm + gap_mm - 0.8, "mm")
+        y_gmid = (y_gap1 + y_gap2) / 2.0
         xc_left = to_pt(margin_mm + panel_w_mm * 0.5, "mm")
-        _add_el(l_flow, "line", {"id": "stage-arrow-2to3", "x1": f"{xc_left:.2f}", "y1": f"{y_gap1:.2f}", "x2": f"{xc_left:.2f}", "y2": f"{y_gap2:.2f}", "stroke": "#475569", "stroke-width": "1.5", "marker-end": "url(#ga-stage-arrow)"})
+        xc_right = to_pt(margin_mm + panel_w_mm + gap_mm + panel_w_mm * 0.5, "mm")
+        _add_el(l_flow, "path", {
+            "id": "stage-arrow-2to3",
+            "d": f"M {xc_right:.2f} {y_gap1:.2f} L {xc_right:.2f} {y_gmid:.2f} L {xc_left:.2f} {y_gmid:.2f} L {xc_left:.2f} {y_gap2:.2f}",
+            "fill": "none", "stroke": "#475569", "stroke-width": "1.5", "marker-end": "url(#ga-stage-arrow)",
+        })
         # Row 2: 3 -> 4
         y_r2 = to_pt(header_mm + panel_h_mm + gap_mm + panel_h_mm * 0.5, "mm")
         _add_el(l_flow, "line", {"id": "stage-arrow-3to4", "x1": f"{x1:.2f}", "y1": f"{y_r2:.2f}", "x2": f"{x2:.2f}", "y2": f"{y_r2:.2f}", "stroke": "#475569", "stroke-width": "1.5", "marker-end": "url(#ga-stage-arrow)"})
@@ -740,6 +813,7 @@ def source_preserving_patch_ga_svg(svg_in: Path, patch: dict[str, Any], svg_out:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compose or source-preserving edit single-page Graphical Abstract.")
     parser.add_argument("--spec", help="GA JSON spec for build mode")
+    parser.add_argument("--from-input", default="", help="Optional raw /input directory to auto-extract grounded GA spec draft before composing")
     parser.add_argument("--edit-svg", help="Existing GA SVG for source-preserving edit mode")
     parser.add_argument("--patch", help="Patch JSON file for edit mode")
     parser.add_argument("--out-dir", default="")
@@ -796,10 +870,16 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"mode": "edit", "ok": ok, "edit_diff": diff, "render": ren, "audit": aud, "result_seal": seal_rep}, indent=2, ensure_ascii=False))
         return 0 if ok else 1
 
-    if not args.spec:
-        raise SystemExit("Provide --spec or --edit-svg")
-    spec_p = Path(args.spec).resolve()
-    spec = json.loads(spec_p.read_text(encoding="utf-8-sig"))
+    if not args.spec and not args.from_input:
+        raise SystemExit("Provide --spec, --from-input, or --edit-svg")
+    if args.from_input and not args.spec:
+        from draft_ga_spec import draft_ga_spec_from_input
+        spec = draft_ga_spec_from_input(Path(args.from_input))
+        spec_p = out_dir / f"{args.stem}_draft_spec.json"
+        spec_p.write_text(json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    else:
+        spec_p = Path(args.spec).resolve()
+        spec = json.loads(spec_p.read_text(encoding="utf-8-sig"))
     try:
         comp_rep = compose_graphical_abstract(spec, svg_p, base_dir=spec_p.parent, strict_overflow=not args.allow_overflow)
     except LayoutOverflowError as exc:
@@ -812,20 +892,35 @@ def main(argv: list[str] | None = None) -> int:
     caption_p = out_dir / f"{args.stem}_caption_draft.md"
     _write_caption_draft(spec, caption_p)
 
+    panel_gaps: list[str] = []
+    for p in (spec.get("panels") or []):
+        if isinstance(p, dict) and p.get("_panel_gaps"):
+            panel_gaps.extend(str(g) for g in p["_panel_gaps"])
+    entity_color_map = dict(spec.get("entity_colors") or {})
+    artifact_hashes = {
+        fp.name: _sha256(fp) for fp in (svg_p, drawio_p, png_p, pdf_p, caption_p) if fp.is_file()
+    }
     manifest_p = out_dir / f"{args.stem}_manifest.json"
-    manifest_p.write_text(json.dumps({"composition": comp_rep, "audit": aud, "caption_draft": caption_p.name}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_p.write_text(json.dumps({
+        "composition": comp_rep,
+        "audit": aud,
+        "entity_color_map": entity_color_map,
+        "panel_gaps": panel_gaps,
+        "artifact_sha256": artifact_hashes,
+        "caption_draft": caption_p.name,
+    }, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     ok = bool(ren["ok"] and aud["passed"])
     seal_rep = None
     if case_p is not None:
         srcs = sorted({str(p.get("source_ref", "")).strip() for p in (spec.get("panels") or []) if isinstance(p, dict) and str(p.get("source_ref", "")).strip()})
-        uncert = list(ren.get("degraded_warnings") or []) + list(aud.get("warnings") or [])
+        uncert = list(ren.get("degraded_warnings") or []) + list(aud.get("warnings") or []) + panel_gaps
         seal_rep = seal_case_result(
             case_p, result_p, task_id="graphical-abstract-narrative-composer",
             artifacts=[svg_p.name, drawio_p.name, png_p.name, pdf_p.name, caption_p.name, manifest_p.name],
             sources=srcs, uncertainty=uncert,
             change_records=[{"op": "compose_graphical_abstract", "layout": comp_rep.get("layout"), "dpi": args.dpi}],
-            metrics={"layout": comp_rep.get("layout"), "dpi": args.dpi, "width_mm": comp_rep.get("width_mm"), "height_mm": comp_rep.get("height_mm")},
+            metrics={"layout": comp_rep.get("layout"), "dpi": args.dpi, "width_mm": comp_rep.get("width_mm"), "height_mm": comp_rep.get("height_mm"), "entity_color_map": entity_color_map, "artifact_sha256": artifact_hashes},
             status="ok" if ok else "failed",
         )
     print(json.dumps({"mode": "build", "ok": ok, "composition": comp_rep, "render": ren, "audit": aud, "caption_draft": caption_p.name, "result_seal": seal_rep}, indent=2, ensure_ascii=False))

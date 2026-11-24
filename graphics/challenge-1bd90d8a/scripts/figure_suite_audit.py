@@ -81,10 +81,24 @@ def scan_drawio_native_editability(drawio_path: Path) -> dict[str, Any]:
     native_edges = 0
     native_texts = 0
     embedded_svg = 0
+    non_native_elements: list[dict[str, Any]] = []
     for cell in root.findall(".//mxCell"):
         style = cell.get("style") or ""
         if "image=data:image/svg+xml" in style:
             embedded_svg += 1
+            geom = cell.find("mxGeometry")
+            bbox = {
+                "x": float(geom.get("x", 0.0)),
+                "y": float(geom.get("y", 0.0)),
+                "width": float(geom.get("width", 0.0)),
+                "height": float(geom.get("height", 0.0)),
+            } if geom is not None else None
+            non_native_elements.append({
+                "cell_id": cell.get("id"),
+                "type": "embedded_svg_image",
+                "bbox": bbox,
+                "reason": "complex_svg_path_or_marker_fallback",
+            })
         elif cell.get("edge") == "1":
             native_edges += 1
         elif cell.get("vertex") == "1" and cell.find("mxGeometry") is not None:
@@ -100,6 +114,7 @@ def scan_drawio_native_editability(drawio_path: Path) -> dict[str, Any]:
         "native_texts": native_texts,
         "embedded_svg_fallbacks": embedded_svg,
         "native_editable_ratio": round((native_shapes + native_edges + native_texts) / max(1, total_fg), 4),
+        "non_native_elements": non_native_elements,
     }
 
 

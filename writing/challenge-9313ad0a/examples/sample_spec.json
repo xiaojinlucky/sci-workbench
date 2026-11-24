@@ -1,0 +1,80 @@
+{
+  "slug": "example-catalyst-mindmap",
+  "nodes": [
+    {
+      "id": "N1",
+      "label": "低温催化合成路径核心证据图谱",
+      "parent_id": null,
+      "node_type": "root",
+      "epistemic_status": "summary",
+      "source_anchor": {
+        "file": "sample_source.md",
+        "quote": "在 320 K 反应条件下，催化剂 A 的转化率为 84.2%"
+      }
+    },
+    {
+      "id": "N2",
+      "label": "核心实测性能：320 K 下转化率 84.2%（$r = k \\cdot [A]^\\alpha$）",
+      "parent_id": "N1",
+      "node_type": "evidence",
+      "epistemic_status": "fact",
+      "source_anchor": {
+        "file": "sample_source.md",
+        "quote": "催化剂 A 的转化率为 84.2%（n = 6，SD = 1.4%）"
+      }
+    },
+    {
+      "id": "N3",
+      "label": "对照基准：未修饰载体转化率 51.0%",
+      "parent_id": "N1",
+      "node_type": "evidence",
+      "epistemic_status": "fact",
+      "source_anchor": {
+        "file": "sample_source.md",
+        "quote": "未修饰载体对照组转化率为 51.0%"
+      }
+    },
+    {
+      "id": "N4",
+      "label": "失活风险：含水率超 5% 导致活性下降约 18%",
+      "parent_id": "N1",
+      "node_type": "risk",
+      "epistemic_status": "fact",
+      "source_anchor": {
+        "file": "sample_source.md",
+        "quote": "当含水率超过 5% 时催化剂活性下降约 18%"
+      }
+    },
+    {
+      "id": "N5",
+      "label": "缓解方案：引入分子筛脱水预处理",
+      "parent_id": "N4",
+      "node_type": "task",
+      "epistemic_status": "inference",
+      "source_anchor": {
+        "file": "sample_source.md",
+        "quote": "需引入分子筛脱水预处理"
+      }
+    }
+  ],
+  "cross_edges": [
+    {
+      "source": "N2",
+      "target": "N3",
+      "relation": "contrasts",
+      "source_anchor": {
+        "file": "sample_source.md",
+        "quote": "对比实验表明，未修饰载体对照组转化率为 51.0%"
+      }
+    },
+    {
+      "source": "N5",
+      "target": "N4",
+      "relation": "mitigates",
+      "source_anchor": {
+        "file": "sample_source.md",
+        "quote": "存在失活风险，需引入分子筛脱水预处理"
+      }
+    }
+  ]
+}

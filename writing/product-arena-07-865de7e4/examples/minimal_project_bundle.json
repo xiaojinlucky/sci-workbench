@@ -1,0 +1,27 @@
+{
+  "_note": "Self-contained synthetic LaTeX project bundle stored as UTF-8 JSON (no static .tex/.bib files inside the Skill package). Materialize into /tmp/example_tex at runtime before invoking latex_builder_engine.py.",
+  "case_json": {
+    "case_id": "EXAMPLE-LATEX-MINIMAL-01",
+    "task_instruction": "Synthetic example only (not a formal benchmark case). Compile the two-column LaTeX project, verify cross-references and citations, and inspect the rendered PDF.",
+    "output_contract": {
+      "case_id": "preserve exact case_id",
+      "deliverable": "editable LaTeX sources and compiled PDF (main.pdf + hashed copy)",
+      "preserved_facts": "immutable source hashes and bibliography keys",
+      "evidence_map": "traceable links from claims to build log and PDF",
+      "change_log": "diff summary and unresolved items"
+    }
+  },
+  "files": {
+    "main.tex": "\\documentclass[twocolumn]{article}\n\\usepackage[utf8]{inputenc}\n\\usepackage{amsmath,booktabs,tabularx}\n\\usepackage[margin=20mm]{geometry}\n\\widowpenalty=10000\n\\clubpenalty=10000\n\\title{Synthetic Example: Reproducible Two-Column LaTeX Manuscript}\n\\author{Example Author}\n\\date{}\n\\begin{document}\n\\maketitle\n\\input{sections/method}\n\\section{Results}\\label{sec:results}\nUsing the workflow in Section~\\ref{sec:method}, Table~\\ref{tab:summary} reports throughput~\\cite{smith2024}.\n\\begin{table}[htbp]\n\\centering\n\\caption{Synthetic benchmark summary.}\\label{tab:summary}\n\\begin{tabularx}{\\linewidth}{Xcc}\n\\toprule\nCondition & Throughput (s$^{-1}$) & Accuracy (\\%) \\\\\n\\midrule\nBaseline & 42.1 & 88.4 \\\\\nRevised & 49.8 & 93.2 \\\\\n\\bottomrule\n\\end{tabularx}\n\\end{table}\n\\bibliographystyle{plain}\n\\bibliography{references}\n\\end{document}\n",
+    "sections/method.tex": "\\section{Methods}\\label{sec:method}\nEach pass runs in an isolated staging directory with deterministic numbering:\n\\begin{equation}\\label{eq:gain}\n\\Delta = \\frac{S_{\\mathrm{revised}} - S_{\\mathrm{baseline}}}{S_{\\mathrm{baseline}}} \\times 100\\%.\n\\end{equation}\nEquation~\\eqref{eq:gain} summarizes relative throughput change.\n",
+    "references.bib": "@article{smith2024,\n  author  = {Smith, Jordan and Lee, Morgan},\n  title   = {Reproducible Typesetting Workflows for Technical Manuscripts},\n  journal = {Journal of Reproducible Computing},\n  year    = {2024},\n  volume  = {12},\n  pages   = {101--112}\n}\n"
+  },
+  "reference_expectations": [
+    {
+      "source": "main.tex",
+      "line": 13,
+      "occurrence": 1,
+      "expected_label": "sec:method"
+    }
+  ]
+}

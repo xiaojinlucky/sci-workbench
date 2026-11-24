@@ -1,0 +1,26 @@
+{
+  "_note": "Illustrative synthetic schema example only; not a real benchmark result.",
+  "case_id": "EXAMPLE-MINDMAP-01",
+  "status": "ok",
+  "deliverable": {
+    "json": "example-catalyst-mindmap.json",
+    "svg": "example-catalyst-mindmap.svg",
+    "mm": "example-catalyst-mindmap.mm",
+    "mmd": "example-catalyst-mindmap.mmd",
+    "png_preview": "example-catalyst-mindmap.png",
+    "audit_json": "mindmap_audit.json"
+  },
+  "preserved_facts": {
+    "node_count": 5,
+    "cross_edge_count": 2,
+    "replacement_char_count": 0
+  },
+  "evidence_map": [
+    {"node_id": "N2", "file": "sample_source.md", "verified_text": true}
+  ],
+  "change_log": {
+    "sanitized_external_refs": 0,
+    "unrendered_math_nodes": 0,
+    "human_confirmations_required": []
+  }
+}

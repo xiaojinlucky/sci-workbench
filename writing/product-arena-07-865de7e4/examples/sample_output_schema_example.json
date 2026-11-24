@@ -1,0 +1,32 @@
+{
+  "_note": "Illustrative synthetic schema example only; not a real benchmark result.",
+  "case_id": "EXAMPLE-LATEX-MINIMAL-01",
+  "status": "ok",
+  "deliverable": {
+    "editable_project_dir": "editable",
+    "entry_tex": "editable/main.tex",
+    "compiled_pdf": "compiled-000000000000.pdf",
+    "build_log": "build_log.txt",
+    "page_previews": ["previews/page-1.png"]
+  },
+  "preserved_facts": {
+    "original_input_immutable": true,
+    "source_file_count": 3,
+    "defined_labels_count": 4,
+    "bib_keys_count": 1
+  },
+  "evidence_map": [
+    {
+      "claim": "Compiled valid PDF (1 page)",
+      "source": "build_log.txt",
+      "sha256": "example-only"
+    }
+  ],
+  "change_log": {
+    "compared_against_original": false,
+    "modified_files": [],
+    "human_confirmations_required": [],
+    "semantic_ref_warnings": []
+  },
+  "gaps": []
+}

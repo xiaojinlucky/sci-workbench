@@ -1,0 +1,6 @@
+{
+  "case_id": "SYNTH-DOC-01",
+  "title": "Synthetic Catalytic Selectivity Study (Illustrative Example Only)",
+  "primary_doi": null,
+  "task_instruction": "Parse the supplied scientific document into grounded reading-order blocks, section hierarchy, tables, formulas, and explicit extraction gaps."
+}

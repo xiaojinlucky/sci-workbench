@@ -1,0 +1,18 @@
+{
+  "fields": [
+    {
+      "field_id": "faradaic_efficiency",
+      "label": "Peak Faradaic efficiency",
+      "description": "Measured peak Faradaic efficiency for CO2 reduction",
+      "expected_unit": "%",
+      "keywords": ["Faradaic", "efficiency", "selectivity"]
+    },
+    {
+      "field_id": "long_term_stability_1000h",
+      "label": "1000-hour stability retention",
+      "description": "Retention after 1000 h continuous electrolysis",
+      "expected_unit": "%",
+      "keywords": ["1000 h", "stability", "retention"]
+    }
+  ]
+}

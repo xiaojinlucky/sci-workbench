@@ -1,0 +1,57 @@
+{
+  "case_id": "SYNTH-DOC-01",
+  "status": "ok",
+  "note": "SYNTHETIC ILLUSTRATIVE OUTPUT SCHEMA ONLY — NOT A FORMAL BENCHMARK RESULT",
+  "sources": ["case.json", "synthetic_paper.pdf"],
+  "platform_managed_artifacts": ["trace/trace.jsonl"],
+  "page_coverage_audit": {
+    "total_pdf_pages_seen": 4,
+    "native_text_pages": 3,
+    "ocr_text_pages": 1,
+    "usable_pages_total": 4,
+    "overall_coverage_ratio": 1.0,
+    "empty_or_unreadable_pages": [],
+    "per_pdf": [
+      {
+        "source_file": "synthetic_paper.pdf",
+        "pages_seen": 4,
+        "usable_pages": 4,
+        "coverage_ratio": 1.0,
+        "first_page_covered": true,
+        "mid_page_covered": true,
+        "last_page_covered": true,
+        "tail_10pct_coverage_ratio": 1.0,
+        "page_separator_integrity": "per_page_verified"
+      }
+    ]
+  },
+  "layout_analysis": {
+    "deinterleaved_pages_count": 3,
+    "stripped_headers_footers_count": 6,
+    "hyphen_fixes_total": 4
+  },
+  "symbol_fidelity_audit": {
+    "bullet_u2022_count": 2,
+    "middle_dot_u00b7_count": 3,
+    "dot_characters_preserved_unnormalized": true,
+    "greek_symbol_count": 5,
+    "math_operator_count": 4,
+    "garbled_font_detected": false
+  },
+  "reading_order_blocks": [
+    {
+      "block_id": "B0001",
+      "block_type": "heading",
+      "heading_level": 1,
+      "section": "1. Introduction",
+      "source_file": "synthetic_paper.pdf",
+      "page": 1,
+      "column": "left",
+      "line_span": [14, 14],
+      "extraction_method": "native",
+      "deinterleaved": true,
+      "text": "1. Introduction"
+    }
+  ],
+  "gaps": []
+}

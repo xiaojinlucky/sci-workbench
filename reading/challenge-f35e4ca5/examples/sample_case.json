@@ -1,0 +1,20 @@
+{
+  "case_id": "SYNTH-FIG-01",
+  "topic_id": "阅读 02",
+  "topic_title": "科研图表解析",
+  "domain": "Synthetic Electrochemistry Kinetics Curve & Table (Illustrative Only)",
+  "output_contract": {
+    "case_id": "原样保留",
+    "status": "answered|partial|insufficient_evidence|input_error",
+    "result": "题目主结果，结构化字段按题目任务卡",
+    "claims": "每条关键结论附 kind、evidence、source_id、location",
+    "uncertainties": "未报告、无法判断、冲突和人工复核项"
+  },
+  "organizer_supplied_scope": {
+    "id": "SYNTH-SCOPE-EXAMPLE",
+    "required_actual_image_files": [
+      {"file": "artifacts/SYN-fig1.png", "sha256": ""}
+    ],
+    "required_literal_source_table_ids": ["SYN-T01"]
+  }
+}

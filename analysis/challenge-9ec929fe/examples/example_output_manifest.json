@@ -1,0 +1,30 @@
+{
+  "_note": "Illustrative example output manifest only; not a formal benchmark submission.",
+  "case_id": "example-code-exec-01",
+  "task_id": "challenge-9ec929fe",
+  "status": "ok",
+  "artifacts": [
+    "exec_verification_report.json",
+    "exec_verification_report.md",
+    "exec_verification_gate_summary.svg",
+    "cultivar_summary.json",
+    "cultivar_summary.csv"
+  ],
+  "metrics": {
+    "unique_samples": 4,
+    "duplicates_dropped": 0,
+    "fresh_artifacts_verified": 2,
+    "invariant_violations": 0
+  },
+  "metric_provenance": {
+    "unique_samples": "example_analysis_script.py:cultivar_summary.json",
+    "fresh_artifacts_verified": "isolated_code_runner.py:snapshot_audit.fresh_artifacts"
+  },
+  "findings": [
+    "Static AST contract audit passed with 0 blockers and 0 warnings.",
+    "Isolated execution completed with exit_code=0 under PYTHONHASHSEED=42; missing proline values were kept separate from true zero values."
+  ],
+  "uncertainty": [
+    "Illustrative 4-row in-memory example used solely to demonstrate CLI interface."
+  ]
+}

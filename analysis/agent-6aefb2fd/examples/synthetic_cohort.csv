@@ -1,0 +1,14 @@
+sample_id,group_code,group,metric_val
+0001,1,Control,10.2
+0002,1,Control,11.0
+0003,1,Control,9.8
+0004,1,Control,10.5
+0004,1,Control,10.5
+0005,2,Treated,14.8
+0006,2,Treated,15.6
+0007,2,Treated,14.2
+0008,2,Treated,NA
+0009,3,Inhibitor,-1.5
+0010,3,Inhibitor,-0.8
+0011,3,Inhibitor,-2.1
+0012,3,Inhibitor,-1.2

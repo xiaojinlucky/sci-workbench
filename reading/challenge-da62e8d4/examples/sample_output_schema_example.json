@@ -1,0 +1,46 @@
+{
+  "_synthetic_notice": "ILLUSTRATIVE SCHEMA EXAMPLE ONLY — NOT A FORMAL BENCHMARK OUTPUT",
+  "case_id": "synthetic-repro-example-01",
+  "status": "partial_with_gaps",
+  "reproducibility_grade": "partially_reproducible",
+  "evidence_ladder": {
+    "tier_1_code_present": true,
+    "tier_2_clean_exit": true,
+    "tier_3_within_prior_tolerance": true,
+    "tier_4_scientific_claim_supported": "not_established"
+  },
+  "artifacts": [
+    "result.json",
+    "reproduction_audit_report.json",
+    "reproduction_report.md"
+  ],
+  "missing_original_materials": [
+    "Original author raw dataset and full PMLB benchmark split not supplied; synthetic candidate verification only."
+  ],
+  "metrics": {
+    "candidate_script_count": 1,
+    "executed_ok_count": 1,
+    "failed_run_count": 0,
+    "non_deterministic_run_count": 0,
+    "parameter_conflict_count": 0,
+    "within_tolerance_count": 2,
+    "out_of_tolerance_count": 0
+  },
+  "metric_provenance": {
+    "candidate_script_count": "reproduction_audit_report.json:candidate_scripts",
+    "executed_ok_count": "reproduction_audit_report.json:execution_runs",
+    "failed_run_count": "reproduction_audit_report.json:failed_runs_excluded",
+    "non_deterministic_run_count": "reproduction_audit_report.json:execution_runs",
+    "parameter_conflict_count": "reproduction_audit_report.json:parameter_reconciliation",
+    "within_tolerance_count": "reproduction_audit_report.json:tolerance_comparisons",
+    "out_of_tolerance_count": "reproduction_audit_report.json:tolerance_comparisons"
+  },
+  "gaps": [
+    {
+      "code": "MISSING_ORIGINAL_MATERIAL",
+      "severity": "info",
+      "source": "repro_audit_runner",
+      "message": "Original author raw dataset and full PMLB benchmark split not supplied; synthetic candidate verification only."
+    }
+  ]
+}

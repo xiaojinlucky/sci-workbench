@@ -1,0 +1,25 @@
+{
+  "_example_notice": "Illustrative schema example only; actual runtime outputs are generated under /app/output/.",
+  "case_id": "example-kg-two-papers-01",
+  "status": "ok",
+  "locator_contract": {
+    "locator_type": "jats_or_source_paragraph_id",
+    "pdf_page_available": false
+  },
+  "artifacts": [
+    "result.json",
+    "knowledge_graph.json",
+    "knowledge_graph.graphml",
+    "knowledge_graph_report.md"
+  ],
+  "metrics": {
+    "distinct_paper_count": 2,
+    "entity_count": 7,
+    "relation_count": 2,
+    "co_occurrence_count": 2,
+    "held_for_review_count": 0,
+    "queries_executed": 5,
+    "categories_covered": 4,
+    "conflicts_detected": 0
+  }
+}

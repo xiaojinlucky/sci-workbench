@@ -1,0 +1,18 @@
+{
+  "_example_notice": "Minimal illustrative input example only; not a formal evaluation case.",
+  "case_id": "example-kg-two-papers-01",
+  "paragraphs": [
+    {
+      "source_id": "10.1000/paper.primary.2025",
+      "doi": "10.1000/paper.primary.2025",
+      "paragraph_id": "sec2-p1",
+      "text": "Our workflow uses density functional theory (DFT) to evaluate Cu-ZnO catalyst for CO2 hydrogenation under 250 °C."
+    },
+    {
+      "source_id": "10.1000/paper.secondary.2025",
+      "doi": "10.1000/paper.secondary.2025",
+      "paragraph_id": "sec3-p2",
+      "text": "In this cohort, SciBERT outperforms BM25 on BioASQ, while catalyst and efficiency appeared together in the discussion."
+    }
+  ]
+}

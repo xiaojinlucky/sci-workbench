@@ -1,0 +1,49 @@
+{
+  "_synthetic_notice": "ILLUSTRATIVE SYNTHETIC EXAMPLE ONLY — NOT A FORMAL BENCHMARK CASE OR PREPARED ANSWER",
+  "case_id": "synthetic-math-example-01",
+  "paragraphs": [
+    {
+      "paragraph_id": "P001",
+      "text": "where E_a denotes the activation energy in kJ/mol, R is the universal gas constant in J/(mol*K), T represents absolute temperature in K (T > 0), and A is the pre-exponential factor in s^-1."
+    }
+  ],
+  "derivation_checks": [
+    {
+      "step_id": "S1",
+      "formula_id": "eq1",
+      "lhs": "ln(A * exp(-E_a / (R * T)))",
+      "rhs": "ln(A) - E_a / (R * T)",
+      "assumptions": ["A > 0", "T > 0"],
+      "boundary_conditions": ["Arrhenius single-barrier kinetic regime"],
+      "test_env": {"A": 1.0e12, "E_a": 45000.0, "R": 8.314, "T": 300.0}
+    }
+  ],
+  "dimensional_checks": [
+    {
+      "check_id": "D1",
+      "lhs_unit": "kJ/mol",
+      "rhs_unit": "J/(mol*K) * K"
+    },
+    {
+      "check_id": "D2",
+      "lhs_unit": "mA/cm^2",
+      "rhs_unit": "A/m^2"
+    }
+  ],
+  "numeric_checks": [
+    {
+      "check_id": "N1",
+      "expression": "E_a / (R * T)",
+      "required_vars": ["E_a", "R", "T"],
+      "env": {"E_a": 45000.0, "R": 8.314, "T": 300.0},
+      "expected": 18.041857,
+      "tol": 1e-4
+    },
+    {
+      "check_id": "N2_missing_var",
+      "expression": "A * exp(-E_a / (R * T))",
+      "required_vars": ["A", "E_a", "R", "T"],
+      "env": {"E_a": 45000.0, "R": 8.314, "T": 300.0}
+    }
+  ]
+}

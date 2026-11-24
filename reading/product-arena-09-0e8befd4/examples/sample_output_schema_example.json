@@ -1,0 +1,27 @@
+{
+  "_example_notice": "Illustrative schema example only; actual outputs are generated at runtime under /app/output/.",
+  "case_id": "example-nanopub-01",
+  "status": "ok",
+  "mode": "auto_atomic_extraction_and_audit",
+  "artifacts": [
+    "result.json",
+    "nanopublications.json",
+    "nanopublications.jsonld",
+    "nanopublications.trig",
+    "evidence-report.md"
+  ],
+  "signature_verification": {
+    "checked_count": 3,
+    "valid_count": 3,
+    "failed_count": 0,
+    "all_valid": true
+  },
+  "metrics": {
+    "paragraphs_indexed": 2,
+    "claims_received": 3,
+    "nanopublications_count": 3,
+    "rejected_proposals_count": 0,
+    "conflicts_detected": 0,
+    "signatures_valid_count": 3
+  }
+}

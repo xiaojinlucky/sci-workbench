@@ -1,0 +1,27 @@
+{
+  "note": "Illustrative output contract schema only; actual outputs are generated dynamically at runtime.",
+  "required_artifacts": [
+    "result.json",
+    "benchmark_panel.json",
+    "benchmark_report.md"
+  ],
+  "result_json_keys": [
+    "case_id",
+    "status",
+    "sources",
+    "uncertainty",
+    "artifacts",
+    "score_disclaimer",
+    "source_modality",
+    "item_bank_sha256",
+    "semantic_bank_sha256",
+    "item_bank_audit",
+    "scoreboards",
+    "stability_summary",
+    "failure_taxonomy_bank",
+    "regression_item_drafts",
+    "version_diff",
+    "metrics",
+    "gaps"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "note": "Illustrative output schema example only; actual outputs are generated dynamically at runtime.",
+  "required_artifacts": [
+    "result.json",
+    "cleaned_records.csv",
+    "cleaning_audit_report.json",
+    "cleaning_review_report.md"
+  ],
+  "result_json_keys": [
+    "case_id",
+    "status",
+    "sources",
+    "uncertainty",
+    "artifacts",
+    "schema_probe_report",
+    "canonical_records",
+    "duplicate_log",
+    "context_preserved_log",
+    "scientific_conflicts",
+    "changelog",
+    "needs_human_review",
+    "metrics",
+    "gaps"
+  ]
+}

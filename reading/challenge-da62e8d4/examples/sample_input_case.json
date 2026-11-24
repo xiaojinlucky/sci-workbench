@@ -1,0 +1,22 @@
+{
+  "_synthetic_notice": "ILLUSTRATIVE SYNTHETIC EXAMPLE ONLY — NOT A FORMAL BENCHMARK CASE OR PREPARED ANSWER",
+  "case_id": "synthetic-repro-example-01",
+  "repeats": 2,
+  "pythonhashseed": "0",
+  "paper_parameters": {
+    "learning_rate": 0.01,
+    "seed": 42,
+    "iterations": 100
+  },
+  "paper_targets": {
+    "accuracy": 0.92,
+    "loss": 0.18
+  },
+  "tolerances": {
+    "accuracy": {"abs_tol": 0.02, "rel_tol": 0.05},
+    "loss": {"abs_tol": 0.03, "rel_tol": 0.1}
+  },
+  "missing_materials": [
+    "Original author raw dataset and full PMLB benchmark split not supplied; synthetic candidate verification only."
+  ]
+}

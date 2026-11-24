@@ -1,0 +1,75 @@
+{
+  "_synthetic_notice": "ILLUSTRATIVE SCHEMA EXAMPLE ONLY — NOT A FORMAL BENCHMARK OUTPUT",
+  "case_id": "synthetic-math-example-01",
+  "status": "partial_with_gaps",
+  "formula_coverage_status": "partial",
+  "xml_sources_used": ["sample_source_formulas.xml"],
+  "artifacts": [
+    "result.json",
+    "formula_verification_report.json",
+    "formula_notes.md"
+  ],
+  "formulas": [
+    {
+      "formula_id": "eq1",
+      "source_file": "sample_source_formulas.xml",
+      "xml_tag": "disp-formula",
+      "label": "(1)",
+      "representation_source": "mathml+tex-math",
+      "verification_status": "parsed",
+      "symbols": ["A", "E_a", "R", "T", "k"]
+    }
+  ],
+  "dimensional_checks": [
+    {
+      "check_id": "D1",
+      "lhs_unit": "kJ/mol",
+      "rhs_unit": "J/(mol*K) * K",
+      "consistent": true,
+      "scale_ratio": 1000.0,
+      "order_of_magnitude_gap": 3.0,
+      "scale_exact_match": false
+    }
+  ],
+  "numeric_checks": [
+    {
+      "check_id": "N1",
+      "status": "verified",
+      "computed": 18.04185711,
+      "expected": 18.041857,
+      "within_tolerance": true
+    },
+    {
+      "check_id": "N2_missing_var",
+      "status": "insufficient_evidence",
+      "missing_variables": ["A"],
+      "computed": null
+    }
+  ],
+  "markdown_validation": {
+    "ready": true,
+    "summary": {"fail": 0, "warn": 0}
+  },
+  "metrics": {
+    "formula_count": 1,
+    "dimensional_oom_offset_count": 1
+  },
+  "metric_provenance": {
+    "formula_count": "formula_verification_report.json:formulas",
+    "dimensional_oom_offset_count": "formula_verification_report.json:dimensional_checks"
+  },
+  "gaps": [
+    {
+      "code": "UNIT_ORDER_OF_MAGNITUDE_OFFSET",
+      "severity": "warning",
+      "source": "D1",
+      "message": "Scale offset in D1: kJ/mol vs J/(mol*K) * K (ratio=1000.0, log10_gap=3.0)."
+    },
+    {
+      "code": "MISSING_VARIABLE_VALUES_FOR_RECOMPUTATION",
+      "severity": "warning",
+      "source": "numeric_checks",
+      "message": "Missing parameter A retained as null without zero-filling."
+    }
+  ]
+}

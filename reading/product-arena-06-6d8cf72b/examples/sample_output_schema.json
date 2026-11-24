@@ -1,0 +1,26 @@
+{
+  "note": "Illustrative output schema example only; actual outputs are generated dynamically at runtime.",
+  "result_json_keys": [
+    "case_id",
+    "status",
+    "sources",
+    "source_modalities",
+    "uncertainty",
+    "artifacts",
+    "metrics",
+    "metric_provenance",
+    "findings",
+    "structured_notes",
+    "gaps"
+  ],
+  "paper_card_field_shape": {
+    "value": "Verbatim or structured value (or 'Not reported in available source text.')",
+    "attribution": "author_reported | model_synthesized | not_reported",
+    "evidence_anchors": [
+      "sample_paper.md#source-line=12"
+    ],
+    "evidence_quotes": [
+      "Exact verified sentence from source block."
+    ]
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "case_id": "example-benchmark-draft-r2",
+  "note": "Minimal illustrative four-item source-conditioned benchmark-DRAFT example; not a formal evaluation case.",
+  "paragraphs": [
+    {
+      "paragraph_id": "P001",
+      "text": "The NiFe-LDH catalyst achieved an overpotential of 240 mV at 10 mA/cm^2 in 1.0 M KOH."
+    },
+    {
+      "paragraph_id": "P002",
+      "text": "Durability was tested for 24 h at 25 °C; high-temperature stability above 60 °C was not evaluated."
+    }
+  ],
+  "items": [
+    {
+      "item_id": "DRAFT-01",
+      "task_type": "numeric_extraction",
+      "prompt": "What overpotential did NiFe-LDH achieve at 10 mA/cm^2 in 1.0 M KOH? Cite the source paragraph.",
+      "required_paragraph_ids": ["P001"],
+      "expected_values": ["240 mV"],
+      "expected_keywords": ["NiFe-LDH"],
+      "reference_answer": "NiFe-LDH achieved an overpotential of 240 mV (0.24 V) at 10 mA/cm^2.",
+      "unanswerable": false,
+      "rubric": {"scale": "0/1/2", "pass_threshold": 2},
+      "version": "draft-r2",
+      "data_license": "CC-BY-4.0"
+    },
+    {
+      "item_id": "DRAFT-02",
+      "task_type": "unanswerable_abstention",
+      "prompt": "What was the catalyst degradation rate at 80 °C?",
+      "required_paragraph_ids": ["P002"],
+      "expected_values": [],
+      "expected_keywords": [],
+      "reference_answer": "Not reported; stability above 60 °C was not evaluated.",
+      "unanswerable": true,
+      "rubric": {"scale": "0/1/2", "pass_threshold": 2},
+      "version": "draft-r2",
+      "data_license": "CC-BY-4.0"
+    }
+  ],
+  "candidate_runs": [
+    {
+      "run_id": "example_agent_r1",
+      "agent_id": "example_agent",
+      "latency_sec": 12.4,
+      "model_requests": 3,
+      "max_response_tokens": 512,
+      "responses": {
+        "DRAFT-01": {
+          "answer": "NiFe-LDH reached 0.24 V overpotential at 10 mA/cm^2 [P001].",
+          "evidence": [{"paragraph_id": "P001", "quote": "NiFe-LDH catalyst achieved an overpotential of 240 mV"}]
+        },
+        "DRAFT-02": {
+          "status": "not_reported",
+          "answer": "Not reported in the supplied text; temperatures above 60 °C were not evaluated [P002].",
+          "evidence": [{"paragraph_id": "P002", "quote": "high-temperature stability above 60 °C was not evaluated."}]
+        }
+      }
+    }
+  ]
+}

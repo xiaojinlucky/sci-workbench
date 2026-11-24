@@ -1,0 +1,22 @@
+{
+  "_example_notice": "Minimal illustrative example only; not a formal evaluation case.",
+  "case_id": "example-nanopub-01",
+  "source_metadata": {
+    "case.json": {
+      "doi": "10.1000/example.2025.001",
+      "authors": ["Lin, A.", "Zhao, B."],
+      "year": 2025,
+      "license": "CC-BY-4.0"
+    }
+  },
+  "paragraphs": [
+    {
+      "paragraph_id": "sec3-p1",
+      "text": "Cu-ZnO catalyst significantly increases methanol selectivity to 88.5% under 250 °C; whereas unpromoted CuO did not increase methanol selectivity under 250 °C."
+    },
+    {
+      "paragraph_id": "sec4-p2",
+      "text": "Methanol selectivity was suppressed by sulfur poisoning at 300 °C."
+    }
+  ]
+}

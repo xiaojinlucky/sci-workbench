@@ -1,0 +1,7 @@
+row_id,catalyst,metric_name,measured_value,units,temperature,ph,source_document_id,paragraph_id
+0001,CuIn-OD,overpotential,240,mV,25 °C,6.8,DOC-01,P001
+0002,CuIn-OD,overpotential,0.24,V,25 °C,6.8,DOC-01,P001
+0003,CuIn-OD,overpotential,210,mV,60 °C,6.8,DOC-01,P002
+0004,CuIn-OD,detection_limit,<0.05,mg/L,25 °C,6.8,DOC-01,P003
+0005,CuIn-OD,temp_shift,12.5,Δ°C,25 °C,6.8,DOC-01,P004
+0006,CuIn-OD,selectivity,NA,%,25 °C,6.8,DOC-01,P005

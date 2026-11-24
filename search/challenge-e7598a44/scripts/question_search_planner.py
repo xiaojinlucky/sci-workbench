@@ -184,17 +184,65 @@ def _evaluate_subquestion_matrix(
 
         n_strict = len(strict_hits)
         retracted_n = sum(1 for _, it, _ in strict_hits if it.get("is_retracted"))
-        conflict_n = sum(1 for o, _, _ in strict_hits if "conflict" in o.get("arbitration", ""))
+        conflict_n = sum(
+            1
+            for o, _, _ in strict_hits
+            if ("conflict" in o.get("arbitration", "").lower()) or ("escalat" in o.get("arbitration", "").lower())
+        )
+        borderline_n = sum(1 for o, _, _ in strict_hits if o.get("final_label") == "borderline")
 
-        if n_strict >= 2 and retracted_n < n_strict:
-            state = "SUPPORTED"
-            gap_note = f"{conflict_n} supporting item(s) have reviewer conflict requiring verification." if conflict_n else ""
-        elif n_strict == 1:
-            state = "PARTIAL"
-            gap_note = "Only 1 matching record in finite snapshot; insufficient for corroborated synthesis."
-        elif n_strict > 0 and retracted_n == n_strict:
+        # Separate explicit refuting/negative findings from clean non-retracted, non-conflicted supporting records
+        REFUTE_CUES = (
+            "no significant effect", "did not improve", "failed to improve", "failed to reduce",
+            "no association", "null result", "contradicts", "refutes", "no benefit", "worsened",
+            "negative finding", "opposite effect", "not statistically significant",
+        )
+        clean_support_hits = []
+        refuting_hits = []
+        comparator_pointers = []
+        for o, it, matched in strict_hits:
+            if it.get("is_retracted"):
+                continue
+            arb_low = str(o.get("arbitration") or "").lower()
+            if "conflict" in arb_low or "escalat" in arb_low or o.get("final_label") == "borderline":
+                continue
+            blob_low = f"{it.get('title', '')} {it.get('abstract', '')}".lower()
+            ext_ops = " ".join(str(x) for x in (o.get("external_opinions") or [])).lower()
+            is_refuting = any(c in blob_low for c in REFUTE_CUES) or any(
+                k in ext_ops for k in ("refute", "contradict", "negative", "no_effect")
+            )
+            if is_refuting:
+                refuting_hits.append((o, it, matched))
+            else:
+                clean_support_hits.append((o, it, matched))
+            if sq.get("type") == "comparison":
+                comparator_pointers.append(
+                    {
+                        "rid": o["rid"],
+                        "source_paths": it.get("paths", []),
+                        "matched_comparator_terms": matched,
+                        "snippet": str(it.get("abstract") or it.get("title") or "")[:240],
+                    }
+                )
+
+        n_clean = len(clean_support_hits)
+        n_refute = len(refuting_hits)
+
+        if n_strict > 0 and retracted_n == n_strict:
             state = "OUTDATED"
             gap_note = "All matching records in snapshot are marked retracted."
+        elif n_refute >= 1 and n_clean == 0 and conflict_n == 0:
+            state = "REFUTED"
+            gap_note = f"{n_refute} non-retracted record(s) report negative/refuting evidence with 0 clean supporting records."
+        elif (n_clean >= 1 and n_refute >= 1) or (conflict_n > 0 and n_clean < 2):
+            state = "CONFLICTING"
+            gap_note = f"Conflicting or unarbitrated evidence: clean_support={n_clean}, refuting={n_refute}, conflicts_pending={conflict_n}, retracted={retracted_n}."
+        elif n_clean >= 2 and conflict_n == 0 and n_refute == 0:
+            state = "SUPPORTED"
+            gap_note = f"Excluded {retracted_n} retracted and {borderline_n} borderline record(s) from clean support count." if (retracted_n or borderline_n) else ""
+        elif n_clean == 1 or (n_strict >= 1 and (borderline_n > 0 or conflict_n > 0)):
+            state = "PARTIAL"
+            gap_note = f"Insufficient corroborated clean support (clean_support={n_clean}, borderline={borderline_n}, conflicts={conflict_n}, retracted={retracted_n})."
         else:
             state = "UNKNOWN"
             gap_note = f"No non-excluded records in finite snapshot satisfy dimension '{sq.get('dimension')}' ({sq_terms[:6]})."
@@ -210,10 +258,14 @@ def _evaluate_subquestion_matrix(
                 "query_terms": sq_terms[:12],
                 "hits_round1": len(hit_r1),
                 "hits_round2": n_strict,
+                "clean_support_hits": n_clean,
+                "refuting_hits": n_refute,
+                "conflicting_or_retracted_excluded": conflict_n + retracted_n + borderline_n,
                 "marginal_new_hits": len(new_from_r2),
                 "evidence_state": state,
-                "status": "covered" if state == "SUPPORTED" else ("sparse" if state == "PARTIAL" else "uncovered"),
-                "top_evidence_rids": [o["rid"] for o, _, _ in strict_hits[:8]],
+                "status": "covered" if state == "SUPPORTED" else ("sparse" if state in ("PARTIAL", "CONFLICTING") else "uncovered"),
+                "top_evidence_rids": [o["rid"] for o, _, _ in (clean_support_hits or refuting_hits or strict_hits)[:8]],
+                "comparator_evidence_pointers": comparator_pointers[:6],
                 "gap_note": gap_note,
             }
         )

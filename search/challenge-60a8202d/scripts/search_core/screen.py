@@ -108,10 +108,12 @@ class LocalSearcher:
         self.abbr_map: Dict[str, List[str]] = defaultdict(list)
         for a in abbrevs or []:
             if a.get("abbr") and a.get("expansion"):
-                toks = qm.stem_tokens(qm.tokenize(a["expansion"]))
-                self.abbr_map[a["abbr"].lower()] = toks
-                for t in toks:
-                    self.abbr_map[t].append(a["abbr"].lower())
+                abbr_low = a["abbr"].lower()
+                toks = list(dict.fromkeys(qm.stem_tokens(qm.tokenize(a["expansion"]))))
+                self.abbr_map[abbr_low].extend(t for t in toks if t != abbr_low)
+                for t in list(toks):
+                    if t != abbr_low:
+                        self.abbr_map[t].append(abbr_low)
         self.fields = {
             "title": [qm.stem_tokens(qm.tokenize(it.get("title", ""))) for it in items],
             "abstract": [qm.stem_tokens(qm.tokenize(it.get("abstract", ""))) for it in items],

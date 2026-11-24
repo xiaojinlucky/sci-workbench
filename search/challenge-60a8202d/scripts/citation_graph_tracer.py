@@ -289,8 +289,42 @@ def _discover_seeds(
         if resolved and resolved in nodes:
             if resolved not in seen_rids:
                 seen_rids.add(resolved)
-                seed_rids.append(resolved)
                 nd = nodes[resolved]
+                # Pre-graph Seed Identity Adjudication Gate: verify declared DOI/title vs canonical OpenAlex/source record
+                decl_doi = sm.norm_doi(spec.get("doi") or spec.get("DOI") or "") if isinstance(spec, dict) else (sm.norm_doi(spec) if str(spec).lower().startswith("10.") else "")
+                decl_title = sm.norm_title(spec.get("title") or "") if isinstance(spec, dict) else ""
+                node_doi = sm.norm_doi(nd.get("doi") or "")
+                node_title = sm.norm_title(nd.get("title") or "")
+                doi_conflict = bool(decl_doi and node_doi and decl_doi != node_doi)
+                title_sim = 1.0
+                if decl_title and node_title:
+                    t_a = set(decl_title.split())
+                    t_b = set(node_title.split())
+                    title_sim = len(t_a & t_b) / max(1, len(t_a | t_b))
+                title_conflict = bool(decl_title and node_title and len(decl_title) > 15 and title_sim < 0.30)
+                if doi_conflict or title_conflict:
+                    seed_records.append(
+                        {
+                            "seed_rid": resolved,
+                            "declared_raw": spec,
+                            "origin": origin,
+                            "title": nd.get("title", ""),
+                            "doi": nd.get("doi", ""),
+                            "declared_doi": decl_doi,
+                            "declared_title": spec.get("title", "") if isinstance(spec, dict) else "",
+                            "title_jaccard": round(title_sim, 3),
+                            "openalex": nd.get("openalex", ""),
+                            "year": nd.get("year") or 0,
+                            "resolution": "quarantined_identity_conflict",
+                            "conflict_reason": (
+                                f"Declared seed DOI/title conflicts with matched node {resolved} "
+                                f"(doi_conflict={doi_conflict}, title_jaccard={round(title_sim, 3)}); "
+                                "quarantined from confirmed path expansion pending human adjudication."
+                            ),
+                        }
+                    )
+                    continue
+                seed_rids.append(resolved)
                 seed_records.append(
                     {
                         "seed_rid": resolved,
@@ -528,6 +562,36 @@ def _audit_previous_snapshot(
         "audit_rule": "CitationChaser #37: classify item-level added/vanished/unresolved deltas; never equate raw hit counts with global coverage.",
     }
 
+
+
+def _classify_unresolved_references(unresolved_refs: List[Dict[str, Any]], precomputed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Classify ALL unresolved references into mutually exclusive boundary buckets so
+    category counts strictly sum to total_unresolved (never confused with truncated sample size)."""
+    if precomputed and precomputed.get("conservation_verified"):
+        return dict(precomputed)
+    ext_doi = 0
+    ext_oa = 0
+    unstruct = 0
+    for u in unresolved_refs:
+        ref = u.get("ref") or {}
+        prov = u.get("provenance") or {}
+        if ref.get("doi") or ref.get("DOI"):
+            ext_doi += 1
+        elif prov.get("resolution") == "unresolved_external_id" or str(ref.get("id") or "").startswith("W"):
+            ext_oa += 1
+        else:
+            unstruct += 1
+    total = len(unresolved_refs)
+    return {
+        "total_unresolved": total,
+        "external_with_doi_outside_snapshot": ext_doi,
+        "external_openalex_id_outside_snapshot": ext_oa,
+        "unstructured_missing_identifier": unstruct,
+        "category_sum": ext_doi + ext_oa + unstruct,
+        "conservation_verified": (ext_doi + ext_oa + unstruct) == total,
+        "sample_size": total,
+        "interpretation": "Unresolved references represent cited works outside the finite local snapshot boundary (not parser errors).",
+    }
 
 def _collect_retracted_alerts(graph_obj: Dict[str, Any], seed_rids: List[str]) -> List[Dict[str, Any]]:
     nodes = graph_obj["nodes"]
@@ -945,6 +1009,16 @@ def run_pipeline(
                 "message": f"Seed {zs['seed_rid']} has 0 in-degree and 0 out-degree in local snapshot (may be newly posted preprint or unindexed).",
             }
         )
+    quarantined_seeds = [s for s in seed_records if s.get("resolution") == "quarantined_identity_conflict"]
+    for qs in quarantined_seeds:
+        gaps.append(
+            {
+                "code": "SEED_IDENTITY_CONFLICT_QUARANTINED",
+                "severity": "warning",
+                "source": str(qs.get("origin", "seed_declaration")),
+                "message": qs.get("conflict_reason", f"Seed {qs.get('seed_rid')} quarantined due to DOI/title identity conflict."),
+            }
+        )
     for err in state["source_load_errors"]:
         gaps.append(
             {
@@ -956,6 +1030,10 @@ def run_pipeline(
         )
 
     warnings_list: List[str] = list(bundle.notes)
+    if quarantined_seeds:
+        warnings_list.append(
+            f"Quarantined {len(quarantined_seeds)} seed(s) with DOI/title identity conflict before graph expansion (see seeds[])."
+        )
     if retracted_alerts:
         warnings_list.append(f"Detected {len(retracted_alerts)} retracted/correction caution node(s) in citation graph.")
     if ambiguous:
@@ -966,6 +1044,15 @@ def run_pipeline(
         warnings_list.append(
             f"CitationChaser #37 diff: {snapshot_diff['nodes_vanished_count']} node(s) and {snapshot_diff['edges_vanished_count']} edge(s) vanished relative to previous snapshot."
         )
+
+    # Map node rid -> source file/page provenance from raw records
+    node_page_prov: Dict[str, List[str]] = {}
+    for c in clusters:
+        bucket = node_page_prov.setdefault(c.canonical.rid, [])
+        for m in c.members:
+            loc = f"{m.path}{'#' + m.pointer if m.pointer else ''}"
+            if loc and loc not in bucket:
+                bucket.append(loc)
 
     # Build concise, grounded contract fields for result.json
     traced_node_views = []
@@ -985,9 +1072,14 @@ def run_pipeline(
                 "is_retracted": rinfo["is_retracted"],
                 "n_merged_versions": nd.get("n_merged_versions", 1),
                 "sources": nd.get("sources", []),
+                "source_file_pointers": node_page_prov.get(rid, [])[:4],
             }
         )
 
+    unresolved_breakdown = _classify_unresolved_references(
+        graph_obj.get("unresolved_references", []),
+        precomputed=graph_obj.get("unresolved_references_breakdown"),
+    )
     metrics = {
         "raw_input_records": dedup_summary.get("n_records", 0),
         "canonical_unique_clusters": dedup_summary.get("n_unique", 0),
@@ -1008,6 +1100,9 @@ def run_pipeline(
         "zero_citation_seed_count": len(enriched_zero_seeds),
         "retracted_alert_count": len(retracted_alerts),
         "unresolved_reference_count": graph_obj["stats"]["n_unresolved_refs"],
+        "unresolved_external_with_doi_count": unresolved_breakdown["external_with_doi_outside_snapshot"],
+        "unresolved_external_openalex_id_count": unresolved_breakdown["external_openalex_id_outside_snapshot"],
+        "unresolved_unstructured_count": unresolved_breakdown["unstructured_missing_identifier"],
         "snapshot_nodes_persisted": snapshot_diff.get("nodes_persisted", 0),
         "snapshot_nodes_added": snapshot_diff.get("nodes_added_count", 0),
         "snapshot_nodes_vanished": snapshot_diff.get("nodes_vanished_count", 0),
@@ -1033,6 +1128,9 @@ def run_pipeline(
         "zero_citation_seed_count": "citation_network.json:zero_citation_seeds",
         "retracted_alert_count": "citation_network.json:retracted_alerts",
         "unresolved_reference_count": "citation_network.json:unresolved_references_count",
+        "unresolved_external_with_doi_count": "result.json:metrics.unresolved_external_with_doi_count",
+        "unresolved_external_openalex_id_count": "result.json:metrics.unresolved_external_openalex_id_count",
+        "unresolved_unstructured_count": "result.json:metrics.unresolved_unstructured_count",
         "snapshot_nodes_persisted": "snapshot_diff.json:nodes_persisted",
         "snapshot_nodes_added": "snapshot_diff.json:nodes_added_count",
         "snapshot_nodes_vanished": "snapshot_diff.json:nodes_vanished_count",

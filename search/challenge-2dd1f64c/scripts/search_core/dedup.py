@@ -71,8 +71,16 @@ def title_sim(a: str, b: str) -> float:
     na, nb = sm.norm_title(a), sm.norm_title(b)
     if not na or not nb:
         return 0.0
+    if na == nb:
+        return 1.0
     ta, tb = set(sm.title_tokens(a)), set(sm.title_tokens(b))
-    jac = len(ta & tb) / max(1, len(ta | tb))
+    union_len = len(ta | tb)
+    if union_len == 0:
+        return 0.0
+    jac = len(ta & tb) / union_len
+    # Mathematically, 0.5*jac + 0.5*seq <= 0.5*jac + 0.5; if jac < 0.45 then title_sim < 0.725 (< all thresholds >= 0.75)
+    if jac < 0.45:
+        return jac
     seq = _ratio(" ".join(sorted(ta)), " ".join(sorted(tb)))
     return 0.5 * jac + 0.5 * seq
 
@@ -324,35 +332,68 @@ def cluster_records_detailed(records: List[sm.Record]) -> Tuple[List[Cluster], L
     ambiguous: List[Dict[str, Any]] = []
     pair_merges: List[Dict[str, Any]] = []
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            same, tier, score = same_work(records[i], records[j])
-            if same:
-                union(i, j)
-                pair_merges.append(
-                    {
-                        "rid_a": records[i].rid,
-                        "rid_b": records[j].rid,
-                        "tier": tier,
-                        "score": round(score, 3),
-                    }
-                )
-            elif tier.startswith("ambiguous:"):
-                ambiguous.append(
-                    {
-                        "rid_a": records[i].rid,
-                        "rid_b": records[j].rid,
-                        "title_a": records[i].title[:120],
-                        "title_b": records[j].title[:120],
-                        "doi_a": records[i].doi,
-                        "doi_b": records[j].doi,
-                        "source_a": f"{records[i].source}:{records[i].path}",
-                        "source_b": f"{records[j].source}:{records[j].path}",
-                        "reason": tier,
-                        "title_similarity": round(score, 3),
-                        "action": "kept_separate_needs_human_arbitration",
-                    }
-                )
+    # Pre-index cheap candidate buckets (exact DOI/alt_doi/PMID/arXiv + rare title tokens) to avoid O(N^2) blowup on large API corpora
+    buckets: Dict[str, List[int]] = defaultdict(list)
+    for idx, r in enumerate(records):
+        for d in _all_dois(r):
+            buckets[f"d:{d}"].append(idx)
+        if r.pmid:
+            buckets[f"p:{r.pmid}"].append(idx)
+        ab = sm.arxiv_base(r.arxiv_id)
+        if ab:
+            buckets[f"a:{ab}"].append(idx)
+        if r.patent_number:
+            buckets[f"pt:{r.patent_number[:10]}"].append(idx)
+        toks = sorted(set(sm.title_tokens(r.title)), key=lambda w: (-len(w), w))[:5]
+        for tok in toks:
+            if len(tok) >= 4:
+                buckets[f"t:{tok}"].append(idx)
+
+    cand_pairs = set()
+    for idxs in buckets.values():
+        if len(idxs) <= 1:
+            continue
+        # Cap ultra-common generic token buckets at 120 to stay linear while exact ID buckets remain uncapped
+        if len(idxs) > 120:
+            continue
+        for a_i in range(len(idxs)):
+            for b_i in range(a_i + 1, len(idxs)):
+                i, j = idxs[a_i], idxs[b_i]
+                cand_pairs.add((i, j) if i < j else (j, i))
+    # For small corpora (n <= 120), also keep exhaustive pairwise guarantee
+    if n <= 120:
+        for i in range(n):
+            for j in range(i + 1, n):
+                cand_pairs.add((i, j))
+
+    for i, j in sorted(cand_pairs):
+        same, tier, score = same_work(records[i], records[j])
+        if same:
+            union(i, j)
+            pair_merges.append(
+                {
+                    "rid_a": records[i].rid,
+                    "rid_b": records[j].rid,
+                    "tier": tier,
+                    "score": round(score, 3),
+                }
+            )
+        elif tier.startswith("ambiguous:"):
+            ambiguous.append(
+                {
+                    "rid_a": records[i].rid,
+                    "rid_b": records[j].rid,
+                    "title_a": records[i].title[:120],
+                    "title_b": records[j].title[:120],
+                    "doi_a": records[i].doi,
+                    "doi_b": records[j].doi,
+                    "source_a": f"{records[i].source}:{records[i].path}",
+                    "source_b": f"{records[j].source}:{records[j].path}",
+                    "reason": tier,
+                    "title_similarity": round(score, 3),
+                    "action": "kept_separate_needs_human_arbitration",
+                }
+            )
 
     groups: Dict[int, List[int]] = defaultdict(list)
     for i in range(n):

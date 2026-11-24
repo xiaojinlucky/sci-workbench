@@ -29,14 +29,14 @@ All scripts live under `scripts/` relative to this `SKILL.md` and run on pure Py
 
 ### Step 1: Preflight & Budget Initialization (`M1` + `M3`)
 ```bash
-python -B scripts/preflight_probe.py --input /input --output /app/output --out /app/work/env.json
-python -B scripts/budget_guard.py --state /app/work/budget.json --init
-python -B scripts/budget_guard.py --state /app/work/budget.json --tick screen_and_rank
+python3 -B scripts/preflight_probe.py --input /input --output /app/output --out /app/work/env.json
+python3 -B scripts/budget_guard.py --state /app/work/.budget_state.json --init
+python3 -B scripts/budget_guard.py --state /app/work/.budget_state.json --tick screen_and_rank
 ```
 
 ### Step 2: Execute All-Record Screening, Dedup Tracing & Intelligent Ranking
 ```bash
-python -B scripts/smart_screening_ranker.py --input /input --output /app/output --work /app/work
+python3 -B scripts/smart_screening_ranker.py --input /input --output /app/output --work /app/work
 ```
 This produces:
 - `/app/output/screened_ranked.csv` (full ordered candidate table with decision, 4-tier relevance, evidence role, score breakdown, arbitration, and reason codes)
@@ -60,11 +60,17 @@ Before finalizing, inspect `/app/output/screening_audit.json`, `/app/output/huma
 
 ### Step 4: Grounding & Final Audit (`M5` + `M6`)
 ```bash
-python -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
-python -B scripts/final_audit.py --dir /app/output --result-file result.json --require screening_audit.json --require screened_ranked.csv --require human_review_queue.json --require report.md
+python3 -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
+python3 -B scripts/final_audit.py --dir /app/output --result-file result.json --require screening_audit.json --require screened_ranked.csv --require human_review_queue.json --require report.md
 ```
 
-## 3. Exception Handling & Edge Cases
+## 3. Distinction Between Internal Consistency & External Gold Agreement
+
+- `metrics.internal_dual_signal_kappa`: Measures agreement between independent lexical+rule screening (Signal A) and facet+evidence+abstract screening (Signal B). High internal agreement signals deterministic consistency, NOT external human validation.
+- `metrics.external_gold_agreement`: Computed automatically ONLY when `/input/` supplies an explicit external gold/reference label file (`*gold*`, `*ground_truth*`, `*reference_labels*`, `*annotated*`). When absent, the script explicitly reports `not_applicable_no_gold_labels_in_input` and never fabricates precision/recall/F1.
+- **Anti-Overfitting & Cross-Domain Generalization**: The screening engine relies on general bibliographic structure (field-weighted BM25, multi-term exclusion co-occurrence guards, abstract-presence checks, DOI/arXiv identity tiers, and 7-level deterministic tie-breaking) rather than hardcoded single-domain keywords, ensuring stable triage across electrocatalysis, biomedicine, and machine learning corpora.
+
+## 4. Exception Handling & Edge Cases
 
 | Edge Case | Required Behavior |
 | --- | --- |

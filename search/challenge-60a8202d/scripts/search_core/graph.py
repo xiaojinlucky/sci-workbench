@@ -214,14 +214,42 @@ def build_graph(clusters, ref_sets: Optional[Dict[str, Any]] = None) -> Dict[str
             nodes[e["src"]]["out"].append(e["dst"])
             nodes[e["dst"]]["in"].append(e["src"])
 
+    ext_doi = 0
+    ext_oa = 0
+    unstruct = 0
+    for u in unresolved_refs:
+        ref = u.get("ref") or {}
+        prov = u.get("provenance") or {}
+        if ref.get("doi") or ref.get("DOI"):
+            ext_doi += 1
+        elif prov.get("resolution") == "unresolved_external_id" or str(ref.get("id") or "").startswith("W"):
+            ext_oa += 1
+        else:
+            unstruct += 1
+    total_unres = len(unresolved_refs)
+    sample_unres = unresolved_refs[:500]
+    unresolved_breakdown = {
+        "total_unresolved": total_unres,
+        "external_with_doi_outside_snapshot": ext_doi,
+        "external_openalex_id_outside_snapshot": ext_oa,
+        "unstructured_missing_identifier": unstruct,
+        "category_sum": ext_doi + ext_oa + unstruct,
+        "conservation_verified": (ext_doi + ext_oa + unstruct) == total_unres,
+        "sample_size": len(sample_unres),
+        "sample_note": f"Breakdown computed over all {total_unres} unresolved references; detail sample capped at {len(sample_unres)}/{total_unres}.",
+        "interpretation": "Unresolved references represent cited works outside the finite local snapshot boundary (not parser errors).",
+    }
+
     return {
         "nodes": nodes,
         "edges": uniq,
-        "unresolved_references": unresolved_refs[:500],
+        "unresolved_references": sample_unres,
+        "unresolved_references_breakdown": unresolved_breakdown,
         "stats": {
             "n_nodes": len(nodes),
             "n_edges": len(uniq),
-            "n_unresolved_refs": len(unresolved_refs),
+            "n_unresolved_refs": total_unres,
+            "n_unresolved_sample": len(sample_unres),
             "n_retracted_nodes": sum(1 for n in nodes.values() if n.get("is_retracted")),
         },
     }

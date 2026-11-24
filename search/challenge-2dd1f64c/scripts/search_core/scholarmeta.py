@@ -580,21 +580,23 @@ def parse_record_from(obj: Any, path: str = "", pointer: str = "") -> Optional[R
 
 
 def extract_records(obj: Any, path: str = "", pointer: str = "", max_records: int = 5000) -> List[Record]:
-    """Recursively find record-like dicts in a parsed JSON/YAML/XML structure."""
+    """Recursively collect ALL record-like dicts into an immutable raw-record ledger.
+    Never silently drops duplicate bibliographic keys before explicit traceable deduplication."""
     out: List[Record] = []
-    seen = set()
+    visited_obj_ids: set = set()
 
     def rec(o, p):
         if len(out) >= max_records:
             return
+        oid = id(o)
         if isinstance(o, dict):
+            if oid in visited_obj_ids:
+                return
+            visited_obj_ids.add(oid)
             r = parse_record_from(o, path, p)
             if r is not None and (r.title or r.patent_number):
-                key = (r.title, r.doi, r.pmid, r.arxiv_id, r.patent_number)
-                if key not in seen:
-                    seen.add(key)
-                    r.rid = f"{path}#{p}"
-                    out.append(r)
+                r.rid = f"{path}#{p}"
+                out.append(r)
                 # still descend for nested lists (e.g., reference lists) but not into the same record again
                 for k, v in o.items():
                     if k in ("reference", "references", "referenced_works", "abstract_inverted_index", "authorships"):
@@ -604,6 +606,9 @@ def extract_records(obj: Any, path: str = "", pointer: str = "", max_records: in
                 for k, v in o.items():
                     rec(v, f"{p}/{k}")
         elif isinstance(o, list):
+            if oid in visited_obj_ids:
+                return
+            visited_obj_ids.add(oid)
             for i, v in enumerate(o):
                 rec(v, f"{p}/{i}")
 

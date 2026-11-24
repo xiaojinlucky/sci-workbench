@@ -203,6 +203,29 @@ def compute_field_coverage_by_source(
     return coverage, systematic_missing
 
 
+
+def estimate_cross_source_coverage(clusters: List[dd.Cluster]) -> Dict[str, Any]:
+    """Compute Chao1 capture-recapture lower-bound coverage estimate across databases
+    using single-source (f1) vs two-source (f2) occurrence counts, with explicit finite-snapshot caveat."""
+    f1 = sum(1 for c in clusters if len({m.source for m in c.members}) == 1)
+    f2 = sum(1 for c in clusters if len({m.source for m in c.members}) == 2)
+    observed = len(clusters)
+    if observed == 0:
+        return {"observed_unique": 0, "f1_single_source": 0, "f2_two_source": 0, "estimated_lower_bound_total": 0, "estimated_coverage_ratio": 0.0, "method": "Chao1_bias_corrected", "caveat": "Empty snapshot."}
+    est_missing = (f1 * (f1 - 1)) / (2.0 * (f2 + 1)) if f1 > 1 else 0.0
+    est_total = observed + est_missing
+    cov_ratio = round(observed / est_total, 4) if est_total > 0 else 1.0
+    return {
+        "observed_unique": observed,
+        "f1_single_source": f1,
+        "f2_two_source": f2,
+        "estimated_unseen_lower_bound": round(est_missing, 1),
+        "estimated_lower_bound_total": round(est_total, 1),
+        "estimated_coverage_ratio": cov_ratio,
+        "method": "Chao1_bias_corrected_capture_recapture",
+        "caveat": "Heuristic lower-bound estimate over finite local snapshots assuming partial source overlap; does not prove global recall.",
+    }
+
 def compute_exclusivity_and_overlap(
     clusters: List[dd.Cluster],
     all_sources: List[str],
@@ -526,12 +549,57 @@ def run_pipeline(
     target_dbs = _infer_target_databases(bundle, raw_records)
     degraded_sources, valid_empty_sources = collect_degraded_sources(bundle, target_dbs, raw_records)
 
-    # Re-build per-source adapted query matrix over all target databases
+    # Extract genuinely observed API request / pagination parameters from raw responses (never fabricate remote execution)
+    observed_api_requests: Dict[str, Dict[str, Any]] = {}
+    for rel_path, obj in (bundle.extra.get("parsed", {}) or {}).items():
+        low_p = rel_path.lower()
+        if isinstance(obj, dict):
+            meta = obj.get("meta") if isinstance(obj.get("meta"), dict) else {}
+            msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+            if "openalex" in low_p and meta:
+                observed_api_requests["openalex"] = {
+                    "file": rel_path,
+                    "observed_query": meta.get("query") or meta.get("filter") or "",
+                    "total_count": meta.get("count"),
+                    "page": meta.get("page"),
+                    "per_page": meta.get("per_page"),
+                    "returned": len(obj.get("results") or []),
+                }
+            elif "crossref" in low_p and msg:
+                observed_api_requests["crossref"] = {
+                    "file": rel_path,
+                    "observed_query": msg.get("query") or "",
+                    "total_results": msg.get("total-results"),
+                    "returned": len(msg.get("items") or ([msg] if msg.get("DOI") else [])),
+                }
+            elif "europepmc" in low_p:
+                req_info = obj.get("request") if isinstance(obj.get("request"), dict) else {}
+                observed_api_requests["europepmc"] = {
+                    "file": rel_path,
+                    "observed_query": req_info.get("queryString") or "",
+                    "hit_count": obj.get("hitCount"),
+                    "page_size": req_info.get("pageSize"),
+                }
+
+    # Build local post-hoc query plan (explicitly labeled as local plan, distinct from observed remote requests)
     all_texts = ([S["question"]] if S.get("question") else []) + [r.text_for_search for r in raw_records]
     abbrevs, _ = qm.mine_abbreviations(all_texts)
     per_source_queries = qm.build_queries(S["plan"], abbrevs, S["co_terms"], target_dbs)
     round1_q_map = (per_source_queries.get("rounds") or [{}])[0].get("queries", {})
     round2_q_map = (per_source_queries.get("rounds") or [{}, {}])[-1].get("queries", {})
+
+    # Score merged canonical items against core scientific terms for relevance ranking & per-record rationale
+    core_query_terms = qm.stem_tokens(qm.tokenize(S.get("question") or ""))
+    searcher = S.get("searcher")
+    score_by_rid: Dict[str, Tuple[float, List[str]]] = {}
+    if searcher is not None and core_query_terms:
+        sc_map = searcher.score_all(core_query_terms)
+        q_set = set(core_query_terms)
+        for it in (S.get("items") or []):
+            rid_k = it["rid"]
+            it_toks = set(qm.stem_tokens(qm.tokenize(f"{it.get('title', '')} {it.get('abstract', '')}")))
+            matched = sorted(q_set & it_toks)
+            score_by_rid[rid_k] = (round(float(sc_map.get(rid_k, 0.0)), 4), matched)
 
     budget_guard.tick_phase(budget_file, "coverage_and_conflict_audit")
 
@@ -594,9 +662,30 @@ def run_pipeline(
                 }
             )
 
+        obs_for_srcs = {s: observed_api_requests[s] for s in srcs if s in observed_api_requests and observed_api_requests[s].get("observed_query")}
+        rel_score, matched_terms = score_by_rid.get(canon.rid, (0.0, []))
+        has_abs = bool((merged.get("abstract") or "").strip())
+        if merged.get("is_retracted"):
+            scr_decision = "exclude_retracted_caution"
+            scr_rationale = "Flagged retracted in source metadata; retained for audit only."
+        elif not has_abs and rel_score < 2.0:
+            scr_decision = "needs_review_missing_abstract"
+            scr_rationale = f"Missing abstract; matched={matched_terms[:6]}; score={rel_score}."
+        elif rel_score >= 4.0 and len(matched_terms) >= 2:
+            scr_decision = "include_direct_relevant"
+            scr_rationale = f"High scientific term match ({matched_terms[:8]}), score={rel_score}."
+        elif rel_score >= 1.5 and matched_terms:
+            scr_decision = "borderline_contextual"
+            scr_rationale = f"Partial scientific term overlap ({matched_terms[:6]}), score={rel_score}; review fulltext."
+        else:
+            scr_decision = "exclude_low_relevance"
+            scr_rationale = f"Low overlap with core research question terms ({matched_terms[:4]}), score={rel_score}."
+
         lineage_chain = {
             "libraries": srcs,
-            "queries_adapted": {s: {"round1": round1_q_map.get(s, ""), "round2": round2_q_map.get(s, "")} for s in srcs},
+            "query_provenance": "observed_from_api_response" if obs_for_srcs else "unknown_snapshot_only",
+            "observed_api_requests": {s: observed_api_requests.get(s, {"status": "unknown_snapshot_only"}) for s in srcs},
+            "local_posthoc_query_plan": {s: {"round1": round1_q_map.get(s, ""), "round2": round2_q_map.get(s, "")} for s in srcs},
             "raw_responses": [
                 {
                     "rid": m.rid,
@@ -629,6 +718,10 @@ def run_pipeline(
             "version": canon.version,
             "citations_count": merged.get("citations_count"),
             "is_retracted": merged.get("is_retracted", False),
+            "relevance_score": rel_score,
+            "matched_scientific_terms": matched_terms[:10],
+            "screening_decision": scr_decision,
+            "screening_rationale": scr_rationale,
             "found_in_sources": srcs,
             "n_merged_records": len(c.members),
             "is_source_exclusive": is_excl,
@@ -646,6 +739,9 @@ def run_pipeline(
         csv_rows.append(
             {
                 "canonical_rid": canon.rid,
+                "relevance_score": rec_out["relevance_score"],
+                "screening_decision": rec_out["screening_decision"],
+                "screening_rationale": rec_out["screening_rationale"],
                 "title": rec_out["title"],
                 "authors": "; ".join(rec_out["authors"]),
                 "year": rec_out["year"] or "",
@@ -665,6 +761,10 @@ def run_pipeline(
                 "source_locators": "; ".join(sorted({f"{m.path}{'#' + m.pointer if m.pointer else ''}" for m in c.members})),
             }
         )
+
+    # Sort canonical records & CSV deterministically by scientific relevance score descending
+    canonical_records.sort(key=lambda r: (-float(r.get("relevance_score", 0.0)), -(r.get("citations_count") or 0), r["canonical_rid"]))
+    csv_rows.sort(key=lambda r: (-float(r.get("relevance_score", 0.0)), r["canonical_rid"]))
 
     # Strong conservation assertion
     conserved_ok = bool(dedup_rep["source_count_conserved"]) and (
@@ -797,6 +897,7 @@ def run_pipeline(
         },
     )
 
+    coverage_est = estimate_cross_source_coverage(clusters)
     metrics = {
         "raw_record_count": dedup_rep["n_records"],
         "canonical_record_count": dedup_rep["n_unique"],
@@ -811,6 +912,8 @@ def run_pipeline(
         "field_conflicts_resolved_count": len(field_conflicts_resolved),
         "systematic_missing_field_count": len(sys_missing),
         "rollback_log_count": len(rollback_log),
+        "chao1_estimated_coverage_ratio": coverage_est["estimated_coverage_ratio"],
+        "chao1_estimated_total_lower_bound": coverage_est["estimated_lower_bound_total"],
     }
     metric_provenance = {
         "raw_record_count": "dedup_rollback_log.json:summary.n_records",
@@ -826,6 +929,8 @@ def run_pipeline(
         "field_conflicts_resolved_count": "result.json:evidence.field_conflicts_resolved",
         "systematic_missing_field_count": "source_coverage_matrix.json:systematic_missing_fields",
         "rollback_log_count": "dedup_rollback_log.json:rollback_entries",
+        "chao1_estimated_coverage_ratio": "source_coverage_matrix.json:coverage_estimation.estimated_coverage_ratio",
+        "chao1_estimated_total_lower_bound": "source_coverage_matrix.json:coverage_estimation.estimated_lower_bound_total",
     }
 
     findings = [

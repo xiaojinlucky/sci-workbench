@@ -28,15 +28,15 @@ All scripts live under `scripts/` relative to this `SKILL.md` and run on pure Py
 
 ### Step 1: Preflight & Budget Initialization (`M1` + `M3`)
 ```bash
-python -B scripts/preflight_probe.py --input /input --output /app/output --out /app/work/env.json
-python -B scripts/budget_guard.py --state /app/work/budget.json --init
-python -B scripts/budget_guard.py --state /app/work/budget.json --tick decompose_and_search
+python3 -B scripts/preflight_probe.py --input /input --output /app/output --out /app/work/env.json
+python3 -B scripts/budget_guard.py --state /app/work/.budget_state.json --init
+python3 -B scripts/budget_guard.py --state /app/work/.budget_state.json --tick decompose_and_search
 ```
 Inspect `/app/work/env.json` to confirm available files and whether optional PDF extractors (`pdfplumber`/`pypdf`/`pdftotext`) exist. If no PDF backend is present, the pipeline automatically degrades to metadata-only mode and records the limitation explicitly.
 
 ### Step 2: Run Question-Driven Planning & Two-Round Retrieval
 ```bash
-python -B scripts/question_search_planner.py --input /input --output /app/output --work /app/work
+python3 -B scripts/question_search_planner.py --input /input --output /app/output --work /app/work
 ```
 Pass `--question "<explicit question>"` only if `/input/case.json` and `/input/task.md` omit a machine-readable question string.
 
@@ -68,12 +68,20 @@ After `question_search_planner.py` completes, inspect `/app/output/question_sear
 
 ### Step 4: Grounding & Final Audit (`M5` + `M6`)
 ```bash
-python -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
-python -B scripts/final_audit.py --dir /app/output --result-file result.json --require question_search_plan.json --require subquestion_evidence_matrix.csv --require ranked_candidates.csv --require report.md
+python3 -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
+python3 -B scripts/final_audit.py --dir /app/output --result-file result.json --require question_search_plan.json --require subquestion_evidence_matrix.csv --require ranked_candidates.csv --require report.md
 ```
 If `gap_gate.py` or `final_audit.py` exits non-zero, resolve the flagged grounding mismatch or missing artifact before finishing.
 
-## 3. Exception Handling & Degraded Modes
+## 3. Alignment Between Compact Attributed Snapshots & Large Multi-DB Snapshots
+
+Whether `/input/` supplies a compact curated snapshot (e.g., 9 real attributed papers with query logs and synthetic screening fixtures) or a larger multi-database export (Crossref/OpenAlex/EuropePMC/arXiv), apply the exact same discipline:
+1. **Treat Every Input Record as Ground Truth**: Extract all bibliographic records from `case.json`, Crossref/EuropePMC/OpenAlex JSON, arXiv XML, BibTeX/RIS/CSV, and attached full-text documents without assuming domain labels are correct.
+2. **Preserve Classical-Variant & Broad-then-Screen Discipline**: Map the compound question onto its core research prototype first (7-slot Element Card), run Round 1 core recall across all sub-questions, diagnose zero-postings terms, and execute Round 2 controlled expansion (expanding corpus-grounded acronyms globally while confining co-occurrence expansion to `SQ1` so strict comparator/condition/evidence-type sub-questions never suffer semantic drift).
+3. **Balance Three Evidence Perspectives**: Tag retained works across `method_developer`, `empirical_application`, and `independent_evaluator` to prevent confirmation bias or selective cherry-picking.
+4. **Reproducible Multi-Run Determinism**: Running `question_search_planner.py` repeatedly on the same `/input/` yields identical sub-question DAGs, sufficiency states, candidate rankings, and stopping verdicts.
+
+## 4. Exception Handling & Degraded Modes
 
 | Failure / Edge Case | Required Pipeline & Agent Behavior |
 | --- | --- |

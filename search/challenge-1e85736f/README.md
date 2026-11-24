@@ -35,11 +35,11 @@ Offline, pure-Python 3.12 standard-library Skill for closed-loop incremental lit
 ## Quick Start
 
 ```bash
-python -B scripts/preflight_probe.py --input /input --output /app/output --work /app/work --out /app/work/env.json
-python -B scripts/budget_guard.py --state /app/work/budget.json --init
-python -B scripts/incremental_tracker.py --input /input --output /app/output --work /app/work --state-file /app/work/alert_ledger.json
-python -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
-python -B scripts/final_audit.py --dir /app/output --result-file result.json \
+python3 -B scripts/preflight_probe.py --input /input --output /app/output --work /app/work --out /app/work/env.json
+python3 -B scripts/budget_guard.py --state /app/work/.budget_state.json --init
+python3 -B scripts/incremental_tracker.py --input /input --output /app/output --work /app/work --state-file /app/work/alert_ledger.json
+python3 -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
+python3 -B scripts/final_audit.py --dir /app/output --result-file result.json \
   --require incremental_delta.csv --require alert_digest.json \
   --require watermark_state.json --require report.md
 ```

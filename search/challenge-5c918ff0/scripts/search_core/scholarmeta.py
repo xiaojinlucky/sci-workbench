@@ -397,28 +397,19 @@ def parse_arxiv_entry(e: Dict[str, Any], path: str = "", pointer: str = "") -> R
     r = Record(source="arxiv", path=path, pointer=pointer)
     r.title = strip_html(e.get("title"))
     r.abstract = strip_html(e.get("summary") or e.get("abstract"))
-    raw_authors = e.get("authors", []) or []
-    r.authors = [
-        author_display({"family": a.get("name")}) if isinstance(a, dict) else author_display(a)
-        for a in raw_authors
-        if a
-    ]
-    r.year = _year_from(e.get("published"), e.get("updated"), e.get("year"))
-    r.date = str(e.get("published") or e.get("year") or "")
-    r.arxiv_id = norm_arxiv(e.get("arxiv_id") or e.get("entry_id") or e.get("id"))
+    r.authors = [author_display({"family": a.get("name")}) for a in (e.get("authors", []) or []) if isinstance(a, dict)]
+    r.year = _year_from(e.get("published"), e.get("updated"))
+    r.date = e.get("published") or ""
+    r.arxiv_id = norm_arxiv(e.get("id") or e.get("arxiv_id") or e.get("entry_id"))
     r.doi = norm_doi(e.get("doi"))
-    if isinstance(e.get("alt_dois"), list):
-        r.alt_dois = [norm_doi(d) for d in e["alt_dois"] if norm_doi(d)]
     r.pub_type = "preprint"
-    r.version = strip_html(e.get("version") or "") or "preprint"
-    r.venue = strip_html(e.get("venue") or e.get("journal_ref") or "arXiv")
-    raw_id = str(e.get("id") or "")
-    r.url = raw_id if raw_id.startswith("http") else (f"https://arxiv.org/abs/{r.arxiv_id}" if r.arxiv_id else "")
+    r.version = "preprint"
+    r.url = e.get("id") or (f"https://arxiv.org/abs/{r.arxiv_id}" if r.arxiv_id else "")
     for l in (e.get("links", []) or []):
         if isinstance(l, dict) and (l.get("rel") == "related") and l.get("href", "").startswith("http://dx.doi.org/https://doi.org/"):
             r.doi = r.doi or norm_doi(l.get("href"))
     r.keywords = [strip_html(c.get("term")) for c in (e.get("tags", []) or e.get("categories", []) or []) if isinstance(c, dict)]
-    if isinstance(e.get("journal_ref"), str) and e["journal_ref"].strip():
+    if isinstance(e.get("journal_ref"), str):
         r.venue = e["journal_ref"]
         r.version = "published" if r.doi else "preprint"
     return r
@@ -492,15 +483,14 @@ def parse_patent(w: Dict[str, Any], path: str = "", pointer: str = "") -> Record
 GENERIC_TITLE_KEYS = ("title", "Title", "TI", "article_title", "articleTitle", "display_name", "patent_title", "invention_title", "name")
 GENERIC_ABSTRACT_KEYS = ("abstract", "Abstract", "AB", "abstractText", "abstract_text", "summary", "description")
 GENERIC_YEAR_KEYS = ("year", "Year", "PY", "pubYear", "publication_year", "issued", "published", "date", "DP", "publication_date")
-GENERIC_VENUE_KEYS = ("venue", "journal", "journalTitle", "container-title", "publicationTitle", "SO", "publisher")
+GENERIC_VENUE_KEYS = ("venue", "journal", "journalTitle", "container-title", "source", "publicationTitle", "SO", "publisher")
 GENERIC_DOI_KEYS = ("DOI", "doi", "Doi")
 GENERIC_PMID_KEYS = ("pmid", "PMID")
 GENERIC_ARXIV_KEYS = ("arxiv_id", "arxivId", "arxiv", "ArXiv")
 
 
 def parse_generic(w: Dict[str, Any], path: str = "", pointer: str = "") -> Record:
-    explicit_src = strip_html(w.get("source") or w.get("database") or "").lower()
-    r = Record(source=explicit_src or "generic", path=path, pointer=pointer)
+    r = Record(source="generic", path=path, pointer=pointer)
     for k in GENERIC_TITLE_KEYS:
         if w.get(k):
             v = w[k]
@@ -533,8 +523,6 @@ def parse_generic(w: Dict[str, Any], path: str = "", pointer: str = "") -> Recor
     for k in GENERIC_DOI_KEYS:
         if w.get(k):
             r.doi = norm_doi(w[k]); break
-    if isinstance(w.get("alt_dois"), list):
-        r.alt_dois = [norm_doi(d) for d in w["alt_dois"] if norm_doi(d)]
     for k in GENERIC_PMID_KEYS:
         if w.get(k):
             r.pmid = norm_pmid(w[k]); break
@@ -592,21 +580,23 @@ def parse_record_from(obj: Any, path: str = "", pointer: str = "") -> Optional[R
 
 
 def extract_records(obj: Any, path: str = "", pointer: str = "", max_records: int = 5000) -> List[Record]:
-    """Recursively find record-like dicts in a parsed JSON/YAML/XML structure."""
+    """Recursively collect ALL record-like dicts into an immutable raw-record ledger.
+    Never silently drops duplicate bibliographic keys before explicit traceable deduplication."""
     out: List[Record] = []
-    seen = set()
+    visited_obj_ids: set = set()
 
     def rec(o, p):
         if len(out) >= max_records:
             return
+        oid = id(o)
         if isinstance(o, dict):
+            if oid in visited_obj_ids:
+                return
+            visited_obj_ids.add(oid)
             r = parse_record_from(o, path, p)
             if r is not None and (r.title or r.patent_number):
-                key = (r.title, r.doi, r.pmid, r.arxiv_id, r.patent_number)
-                if key not in seen:
-                    seen.add(key)
-                    r.rid = f"{path}#{p}"
-                    out.append(r)
+                r.rid = f"{path}#{p}"
+                out.append(r)
                 # still descend for nested lists (e.g., reference lists) but not into the same record again
                 for k, v in o.items():
                     if k in ("reference", "references", "referenced_works", "abstract_inverted_index", "authorships"):
@@ -616,6 +606,9 @@ def extract_records(obj: Any, path: str = "", pointer: str = "", max_records: in
                 for k, v in o.items():
                     rec(v, f"{p}/{k}")
         elif isinstance(o, list):
+            if oid in visited_obj_ids:
+                return
+            visited_obj_ids.add(oid)
             for i, v in enumerate(o):
                 rec(v, f"{p}/{i}")
 

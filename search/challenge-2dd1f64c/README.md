@@ -10,11 +10,11 @@ Offline, evidence-bound Skill for auditable all-record screening and determinist
 ## Quick Usage
 
 ```bash
-python -B scripts/preflight_probe.py --input /input --output /app/output --out /app/work/env.json
-python -B scripts/budget_guard.py --state /app/work/budget.json --init
-python -B scripts/smart_screening_ranker.py --input /input --output /app/output --work /app/work
-python -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
-python -B scripts/final_audit.py --dir /app/output --result-file result.json --require screening_audit.json --require human_review_queue.json
+python3 -B scripts/preflight_probe.py --input /input --output /app/output --out /app/work/env.json
+python3 -B scripts/budget_guard.py --state /app/work/.budget_state.json --init
+python3 -B scripts/smart_screening_ranker.py --input /input --output /app/output --work /app/work
+python3 -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
+python3 -B scripts/final_audit.py --dir /app/output --result-file result.json --require screening_audit.json --require human_review_queue.json
 ```
 
 ## Key Capabilities

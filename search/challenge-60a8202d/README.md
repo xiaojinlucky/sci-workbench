@@ -35,11 +35,11 @@ Offline, pure-Python 3.12 standard-library Skill for direction-aware multi-hop c
 ## Quick Start
 
 ```bash
-python -B scripts/preflight_probe.py --input /input --output /app/output --work /app/work --out /app/work/env.json
-python -B scripts/budget_guard.py --state /app/work/budget.json --init
-python -B scripts/citation_graph_tracer.py --input /input --output /app/output --work /app/work --depth 2 --max-branch 60
-python -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
-python -B scripts/final_audit.py --dir /app/output --result-file result.json \
+python3 -B scripts/preflight_probe.py --input /input --output /app/output --work /app/work --out /app/work/env.json
+python3 -B scripts/budget_guard.py --state /app/work/.budget_state.json --init
+python3 -B scripts/citation_graph_tracer.py --input /input --output /app/output --work /app/work --depth 2 --max-branch 60
+python3 -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
+python3 -B scripts/final_audit.py --dir /app/output --result-file result.json \
   --require citation_network.json --require edge_provenance_table.csv \
   --require snapshot_diff.json --require report.md
 ```

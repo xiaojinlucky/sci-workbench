@@ -328,11 +328,34 @@ def _load_subscription_and_snapshots(
             for idx, item in enumerate(curr_raw, 1)
         ]
     else:
-        # Mode 3 fallback: no explicit current snapshot -> use parsed multi-source API records
-        snap_meta["mode"] = "api_corpus_fallback"
+        # Mode 3 fallback: no explicit current/previous snapshot files -> partition real multi-source API records by window_start watermark
+        snap_meta["mode"] = "api_corpus_watermark_partition"
         snap_meta["current_snapshot_file"] = "api_corpus"
-        snap_meta["current_snapshot_id"] = "api_corpus_snapshot"
-        curr_records = list(bundle.records)
+        snap_meta["current_snapshot_id"] = "api_corpus_window_slice"
+        ws_str = str(sub_cfg.get("window_start") or sub_cfg.get("previous_watermark") or "").strip()
+        if not ws_str:
+            yrs = sorted({r.year for r in bundle.records if r.year and 1990 <= r.year <= 2035})
+            cutoff_yr = yrs[-1] if yrs else 2025
+            ws_str = f"{cutoff_yr}-01-01T00:00:00Z"
+            sub_cfg["window_start"] = ws_str
+            sub_cfg.setdefault("previous_watermark", ws_str)
+            sub_cfg.setdefault("window_end", f"{cutoff_yr}-12-31T23:59:59Z")
+        ws_cut = ws_str[:10]
+        if not prev_records:
+            snap_meta["previous_snapshot_file"] = "api_corpus_pre_watermark"
+            snap_meta["previous_snapshot_id"] = f"pre_{ws_cut}"
+            prev_split: List[sm.Record] = []
+            curr_split: List[sm.Record] = []
+            for r in bundle.records:
+                d_eff = (getattr(r, "indexed_date", "") or r.date or (f"{r.year}-06-15" if r.year else ""))[:10]
+                if d_eff and d_eff < ws_cut:
+                    prev_split.append(r)
+                else:
+                    curr_split.append(r)
+            prev_records = prev_split
+            curr_records = curr_split
+        else:
+            curr_records = list(bundle.records)
 
     sub_cfg.setdefault("subscription_id", bundle.case_id or "sub-default")
     sub_cfg.setdefault("topic", bundle.question or "")
@@ -439,6 +462,62 @@ def _audit_supplementary_api_corpus(
     window_end_dt: Optional[dt.datetime],
     used_as_primary: bool,
 ) -> Dict[str, Any]:
+    detected_issues: List[Dict[str, Any]] = []
+    parsed_map = bundle.extra.get("parsed", {}) or {}
+    for rel_path, obj in parsed_map.items():
+        low_p = rel_path.lower()
+        if isinstance(obj, dict) and isinstance(obj.get("meta"), dict) and isinstance(obj.get("results"), list):
+            total_c = obj["meta"].get("count")
+            returned_c = len(obj["results"])
+            per_page = obj["meta"].get("per_page")
+            page = obj["meta"].get("page", 1)
+            if isinstance(total_c, int) and total_c > returned_c:
+                detected_issues.append(
+                    {
+                        "source": "openalex" if "openalex" in low_p else Path(rel_path).stem,
+                        "file": rel_path,
+                        "status": "PAGINATION_TRUNCATED",
+                        "error": f"Snapshot page={page} returned {returned_c}/{total_c} total works (per_page={per_page}); remaining pages unretrieved.",
+                        "returned": returned_c,
+                        "total_reported": total_c,
+                    }
+                )
+        elif isinstance(obj, dict) and "hitCount" in obj and isinstance(obj.get("resultList"), dict):
+            hc = obj.get("hitCount")
+            ret = len((obj.get("resultList") or {}).get("result") or [])
+            if isinstance(hc, int) and hc > ret:
+                detected_issues.append(
+                    {
+                        "source": "europepmc",
+                        "file": rel_path,
+                        "status": "PAGINATION_TRUNCATED",
+                        "error": f"EuropePMC snapshot returned {ret}/{hc} hits; remaining pages unretrieved.",
+                        "returned": ret,
+                        "total_reported": hc,
+                    }
+                )
+    # Check arXiv XML truncation or out-of-window feed coverage
+    for f in bundle.files:
+        if f.ext == ".xml" and "arxiv" in f.rel.lower():
+            try:
+                raw_xml = Path(f.abs_path).read_text(encoding="utf-8", errors="replace")
+                m_tot = re.search(r"totalResults[^>]*>(\d+)<", raw_xml)
+                n_ent = len(re.findall(r"<entry\b", raw_xml))
+                tot_n = int(m_tot.group(1)) if m_tot else n_ent
+                if tot_n > n_ent:
+                    detected_issues.append(
+                        {
+                            "source": "arxiv",
+                            "file": f.rel,
+                            "status": "PAGINATION_TRUNCATED",
+                            "error": f"arXiv feed returned {n_ent}/{tot_n} entries; remaining pages unretrieved.",
+                            "returned": n_ent,
+                            "total_reported": tot_n,
+                        }
+                    )
+            except Exception:
+                pass
+
     if used_as_primary or not bundle.records:
         return {
             "present": bool(bundle.records),
@@ -448,9 +527,11 @@ def _audit_supplementary_api_corpus(
             "records_by_source": dict(Counter(r.source for r in bundle.records)),
             "in_window_dated_count": 0,
             "retracted_api_count": sum(1 for r in bundle.records if r.is_retracted),
+            "detected_pagination_or_window_issues": detected_issues,
         }
     clusters, ambiguous, _ = dd.cluster_records_detailed(bundle.records)
     in_win = 0
+    out_win_by_source: Counter = Counter()
     for c in clusters:
         d_str = c.canonical.date or (f"{c.canonical.year}-01-01" if c.canonical.year else "")
         if d_str and window_start_dt and window_end_dt:
@@ -458,6 +539,18 @@ def _audit_supplementary_api_corpus(
             dt_val = _parse_iso_utc(d_str[:10], "api_date", tmp_anom)
             if dt_val and window_start_dt <= dt_val <= window_end_dt:
                 in_win += 1
+            elif dt_val:
+                out_win_by_source[c.canonical.source or "unknown"] += 1
+    for src_name, cnt in sorted(out_win_by_source.items()):
+        detected_issues.append(
+            {
+                "source": src_name,
+                "file": f"api/{src_name}",
+                "status": "OUT_OF_WINDOW_FEED",
+                "error": f"{cnt} cluster(s) from {src_name} fall outside active UTC window; feed does not cover full tracking window.",
+                "out_of_window_count": cnt,
+            }
+        )
     return {
         "present": True,
         "used_as_primary_snapshot": False,
@@ -466,8 +559,10 @@ def _audit_supplementary_api_corpus(
         "ambiguous_api_pairs": len(ambiguous),
         "records_by_source": dict(Counter(r.source for r in bundle.records)),
         "in_window_dated_count": in_win,
+        "out_of_window_by_source": dict(out_win_by_source),
         "retracted_api_count": sum(1 for c in clusters if any(m.is_retracted for m in c.members)),
-        "note": "Supplementary multi-database API corpus audited separately so explicit snapshot triage conservation remains exact.",
+        "detected_pagination_or_window_issues": detected_issues,
+        "note": "Supplementary multi-database API pagination/window defects are promoted into main gaps and watermark freeze decisions.",
     }
 
 
@@ -1027,6 +1122,12 @@ def run_pipeline(
     ]
     builder.write_csv("incremental_delta.csv", csv_rows, fields=csv_fields)
 
+    all_pagination_issues = list(bundle.pagination_issues) + list(supp_api.get("detected_pagination_or_window_issues") or [])
+    frozen_sources = sorted({str(pi.get("source") or pi.get("file") or "unknown") for pi in all_pagination_issues})
+    has_coverage_block = bool(all_pagination_issues or bundle.source_load_errors)
+    watermark_committed = not has_coverage_block
+    effective_new_watermark = (prev_wm_utc or window_start_utc or now_iso) if has_coverage_block else (window_end_utc or prev_wm_utc or now_iso)
+
     alert_digest = {
         "case_id": case_id,
         "scope_note": "Organizer-local incremental snapshot only; no live remote polling or global latest-publication claim.",
@@ -1047,10 +1148,28 @@ def run_pipeline(
         "ambiguous_candidates": ambiguous_pairs,
         "intra_window_rollback_log": intra_rollback,
         "date_anomalies": date_anomalies,
-        "pagination_issues": list(bundle.pagination_issues),
+        "pagination_issues": all_pagination_issues,
+        "watermark_committed": watermark_committed,
+        "frozen_sources": frozen_sources,
         "supplementary_api_audit": supp_api,
     }
     builder.write_json("alert_digest.json", alert_digest)
+
+    per_source_wm = {}
+    for src_k in sorted(set(list((supp_api.get("records_by_source") or {}).keys()) + frozen_sources)):
+        if src_k in frozen_sources:
+            per_source_wm[src_k] = {
+                "watermark_committed": False,
+                "status": "FROZEN_INCOMPLETE_COVERAGE",
+                "committed_watermark_utc": prev_wm_utc,
+                "retry_window": {"start_utc": window_start_utc, "end_utc": window_end_utc},
+            }
+        else:
+            per_source_wm[src_k] = {
+                "watermark_committed": True,
+                "status": "ADVANCED",
+                "committed_watermark_utc": window_end_utc or prev_wm_utc or now_iso,
+            }
 
     watermark_state = {
         "case_id": case_id,
@@ -1060,7 +1179,16 @@ def run_pipeline(
         "previous_watermark_utc": prev_wm_utc,
         "window_start_utc": window_start_utc,
         "window_end_utc": window_end_utc,
-        "new_watermark_utc": window_end_utc or prev_wm_utc or now_iso,
+        "watermark_committed": watermark_committed,
+        "watermark_freeze_reason": (
+            f"Frozen due to {len(all_pagination_issues)} pagination/out-of-window issue(s) across {frozen_sources}; retry window required before advancing."
+            if has_coverage_block
+            else "All snapshot sources complete; safe to advance watermark."
+        ),
+        "frozen_sources": frozen_sources,
+        "retry_window": {"start_utc": window_start_utc, "end_utc": window_end_utc} if has_coverage_block else None,
+        "per_source_watermark_status": per_source_wm,
+        "new_watermark_utc": effective_new_watermark,
         "previous_snapshot_id": snap_meta["previous_snapshot_id"],
         "current_snapshot_id": snap_meta["current_snapshot_id"],
         "run_sequence_for_window": run_seq,
@@ -1082,7 +1210,7 @@ def run_pipeline(
         emitted_alerts=emitted_alerts,
         suppressed_rerun_items=suppressed_rerun_items,
         date_anomalies=date_anomalies,
-        pagination_issues=list(bundle.pagination_issues),
+        pagination_issues=all_pagination_issues,
         conservation=conservation,
         supp_api=supp_api,
     )
@@ -1097,7 +1225,7 @@ def run_pipeline(
         "files": bundle.inventory(),
         "records_by_file": bundle.record_files,
         "source_load_errors": bundle.source_load_errors,
-        "pagination_issues": bundle.pagination_issues,
+        "pagination_issues": all_pagination_issues,
         "notes": bundle.notes,
     }
     builder.write_json("run_manifest.json", manifest_obj)
@@ -1112,13 +1240,22 @@ def run_pipeline(
                 "message": "Current tracking window contains 0 records; emitted 0 alerts honestly without backfill.",
             }
         )
-    for pi in bundle.pagination_issues:
+    for pi in all_pagination_issues:
         gaps.append(
             {
                 "code": "SOURCE_PAGINATION_OR_ACCESS_ERROR",
                 "severity": "warning",
                 "source": str(pi.get("file", "api")),
                 "message": f"{pi.get('status')}: {pi.get('error')}",
+            }
+        )
+    if has_coverage_block:
+        gaps.append(
+            {
+                "code": "WATERMARK_FROZEN_INCOMPLETE_COVERAGE",
+                "severity": "warning",
+                "source": "watermark_state",
+                "message": f"Watermark NOT advanced (watermark_committed=False) for sources {frozen_sources}; retry_window={window_start_utc}..{window_end_utc}.",
             }
         )
     for err in bundle.source_load_errors:
@@ -1154,7 +1291,8 @@ def run_pipeline(
         "suppressed_already_notified": len(suppressed_rerun_items),
         "run_sequence_for_window": run_seq,
         "date_anomaly_count": len(date_anomalies),
-        "pagination_issue_count": len(bundle.pagination_issues),
+        "pagination_issue_count": len(all_pagination_issues),
+        "watermark_committed": watermark_committed,
         "ambiguous_identity_count": len(ambiguous_pairs),
         "supplementary_api_records": supp_api.get("raw_api_records", 0),
     }

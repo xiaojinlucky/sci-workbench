@@ -23,6 +23,17 @@ except ImportError:
     import scholarmeta as sm  # type: ignore
     import lang as lg  # type: ignore
 
+TASK_META_STOP_EN = set(
+    """federated federate federat multi-database multidatabase database databases search searching
+    retrieval retrieve screening screen screeners citation citations tracking tracker incremental
+    deduplicate deduplication dedup merge merging merged pipeline workflow snapshot snapshots
+    offline query queries literature academic scholarly bibliographic multi source sources
+    joint combined unified cross-source cross-database corpus corpora record records""".split()
+)
+TASK_META_STOP_ZH = set(
+    "检索 联合检索 多数据库 多库 去重 筛选 排序 追踪 引文 快照 文献 学术 归并 增量".split()
+)
+
 STOP_EN = set(
     """a an the of and or to in on for with without within by from as at is are was were be been being
     this that these those we our their its it can could may might will would should must not no than then
@@ -32,10 +43,10 @@ STOP_EN = set(
     approaches paper papers work works article articles research analysis analyses effect effects role
     roles impact impacts review reviews new novel different same high low higher lower increase decrease
     improve reduces significantly significant compared comparison""".split()
-)
+) | TASK_META_STOP_EN
 STOP_ZH = set(
     "的 了 在 是 和 与 为 对 中 及 等 我们 通过 可以 一个 以及 并 也 但 由 于 其 该 这 那 此 将 被 把 从 向 到 关于 基于 研究 方法 结果 分析 问题 进行 本文 文章 发现 显示 具有 能够 使用 采用 不同 相同 影响 作用".split()
-)
+) | TASK_META_STOP_ZH
 
 TIME_RE = re.compile(
     r"(20\d{2})\s*(?:[-–~至到]|to|and|直到|到)\s*(20\d{2})"
@@ -229,23 +240,23 @@ def decompose(question: str, reference_year: Optional[int] = None) -> Dict[str, 
 
     # Method clause
     meth = None
-    for mm in re.finditer(r"\b(using|via|based on|through|employing|applying|采用|使用|利用|基于|通过)\s+([^,.;]{3,80})", core, re.I):
+    for mm in re.finditer(r"\b(using|via|based on|through|employing|applying|采用|使用|利用|基于|通过)\s+([^,.;]{3,200})", core, re.I):
         meth = _norm_phrase(mm.group(2))
         out["slots"]["method"] = meth
         out["element_card"]["method_or_intervention"] = meth
         break
 
     # Outcome / mechanism clause
-    mo = re.search(r"(?:effect|effects|impact|influence|role|作用|影响) of ([^,.;]{3,80}?) (?:on|in|of) ([^,.;?]{3,80})", core, re.I)
+    mo = re.search(r"(?:effect|effects|impact|influence|role|作用|影响) of ([^,.;]{3,160}?) (?:on|in|of) ([^,.;?]{3,220})", core, re.I)
     if mo:
         out["slots"]["object"] = _norm_phrase(mo.group(1))
         out["slots"]["outcome"] = _norm_phrase(mo.group(2))
     else:
-        mo2 = re.search(r"\b(improve[sd]?|increase[sd]?|reduce[sd]?|decrease[sd]?|enhance[sd]?|affect[sd]?|predict[sd]?|regulate[sd]?)(?: the)?\s+([^,.;?]{3,80})", core, re.I)
+        mo2 = re.search(r"\b(improve[sd]?|increase[sd]?|reduce[sd]?|decrease[sd]?|enhance[sd]?|affect[sd]?|predict[sd]?|regulate[sd]?)(?: the)?\s+([^,.;?]{3,220})", core, re.I)
         if mo2:
             out["slots"]["outcome"] = _norm_phrase(mo2.group(2))
             before = core[: mo2.start()].strip(" ,;:-")
-            if before and len(before) < 120:
+            if before and len(before) < 160:
                 out["slots"]["object"] = _norm_phrase(before)
 
     mech_m = MECH_RE.search(q)
@@ -588,16 +599,18 @@ def compute_stopping_verdict(
     marginal_new_hits: int,
     source_load_errors: List[Dict[str, Any]],
     has_conflicts: bool = False,
+    pagination_issues: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Explicit, auditable stopping criterion (stop_sufficient / stop_diminishing_returns / escalate_human)."""
+    pag_issues = list(pagination_issues or [])
     subs = coverage.get("sub_questions", [])
     uncovered = [s.get("id") or s.get("sub_question_id") for s in subs if s.get("evidence_state") == "UNKNOWN"]
     partial = [s.get("id") or s.get("sub_question_id") for s in subs if s.get("evidence_state") == "PARTIAL"]
-    if source_load_errors or uncovered or has_conflicts:
+    if source_load_errors or pag_issues or uncovered or has_conflicts:
         decision = "STOP_WITH_GAPS_ESCALATE_HUMAN"
         reason = (
             f"Finite snapshot exhausted; uncovered sub-questions={uncovered}, partial={partial}, "
-            f"source_load_errors={len(source_load_errors)}, conflicts={has_conflicts}. "
+            f"source_load_errors={len(source_load_errors)}, pagination_issues={len(pag_issues)}, conflicts={has_conflicts}. "
             "Do not fabricate remote recall; escalate listed gaps for targeted retrieval or human review."
         )
     elif marginal_new_hits == 0 and not partial:
@@ -618,6 +631,7 @@ def compute_stopping_verdict(
         "marginal_new_hits_last_round": marginal_new_hits,
         "last_round_no_new_signal": marginal_new_hits == 0,
         "source_load_error_count": len(source_load_errors),
+        "pagination_issue_count": len(pag_issues),
         "finite_snapshot_boundary": True,
     }
 

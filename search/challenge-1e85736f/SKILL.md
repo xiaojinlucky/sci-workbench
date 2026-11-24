@@ -37,8 +37,8 @@ Locate all scripts relative to this `SKILL.md` directory (`scripts/`). Before tr
 1. **Inspect `/input` without guessing**: Check `case.json`, `task.md`, `subscription_config.json`, `previous_snapshot.json`, `current_snapshot.json`, and any supplementary `api/` responses (Crossref, OpenAlex, EuropePMC, arXiv).
 2. **Initialize Runtime & Budget Guards**:
    ```bash
-   python -B scripts/preflight_probe.py --input /input --output /app/output --work /app/work --out /app/work/env.json
-   python -B scripts/budget_guard.py --state /app/work/budget.json --init
+   python3 -B scripts/preflight_probe.py --input /input --output /app/output --work /app/work --out /app/work/env.json
+   python3 -B scripts/budget_guard.py --state /app/work/.budget_state.json --init
    ```
 3. **Screening, Not Cherry-Picking**: Every record in `current_snapshot` must map cleanly to exactly one of the five triage categories (`triage_count_conserved == true`). Never drop duplicates silently; retain exact dedup keys and suppression reasons for replay.
 
@@ -49,7 +49,7 @@ Locate all scripts relative to this `SKILL.md` directory (`scripts/`). Before tr
 Run the pure-Python 3.12 stdlib incremental tracker:
 
 ```bash
-python -B scripts/incremental_tracker.py \
+python3 -B scripts/incremental_tracker.py \
   --input /input \
   --output /app/output \
   --work /app/work \
@@ -86,8 +86,8 @@ python -B scripts/incremental_tracker.py \
 ## 4. Verification & Post-Run Audit (`M5` + `M6`)
 
 ```bash
-python -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
-python -B scripts/final_audit.py --dir /app/output --result-file result.json \
+python3 -B scripts/gap_gate.py --verify-json /app/output/result.json --corpus /input --gaps-out /app/work/gaps.json
+python3 -B scripts/final_audit.py --dir /app/output --result-file result.json \
   --require incremental_delta.csv \
   --require alert_digest.json \
   --require watermark_state.json \

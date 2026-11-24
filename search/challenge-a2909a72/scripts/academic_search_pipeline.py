@@ -140,7 +140,9 @@ def diagnose_term_postings(
     abbrevs: List[Dict[str, Any]],
     docs: List[Any],
 ) -> List[Dict[str, Any]]:
-    """Diagnose per-term hit distribution across metadata, fulltext, and corpus-mined acronyms."""
+    """Diagnose per-term hit distribution across metadata, fulltext, and corpus-mined acronyms.
+    Enforces unified tokenization/case/acronym normalization and strict invariant:
+    a term occurring in any title or abstract can NEVER be diagnosed as corpus_absent."""
     ft_df = _build_fulltext_index(docs)
     abbr_lookup: Dict[str, List[str]] = defaultdict(list)
     for a in abbrevs:
@@ -155,24 +157,47 @@ def diagnose_term_postings(
     diagnostics: List[Dict[str, Any]] = []
     seen: set = set()
     for raw_t in terms:
-        st = qm.stem(raw_t.lower())
+        tok_stems = qm.stem_tokens(qm.tokenize(raw_t))
+        st = tok_stems[0] if len(tok_stems) == 1 else qm.stem(raw_t.lower().strip())
         if len(st) <= 1 or st in seen:
             continue
         seen.add(st)
+        raw_low = raw_t.lower().strip()
+        raw_pat = re.compile(r"(?<![a-z0-9])" + re.escape(raw_low) + r"(?![a-z0-9])", re.I) if raw_low else None
+
         title_hits = 0
         abstract_hits = 0
         kw_hits = 0
-        if raw_searcher is not None:
-            title_hits = int(raw_searcher.idx["title"].df.get(st, 0))
-            abstract_hits = int(raw_searcher.idx["abstract"].df.get(st, 0))
-            kw_hits = int(raw_searcher.idx["kw"].df.get(st, 0))
         meta_any = 0
-        for i, _ in enumerate(items):
-            if raw_searcher is not None and any(raw_searcher.idx[f].tf[i].get(st) for f in ("title", "abstract", "kw")):
+        for i, it in enumerate(items):
+            t_txt = str(it.get("title") or "")
+            a_txt = str(it.get("abstract") or "")
+            k_txt = " ".join(it.get("keywords") or []) + " " + str(it.get("venue") or "")
+            t_match = bool(raw_searcher is not None and raw_searcher.idx["title"].tf[i].get(st))
+            a_match = bool(raw_searcher is not None and raw_searcher.idx["abstract"].tf[i].get(st))
+            k_match = bool(raw_searcher is not None and raw_searcher.idx["kw"].tf[i].get(st))
+            if not t_match and raw_pat and raw_pat.search(t_txt):
+                t_match = True
+            if not a_match and raw_pat and raw_pat.search(a_txt):
+                a_match = True
+            if not k_match and raw_pat and raw_pat.search(k_txt):
+                k_match = True
+            if not t_match and st in set(qm.stem_tokens(qm.tokenize(t_txt))):
+                t_match = True
+            if not a_match and st in set(qm.stem_tokens(qm.tokenize(a_txt))):
+                a_match = True
+            if t_match:
+                title_hits += 1
+            if a_match:
+                abstract_hits += 1
+            if k_match:
+                kw_hits += 1
+            if t_match or a_match or k_match:
                 meta_any += 1
+
         ft_hits = int(ft_df.get(st, 0))
 
-        variants = sorted(set(abbr_lookup.get(st, []) + abbr_lookup.get(raw_t.lower(), [])) - {st})
+        variants = sorted(set(abbr_lookup.get(st, []) + abbr_lookup.get(raw_low, [])) - {st})
         variant_hits = 0
         if raw_searcher is not None and variants:
             for i, _ in enumerate(items):
@@ -196,6 +221,10 @@ def diagnose_term_postings(
             diagnosis = "corpus_absent"
             action = "report_honest_snapshot_gap_without_fabricating_recall"
 
+        # Hard consistency invariant: title/abstract presence can NEVER be corpus_absent
+        if (title_hits > 0 or abstract_hits > 0) and diagnosis == "corpus_absent":
+            raise AssertionError(f"Posting invariant violated for term={raw_t!r}: title_hits={title_hits}, abstract_hits={abstract_hits}")
+
         diagnostics.append(
             {
                 "term": raw_t,
@@ -213,6 +242,99 @@ def diagnose_term_postings(
         )
     return diagnostics
 
+
+
+def compute_ranking_quality_metrics(
+    ranked_candidates: List[Dict[str, Any]],
+    bundle: caseio.CaseBundle,
+) -> Dict[str, Any]:
+    """Compute metadata completeness rate, strictly distinguishing exhaustive gold qrels
+    (Precision@k/Recall@k/nDCG@k) from non-exhaustive seed/known sets (seed_hit_rate only;
+    never reports overall Recall on non-exhaustive seed lists)."""
+    import math
+    n = len(ranked_candidates)
+    if n == 0:
+        return {"metadata_completeness_rate": 0.0, "gold_eval_status": "empty_results"}
+    comp_scores = []
+    for r in ranked_candidates:
+        f_ok = sum([
+            1 if (r.get("title") or "").strip() else 0,
+            1 if (r.get("authors") or []) else 0,
+            1 if r.get("year") else 0,
+            1 if (r.get("venue") or "").strip() else 0,
+            1 if (r.get("doi") or r.get("arxiv") or r.get("pmid")) else 0,
+        ])
+        comp_scores.append(f_ok / 5.0)
+    meta_rate = round(sum(comp_scores) / n, 4)
+
+    gold_dois: set[str] = set()
+    gold_titles: set[str] = set()
+    seed_dois: set[str] = set()
+    seed_titles: set[str] = set()
+    for _, rs in (bundle.reference_sets or {}).items():
+        key_low = str(rs.get("key") or rs.get("file") or "").lower()
+        is_exhaustive_gold = any(k in key_low for k in ("gold", "ground_truth", "qrels", "exhaustive_relevant"))
+        is_seed_only = (not is_exhaustive_gold) and any(k in key_low for k in ("seed", "known", "included", "relevant"))
+        if not (is_exhaustive_gold or is_seed_only):
+            continue
+        for rec in rs.get("records", []) or []:
+            if isinstance(rec, dict):
+                d = sm.norm_doi(rec.get("doi") or "")
+                t = sm.norm_title(rec.get("title") or "")
+                if is_exhaustive_gold:
+                    if d:
+                        gold_dois.add(d)
+                    if t:
+                        gold_titles.add(t)
+                else:
+                    if d:
+                        seed_dois.add(d)
+                    if t:
+                        seed_titles.add(t)
+
+    if gold_dois or gold_titles:
+        rel_vec = [
+            1 if ((sm.norm_doi(r.get("doi") or "") in gold_dois) or (sm.norm_title(r.get("title") or "") in gold_titles)) else 0
+            for r in ranked_candidates
+        ]
+        total_gold = max(len(gold_dois), len(gold_titles))
+        out: Dict[str, Any] = {
+            "metadata_completeness_rate": meta_rate,
+            "gold_eval_status": "evaluated_against_exhaustive_gold_qrels",
+            "gold_count": total_gold,
+            "gold_hits_total": sum(rel_vec),
+        }
+        for k in (5, 10):
+            top = rel_vec[:k]
+            denom = max(1, min(k, len(rel_vec)))
+            out[f"precision_at_{k}"] = round(sum(top) / denom, 4)
+            out[f"recall_at_{k}"] = round(sum(top) / max(1, total_gold), 4)
+            dcg = sum(v / math.log2(i + 2) for i, v in enumerate(top))
+            idcg = sum(1.0 / math.log2(i + 2) for i in range(min(k, total_gold)))
+            out[f"ndcg_at_{k}"] = round(dcg / idcg, 4) if idcg > 0 else 0.0
+        return out
+
+    if seed_dois or seed_titles:
+        seed_vec = [
+            1 if ((sm.norm_doi(r.get("doi") or "") in seed_dois) or (sm.norm_title(r.get("title") or "") in seed_titles)) else 0
+            for r in ranked_candidates
+        ]
+        total_seeds = max(len(seed_dois), len(seed_titles))
+        return {
+            "metadata_completeness_rate": meta_rate,
+            "gold_eval_status": "non_exhaustive_seed_set_only_overall_recall_not_applicable",
+            "seed_count": total_seeds,
+            "seed_hits_total": sum(seed_vec),
+            "seed_hit_rate_at_5": round(sum(seed_vec[:5]) / max(1, total_seeds), 4),
+            "seed_hit_rate_at_10": round(sum(seed_vec[:10]) / max(1, total_seeds), 4),
+            "overall_recall_status": "not_applicable_non_exhaustive_seed_set",
+        }
+
+    return {
+        "metadata_completeness_rate": meta_rate,
+        "gold_eval_status": "not_applicable_no_gold_labels_in_input",
+        "gold_count": 0,
+    }
 
 def annotate_perspectives(item: Dict[str, Any]) -> Dict[str, Any]:
     """Tag each record across three orthogonal scholarly perspectives using transparent lexical cues."""
@@ -602,6 +724,27 @@ def run_pipeline(
         r1_sc = round(r1_scores.get(rid, 0.0), 3)
         r2_sc = round(r2_scores.get(rid, 0.0), 3)
         tier, reason_codes = assign_four_tier_label(scr, it, persp, r1_sc, r2_sc, filters)
+        # Per-record grounded field evidence (research_object, condition, outcome, time_scope)
+        ecard = plan.get("element_card", {})
+        rec_toks = set(qm.stem_tokens(qm.tokenize(f"{it.get('title', '')} {it.get('abstract', '')}")))
+        obj_terms = qm.stem_tokens(qm.tokenize(str(ecard.get("research_object") or "")))
+        out_terms = qm.stem_tokens(qm.tokenize(str(ecard.get("mechanism_or_outcome") or "")))
+        obj_hits = sorted(set(obj_terms) & rec_toks)
+        out_hits = sorted(set(out_terms) & rec_toks)
+        yr_val = it.get("year") or 0
+        yr_min = filters.get("year_min")
+        time_ok = True if (not yr_min or (yr_val and yr_val >= yr_min)) else False
+        field_ev = {
+            "research_object_hits": obj_hits[:6],
+            "outcome_or_condition_hits": out_hits[:6],
+            "time_scope_satisfied": time_ok,
+            "has_abstract": bool((it.get("abstract") or "").strip()),
+            "snippet": str(it.get("abstract") or it.get("title") or "")[:220],
+        }
+        # Downgrade core candidate lacking research_object grounding when object terms exist
+        if tier == "core" and obj_terms and not obj_hits:
+            tier = "method-only" if out_hits else "background"
+            reason_codes = list(reason_codes) + ["DOWNGRADED_MISSING_OBJECT_GROUNDING"]
         tier_counts[tier] += 1
         for p in persp["perspectives"]:
             persp_counts[p] += 1
@@ -632,6 +775,7 @@ def run_pipeline(
             "first_hit_round": first_hit_round,
             "abstract_score": scr.get("abstract_score", 0.0),
             "title_score": scr.get("title_score", 0.0),
+            "field_evidence": field_ev,
             "perspectives": persp["perspectives"],
             "gap_precedent_roles": persp["gap_precedent_roles"],
             "code_or_data_cue": persp["code_or_data_cue"],
@@ -712,7 +856,8 @@ def run_pipeline(
     stopping = qm.compute_stopping_verdict(
         S["coverage"],
         marginal_new_hits=r1_vs_r2["marginal_new_hits"],
-        source_load_errors=source_load_errors + pagination_issues,
+        source_load_errors=source_load_errors,
+        pagination_issues=pagination_issues,
         has_conflicts=bool(ambiguous or any(c.conflicts for c in clusters)),
     )
 
@@ -865,6 +1010,7 @@ def run_pipeline(
         },
     )
 
+    ranking_quality = compute_ranking_quality_metrics(ranked_candidates, bundle)
     metrics = {
         "raw_record_count": dedup_rep["n_records"],
         "canonical_record_count": dedup_rep["n_unique"],
@@ -885,6 +1031,9 @@ def run_pipeline(
         "tier_excluded_count": tier_counts.get("excluded", 0),
         "loo_topk_overlap": rank_stab.get("mean_topk_overlap_loo", 1.0),
         "citation_edge_count": cg_summary.get("edge_count", 0),
+        "metadata_completeness_rate": ranking_quality["metadata_completeness_rate"],
+        "gold_eval_status": ranking_quality["gold_eval_status"],
+        **({k: v for k, v in ranking_quality.items() if k.startswith(("precision_at_", "recall_at_", "ndcg_at_"))})
     }
     metric_provenance = {
         "raw_record_count": "evidence_chains.json:n_candidates + rollback_log (source_count_conserved)",
@@ -906,6 +1055,8 @@ def run_pipeline(
         "tier_excluded_count": "results_ranked.csv:tier==excluded",
         "loo_topk_overlap": "result.json:results.rank_stability.mean_topk_overlap_loo",
         "citation_edge_count": "result.json:evidence.citation_graph_summary.edge_count",
+        "metadata_completeness_rate": "results_ranked.csv:5_field_completeness",
+        "gold_eval_status": "result.json:metrics.gold_eval_status",
     }
 
     findings = [

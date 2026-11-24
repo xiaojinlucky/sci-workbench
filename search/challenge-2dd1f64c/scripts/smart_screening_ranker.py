@@ -32,6 +32,63 @@ from search_core import caseio, cli, contract, pipeline, query as qm, screen as 
 SKILL = "literature-screening-ranker"
 
 
+
+def _evaluate_external_gold(results_all: List[Dict[str, Any]], bundle: caseio.CaseBundle) -> Dict[str, Any]:
+    """Compare screening decisions against any explicit gold/reference label set in /input.
+    Clearly separates internal dual-signal consistency from external gold-standard agreement."""
+    gold_map: Dict[str, str] = {}
+    parsed_map = bundle.extra.get("parsed", {}) or {}
+    for rel, obj in parsed_map.items():
+        if any(k in rel.lower() for k in ("gold", "ground_truth", "reference_labels", "annotated")):
+            rows = obj if isinstance(obj, list) else (obj.get("labels") or obj.get("records") or obj.get("gold") or [] if isinstance(obj, dict) else [])
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                lab = str(row.get("gold_label") or row.get("label") or row.get("decision") or "").strip().lower()
+                if lab not in ("include", "exclude", "borderline"):
+                    continue
+                key = row.get("doi") or row.get("rid") or row.get("id") or row.get("title") or ""
+                if key:
+                    gold_map[str(key).strip().lower()] = lab
+    if not gold_map:
+        return {"status": "not_applicable_no_external_gold_in_input", "matched_gold_records": 0}
+    y_pred, y_true = [], []
+    labels_order = ("include", "borderline", "exclude")
+    cm: Dict[str, Dict[str, int]] = {t: {p: 0 for p in labels_order} for t in labels_order}
+    for r in results_all:
+        cands = [str(r.get("doi") or "").strip().lower(), str(r.get("rid") or "").strip().lower(), str(r.get("title") or "").strip().lower()]
+        g = next((gold_map[c] for c in cands if c and c in gold_map), None)
+        if g is not None:
+            pred_lab = str(r.get("label") or "borderline").strip().lower()
+            if pred_lab not in labels_order:
+                pred_lab = "borderline"
+            y_pred.append(pred_lab)
+            y_true.append(g)
+            cm[g][pred_lab] += 1
+    if not y_pred:
+        return {"status": "no_overlap_with_external_gold", "matched_gold_records": 0}
+    n_tot = len(y_pred)
+    exact_acc = sum(1 for p, t in zip(y_pred, y_true) if p == t) / max(1, n_tot)
+    per_class: Dict[str, Dict[str, float]] = {}
+    for cls in labels_order:
+        tp = cm[cls][cls]
+        fp = sum(cm[t][cls] for t in labels_order if t != cls)
+        fn = sum(cm[cls][p] for p in labels_order if p != cls)
+        prec = tp / max(1, tp + fp) if (tp + fp) > 0 else 0.0
+        rec = tp / max(1, tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+        per_class[cls] = {"support": tp + fn, "precision": round(prec, 4), "recall": round(rec, 4), "f1": round(f1, 4)}
+    return {
+        "status": "evaluated_against_external_gold_strict_3class",
+        "matched_gold_records": n_tot,
+        "borderline_folded_into_exclude": False,
+        "exact_3class_accuracy": round(exact_acc, 4),
+        "external_3class_cohen_kappa": round(sc.cohens_kappa(y_pred, y_true), 4),
+        "confusion_matrix_3x3": cm,
+        "per_class_metrics": per_class,
+        "borderline_escalation_rate": round(sum(1 for p in y_pred if p == "borderline") / max(1, n_tot), 4),
+    }
+
 def _assign_evidence_role(item: Dict[str, Any], row: Dict[str, Any]) -> str:
     txt = f"{item.get('title', '')} {item.get('abstract', '')} {item.get('pub_type', '')}".lower()
     if row["final_label"] == "exclude":
@@ -131,7 +188,27 @@ def main(ns, input_dir: str, out: str, work: str) -> Dict[str, Any]:
             f"arbitration={o['arbitration']}"
         )
 
+        # Attach grounded object / method / design field evidence for every ranked item
+        ecard = plan.get("element_card", {})
+        rec_toks = set(qm.stem_tokens(qm.tokenize(f"{it.get('title', '')} {it.get('abstract', '')}")))
+        obj_terms = qm.stem_tokens(qm.tokenize(str(ecard.get("research_object") or "")))
+        meth_terms = qm.stem_tokens(qm.tokenize(str(ecard.get("method_or_intervention") or ecard.get("mechanism_or_outcome") or "")))
+        obj_hits = sorted(set(obj_terms) & rec_toks)
+        meth_hits = sorted(set(meth_terms) & rec_toks)
+        if o["final_label"] == "include" and obj_terms and not obj_hits:
+            o = dict(o)
+            o["final_label"] = "borderline"
+            o["relevance_tier"] = "borderline_missing_object_grounding"
+            o["reason_codes"] = list(o.get("reason_codes") or []) + ["MISSING_OBJECT_GROUNDING"]
+
         v = pipeline.item_view(it, rank=o["rank"], label=o["final_label"], reason_codes=o["reason_codes"])
+        v["evidence_grounding"] = {
+            "research_object_hits": obj_hits[:6],
+            "method_or_design_hits": meth_hits[:6],
+            "evidence_role": ev_role,
+            "source_locators": it.get("paths", [])[:4],
+            "snippet": o["snippet"][:220],
+        }
         v["score"] = o["score"]
         v["title_score"] = o["title_score"]
         v["abstract_score"] = o["abstract_score"]
@@ -254,6 +331,7 @@ def main(ns, input_dir: str, out: str, work: str) -> Dict[str, Any]:
         },
     )
 
+    ext_gold = _evaluate_external_gold(results_all, b)
     metrics = {
         "n_input_records": len(b.records),
         "n_unique_screened": len(S["clusters"]),
@@ -270,7 +348,9 @@ def main(ns, input_dir: str, out: str, work: str) -> Dict[str, Any]:
         "conflicts_escalated": stats["conflicts_escalated"],
         "ties_resolved_deterministically": stats["ties_resolved_deterministically"],
         "reviewer_agreement": stats["reviewer_agreement"],
+        "internal_dual_signal_kappa": stats["cohen_kappa"],
         "cohen_kappa": stats["cohen_kappa"],
+        "external_gold_agreement": ext_gold,
         "rank_stability": stab,
         "prisma_flow": prisma,
         "source_load_error_count": len(S["source_load_errors"]),

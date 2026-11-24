@@ -1,0 +1,10 @@
+{
+  "_example_notice": "Minimal illustrative input example only; not an official evaluation case.",
+  "case_id": "example-incremental-track-01",
+  "research_question": "Track genuinely new publications, preprint-to-VoR upgrades, delayed-indexed archival papers, and retractions across fixed UTC window 2026-11-01 to 2026-11-15.",
+  "output_contract": {
+    "results": "Five-category incremental delta (genuinely_new, version_upgrade, retraction_or_correction, delayed_indexed_archival, duplicate_suppressed)",
+    "evidence": "Subscription config, UTC window bounds, watermark diff keys, version chains, and alert digest",
+    "status": "Idempotency verification, noise suppression counts, date/pagination anomalies, and finite snapshot boundaries"
+  }
+}

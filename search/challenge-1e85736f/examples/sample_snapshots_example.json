@@ -1,0 +1,51 @@
+{
+  "_example_notice": "Minimal illustrative snapshot example only; synthetic identifiers for interface demonstration.",
+  "subscription_config": {
+    "subscription_id": "sub-example-biweekly",
+    "topic": "Example biweekly literature monitoring topic",
+    "window_start": "2026-11-01T00:00:00Z",
+    "window_end": "2026-11-15T23:59:59Z",
+    "timezone": "UTC",
+    "previous_watermark": "2026-11-01T00:00:00Z",
+    "schedule": "biweekly"
+  },
+  "previous_snapshot": [
+    {
+      "id": "ex_prev_1",
+      "title": "Example Preprint Study",
+      "authors": ["A. Author"],
+      "year": 2025,
+      "date": "2025-10-15",
+      "doi": "10.1101/2025.10.15.000001",
+      "source": "arxiv",
+      "version": "preprint"
+    }
+  ],
+  "current_snapshot": [
+    {
+      "id": "ex_curr_1",
+      "title": "Example Preprint Study",
+      "authors": ["A. Author"],
+      "year": 2026,
+      "date": "2026-11-08",
+      "indexed_date": "2026-11-09",
+      "doi": "10.9999/example.journal.2026.001",
+      "alt_dois": ["10.1101/2025.10.15.000001"],
+      "venue": "Example Journal",
+      "source": "crossref",
+      "version": "published"
+    },
+    {
+      "id": "ex_curr_2",
+      "title": "Example Fresh 2026 Discovery",
+      "authors": ["B. Author"],
+      "year": 2026,
+      "date": "2026-11-11",
+      "indexed_date": "2026-11-12",
+      "doi": "10.9999/example.journal.2026.002",
+      "venue": "Example Journal",
+      "source": "crossref",
+      "version": "published"
+    }
+  ]
+}

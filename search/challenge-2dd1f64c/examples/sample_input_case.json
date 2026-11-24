@@ -1,0 +1,10 @@
+{
+  "is_illustrative_example": true,
+  "case_id": "example-screening-rank-01",
+  "research_question": "Which graph neural network (GNN) architectures mitigate over-smoothing in molecular property prediction since 2019?",
+  "output_contract": {
+    "results": "Screened and ranked candidate works with 4-tier relevance labels and deterministic tie-breaking",
+    "evidence": "Per-record field scores, abstract snippets, duplicate trace log, and human review queue",
+    "status": "PRISMA count conservation, Cohen's kappa, rank stability, and explicit snapshot gaps"
+  }
+}

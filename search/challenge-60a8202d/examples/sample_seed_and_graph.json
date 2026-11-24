@@ -1,0 +1,29 @@
+{
+  "_example_notice": "Minimal illustrative seed_and_graph.json example only; synthetic identifiers for interface illustration.",
+  "seeds": [
+    {
+      "id": "SEED_01",
+      "title": "Example Seed Method Paper",
+      "year": 2021
+    },
+    {
+      "id": "SEED_ZERO_02",
+      "title": "Example Brand-New Preprint Without Local Citations",
+      "year": 2026
+    }
+  ],
+  "nodes": [
+    {"id": "FOUND_01", "title": "Example Foundational Algorithm", "year": 2016},
+    {"id": "SEED_01", "title": "Example Seed Method Paper", "year": 2021},
+    {"id": "FOLLOW_01", "title": "Example Downstream Benchmark Study", "year": 2024},
+    {"id": "PARALLEL_01", "title": "Example Parallel Coupled Method", "year": 2023},
+    {"id": "RET_01", "title": "Example Retracted Follow-Up Study", "year": 2022, "is_retracted": true},
+    {"id": "SEED_ZERO_02", "title": "Example Brand-New Preprint Without Local Citations", "year": 2026, "version": "preprint"}
+  ],
+  "edges": [
+    {"source": "SEED_01", "target": "FOUND_01", "relation": "cites"},
+    {"source": "FOLLOW_01", "target": "SEED_01", "relation": "cites"},
+    {"source": "PARALLEL_01", "target": "FOUND_01", "relation": "cites"},
+    {"source": "RET_01", "target": "SEED_01", "relation": "cites"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "_example_notice": "Minimal illustrative input case for interface demonstration only; not a formal benchmark case.",
+  "case_id": "example-5c918ff0-demo-01",
+  "research_question": "Federated multi-database search on perovskite solar cell moisture stability across Crossref, OpenAlex, EuropePMC, arXiv, and PubMed.",
+  "output_contract": {
+    "results": "Canonical deduplicated multi-source records with field-level provenance and version chains",
+    "evidence": "Per-source query mapping, coverage matrix, source-exclusive counts, and rollback log",
+    "status": "Source count conservation, ambiguous same-title-distinct-DOI queue, field conflicts, and degraded source gaps"
+  }
+}

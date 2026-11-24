@@ -1,0 +1,46 @@
+{
+  "is_illustrative_example": true,
+  "note": "Illustrative schema example only; does not represent any formal case answer.",
+  "case_id": "example-question-search-01",
+  "skill": "research-question-search-planner",
+  "results": [
+    {
+      "rank": 1,
+      "rid": "api/europepmc_response.json#0",
+      "title": "Microbial short-chain fatty acids promote colonic regulatory T cell homeostasis",
+      "year": 2023,
+      "doi": "10.0000/example.scfa.001",
+      "label": "include",
+      "relevance_tier": "direct_relevant",
+      "perspective": "empirical_application",
+      "score": 14.2,
+      "matched_sub_questions": ["SQ1", "SQ2"],
+      "confidence": "high",
+      "arbitration": "dual_reviewer_agree",
+      "reason_codes": ["INC:direct-evidence"]
+    }
+  ],
+  "evidence": {
+    "element_card": {
+      "research_object": "gut microbiota-derived short-chain fatty acids (scfa)",
+      "mechanism_or_outcome": "intestinal treg differentiation",
+      "method_or_intervention": "UNKNOWN",
+      "comparator": "compared with bile acid metabolites",
+      "population_or_context": "UNKNOWN",
+      "time_scope": ">=2019",
+      "evidence_requirement": "rct"
+    },
+    "sub_question_sufficiency": [
+      {"sub_question_id": "SQ1", "dimension": "object_and_scope", "hits_round1": 6, "hits_round2": 8, "evidence_state": "SUPPORTED"},
+      {"sub_question_id": "SQ4", "dimension": "comparator", "hits_round1": 0, "hits_round2": 0, "evidence_state": "UNKNOWN", "gap_note": "No bile acid comparator records in finite snapshot."}
+    ]
+  },
+  "status": {
+    "finite_snapshot_only": true,
+    "live_remote_coverage_claimed": false,
+    "stopping_verdict": {
+      "decision": "STOP_WITH_GAPS_ESCALATE_HUMAN",
+      "uncovered_sub_questions": ["SQ4", "SQ6"]
+    }
+  }
+}

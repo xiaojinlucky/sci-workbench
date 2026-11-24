@@ -1,0 +1,95 @@
+{
+  "_example_notice": "Illustrative output schema example only; all counts and placeholders are synthetic demonstrations.",
+  "case_id": "example-a2909a72-demo-01",
+  "skill": "academic-lit-search-engine",
+  "status": "partial_with_gaps",
+  "source_count_conserved": true,
+  "results": {
+    "tier_counts": {
+      "core": 2,
+      "method-only": 1,
+      "background": 1,
+      "excluded": 1
+    },
+    "perspective_counts": {
+      "method_developer": 3,
+      "frontline_application": 2,
+      "independent_review_eval": 1
+    },
+    "rank_stability": {
+      "top_k": 10,
+      "effective_k": 5,
+      "mean_topk_overlap_loo": 0.94,
+      "min_overlap": 0.8,
+      "stability": "stable"
+    },
+    "ranked_candidates": [
+      {
+        "rank": 1,
+        "tier": "core",
+        "rid": "api/example_source.json#/0",
+        "title": "Illustrative Solid-State Interphase Stabilization Study",
+        "year": 2023,
+        "doi": "10.0000/example.0001",
+        "sources": ["crossref", "openalex"],
+        "score": 9.42,
+        "perspectives": ["method_developer", "frontline_application"],
+        "reason_codes": ["INC:direct-evidence", "TIER:core_direct_evidence"],
+        "source_locators": ["api/example_source.json#/0"]
+      }
+    ]
+  },
+  "evidence": {
+    "round1_vs_round2": {
+      "round1_positive_hits": 3,
+      "round2_positive_hits": 4,
+      "marginal_new_hits": 1
+    },
+    "term_gap_diagnosis": [
+      {
+        "term": "dendrite",
+        "title_hits": 2,
+        "abstract_hits": 3,
+        "fulltext_docs_hit": 0,
+        "diagnosis": "metadata_present"
+      }
+    ],
+    "stopping_verdict": {
+      "decision": "STOP_WITH_GAPS_ESCALATE_HUMAN",
+      "finite_snapshot_boundary": true
+    }
+  },
+  "source_load_errors": [
+    {
+      "file": "api/broken_page.json",
+      "error_type": "ValueError",
+      "detail": "unparseable JSON"
+    }
+  ],
+  "pagination_issues": [
+    {
+      "file": "api/cursor_error.json",
+      "source": "openalex",
+      "status": "error",
+      "error": "HTTP 400 invalid cursor URL on final page"
+    }
+  ],
+  "valid_empty_sources": [
+    {
+      "file": "api/empty_valid.json",
+      "record_count": 0,
+      "classification": "valid_empty_snapshot"
+    }
+  ],
+  "ambiguous_candidates": [],
+  "rollback_log": [],
+  "artifacts": [
+    "result.json",
+    "results_ranked.csv",
+    "evidence_chains.json",
+    "query_log.json",
+    "report.md",
+    "audit_log.json",
+    "run_manifest.json"
+  ]
+}

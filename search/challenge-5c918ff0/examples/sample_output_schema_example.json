@@ -1,0 +1,67 @@
+{
+  "_example_notice": "Illustrative output schema example only; all counts and placeholders are synthetic demonstrations.",
+  "case_id": "example-5c918ff0-demo-01",
+  "skill": "multi-db-federated-search",
+  "status": "partial_with_gaps",
+  "source_count_conserved": true,
+  "field_coverage_by_source": {
+    "crossref": {
+      "status": "available",
+      "raw_record_count": 10,
+      "systematic_missing_fields": ["abstract"]
+    },
+    "pubmed": {
+      "status": "unavailable",
+      "raw_record_count": 0,
+      "systematic_missing_fields": ["ALL_UNAVAILABLE_SOURCE"]
+    }
+  },
+  "exclusive_works_by_source": {
+    "counts_by_source": {"crossref": 6, "openalex": 5, "arxiv": 2},
+    "total_exclusive_works": 13,
+    "multi_source_overlap_works": 4
+  },
+  "ambiguous_same_title_distinct_doi": [
+    {
+      "rid_a": "api/example.json#/0",
+      "rid_b": "api/example.json#/1",
+      "doi_a": "10.0000/example.a",
+      "doi_b": "10.0000/example.b",
+      "reason": "ambiguous:distinct_formal_dois",
+      "action": "kept_separate_needs_human_arbitration"
+    }
+  ],
+  "preprint_to_vor_chains": [
+    {
+      "link_type": "merged_preprint_to_vor",
+      "canonical_doi": "10.0000/example.vor",
+      "canonical_year": 2024
+    }
+  ],
+  "field_conflicts_resolved": [
+    {
+      "canonical_rid": "api/example.json#/3",
+      "field": "year",
+      "chosen_value": 2024,
+      "resolution_rule": "version_rank > source_authority > field_richness; all raw values preserved"
+    }
+  ],
+  "degraded_sources": [
+    {
+      "source": "pubmed",
+      "status": "unavailable",
+      "error": "HTTP 429 rate limit exceeded"
+    }
+  ],
+  "rollback_log": [],
+  "artifacts": [
+    "result.json",
+    "federated_merged.csv",
+    "source_coverage_matrix.json",
+    "dedup_rollback_log.json",
+    "ambiguous_arbitration_queue.json",
+    "report.md",
+    "audit_log.json",
+    "run_manifest.json"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "_example_notice": "Minimal illustrative input example only; not an official evaluation case.",
+  "case_id": "example-citation-trace-01",
+  "research_question": "Trace backward methodological origins, forward follow-up studies, and parallel coupled works from the seed paper while auditing retracted citers and snapshot deltas.",
+  "output_contract": {
+    "results": "Expanded citation network nodes with roles, hop distances, and shortest directed paths",
+    "evidence": "Edge provenance table, co-citation/bibliographic coupling pairs, and CitationChaser #37 snapshot diff",
+    "status": "Zero-citation seeds, retracted alerts, unresolved references, and finite snapshot boundaries"
+  }
+}

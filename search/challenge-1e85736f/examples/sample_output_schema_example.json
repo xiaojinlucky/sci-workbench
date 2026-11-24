@@ -1,0 +1,30 @@
+{
+  "_example_notice": "Illustrative output schema only; actual runtime values are computed dynamically from /input.",
+  "case_id": "example-incremental-track-01",
+  "task_id": "challenge-1e85736f",
+  "skill": "incremental-literature-tracker",
+  "status": "ok",
+  "results": {
+    "genuinely_new": [{"record_id": "ex_curr_2", "triage_category": "genuinely_new"}],
+    "version_upgrade": [{"record_id": "ex_curr_1", "prev_record_id": "ex_prev_1", "triage_category": "version_upgrade"}],
+    "retraction_or_correction": [],
+    "delayed_indexed_archival": [],
+    "duplicate_suppressed": [],
+    "triage_count_conserved": true
+  },
+  "idempotency": {
+    "run_sequence_for_window": 1,
+    "idempotent_rerun": false,
+    "new_alerts_emitted": 2,
+    "suppressed_already_notified": 0
+  },
+  "artifacts": [
+    "result.json",
+    "incremental_delta.csv",
+    "alert_digest.json",
+    "watermark_state.json",
+    "report.md",
+    "audit_log.json",
+    "run_manifest.json"
+  ]
+}

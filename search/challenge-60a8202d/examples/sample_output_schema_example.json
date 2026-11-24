@@ -1,0 +1,51 @@
+{
+  "_example_notice": "Illustrative output schema only; actual runtime values are generated dynamically from /input.",
+  "case_id": "example-citation-trace-01",
+  "task_id": "challenge-60a8202d",
+  "skill": "citation-graph-explorer",
+  "status": "partial_with_gaps",
+  "seed_selection_mode": "explicit_input",
+  "results": {
+    "seeds": [{"seed_rid": "SEED_01", "resolution": "matched_canonical_node"}],
+    "role_counts": {
+      "seed": 2,
+      "foundational": 1,
+      "recent_followup": 1,
+      "parallel_coupled": 1,
+      "retracted_caution": 1
+    },
+    "backward_hops": {"1": ["FOUND_01"], "2": []},
+    "forward_hops": {"1": ["FOLLOW_01", "RET_01"], "2": []},
+    "parallel_works": ["PARALLEL_01"],
+    "shortest_directed_paths": [
+      {
+        "seed": "SEED_01",
+        "target": "FOUND_01",
+        "hop_count": 1,
+        "reachability": "direct",
+        "directions": ["cites"],
+        "chain_summary": "SEED_01 --[cites]--> FOUND_01"
+      }
+    ]
+  },
+  "zero_citation_seeds": [
+    {"seed_rid": "SEED_ZERO_02", "in_degree": 0, "out_degree": 0, "note": "no_citation_edges_in_local_snapshot"}
+  ],
+  "retracted_alerts": [
+    {"rid": "RET_01", "alert_severity": "critical", "cites_seeds": ["SEED_01"]}
+  ],
+  "snapshot_diff": {
+    "previous_snapshot_available": false,
+    "nodes_vanished": [],
+    "unresolved_in_current": 0
+  },
+  "artifacts": [
+    "result.json",
+    "edge_provenance_table.csv",
+    "citation_network.json",
+    "snapshot_diff.json",
+    "report.md",
+    "audit_log.json",
+    "run_manifest.json"
+  ]
+}

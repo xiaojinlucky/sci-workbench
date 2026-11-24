@@ -1,0 +1,46 @@
+{
+  "is_illustrative_example": true,
+  "note": "Illustrative schema example only; does not represent any formal case answer.",
+  "case_id": "example-screening-rank-01",
+  "skill": "literature-screening-ranker",
+  "results": [
+    {
+      "rank": 1,
+      "rid": "api/openalex_response.json#0",
+      "title": "Equivariant Message Passing Mitigates Over-Smoothing on 3D Molecular Graphs",
+      "year": 2023,
+      "doi": "10.0000/example.gnn.001",
+      "label": "include",
+      "relevance_tier": "direct_relevant",
+      "evidence_role": "core_evidence",
+      "confidence": "high",
+      "score": 16.4,
+      "title_score": 3.2,
+      "abstract_score": 4.1,
+      "title_only_trap": false,
+      "missing_fields": [],
+      "tie_detected": false,
+      "arbitration": "dual_reviewer_agree",
+      "reason_codes": ["INC:direct-evidence"]
+    },
+    {
+      "rank": 2,
+      "rid": "synthetic.json#1",
+      "title": "Equivariant Graph Neural Networks for 3D Conformation Generalization",
+      "year": 2024,
+      "doi": "10.0000/example.gnn.002",
+      "label": "borderline",
+      "relevance_tier": "insufficient_abstract_needs_review",
+      "evidence_role": "needs_abstract_or_fulltext",
+      "confidence": "low",
+      "score": 4.8,
+      "missing_fields": ["abstract"],
+      "arbitration": "missing_abstract_protected_from_silent_exclusion",
+      "reason_codes": ["MISSING:abstract", "TIER:insufficient_abstract_needs_review"]
+    }
+  ],
+  "status": {
+    "finite_snapshot_only": true,
+    "prisma_consistency": true
+  }
+}

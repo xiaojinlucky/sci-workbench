@@ -1,0 +1,15 @@
+{
+  "_example_notice": "Minimal illustrative input case for interface demonstration only; not a formal benchmark case.",
+  "case_id": "example-a2909a72-demo-01",
+  "research_question": "Which solid-state electrolyte coatings suppress dendrite formation in lithium metal batteries since 2020?",
+  "constraints": [
+    "Use only local snapshot files under /input",
+    "Distinguish malformed JSON and cursor errors from valid empty arrays",
+    "Keep same-title distinct formal DOIs separate for arbitration"
+  ],
+  "output_contract": {
+    "results": "Ranked deduplicated candidates with 4-tier labels, perspectives, reason codes, and source locators",
+    "evidence": "Two-round query log, term postings diagnosis, acronym expansions, and per-record evidence chains",
+    "status": "Source load errors, pagination failures, valid empty sources, conflicts, and finite snapshot boundaries"
+  }
+}

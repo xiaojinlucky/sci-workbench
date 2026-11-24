@@ -1,0 +1,15 @@
+{
+  "is_illustrative_example": true,
+  "case_id": "example-question-search-01",
+  "research_question": "How do gut microbiota-derived short-chain fatty acids (SCFA) regulate intestinal Treg differentiation compared with bile acid metabolites in randomized trials since 2019?",
+  "constraints": [
+    "Finite local snapshot only",
+    "Flag uncovered comparator or evidence-type sub-questions as UNKNOWN",
+    "Preserve source file pointers for every retained candidate"
+  ],
+  "output_contract": {
+    "results": "Ranked candidate works mapped to sub-questions",
+    "evidence": "Element card, sub-question DAG, query rounds, and per-record evidence chains",
+    "status": "5-state sufficiency table, stopping verdict, and explicit snapshot gaps"
+  }
+}

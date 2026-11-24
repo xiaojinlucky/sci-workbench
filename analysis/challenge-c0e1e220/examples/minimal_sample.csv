@@ -1,0 +1,17 @@
+sample_id,group_code,group,response_mg_l,subject_id
+E01,1,Control,10.2,U01
+E02,1,Control,11.0,U02
+E03,1,Control,9.8,U03
+E04,1,Control,10.6,U04
+E05,1,Control,10.1,U05
+E06,2,Compound_A,14.8,U01
+E07,2,Compound_A,15.6,U02
+E08,2,Compound_A,13.9,U03
+E09,2,Compound_A,16.1,U04
+E10,2,Compound_A,,U05
+E11,3,Compound_B,21.5,U06
+E11,3,Compound_B,21.5,U06
+E12,3,Compound_B,19.2,U07
+E13,3,Compound_B,24.8,U08
+E14,3,Compound_B,20.7,U09
+E15,3,Compound_B,22.1,U10

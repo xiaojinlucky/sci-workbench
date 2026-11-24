@@ -1,0 +1,8 @@
+record_id,cohort,metric_name,reported_value,unit
+00123,Control,CRP,0,mg/L
+123,Control,CRP,12.4 ug/mL,mg/L
+00124,Treated,CRP,-999,mg/L
+00125,Treated,CRP,<LOD,mg/L
+00126,Treated,CRP,0.02 g/L,g/L
+00127,Treated,CRP,24.0,mg/L
+00127,Treated,CRP,29.5,mg/L

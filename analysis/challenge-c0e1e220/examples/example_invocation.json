@@ -1,0 +1,19 @@
+{
+  "note": "Illustrative minimal invocation example only (not a formal benchmark case or prepared answer).",
+  "commands": [
+    "python3 scripts/assumption_diagnostics.py --input examples/minimal_sample.csv --design independent --group-col group --value-col response_mg_l --out /tmp/demo_assumptions.json",
+    "python3 scripts/inference_effect_ci_runner.py --input examples/minimal_sample.csv --design independent --group-col group --value-col response_mg_l --unit 'mg/L' --out-dir /tmp/demo_out --stem demo_stats",
+    "python3 scripts/inference_effect_ci_runner.py --input examples/minimal_sample.csv --design paired --group-col group --value-col response_mg_l --subject-col subject_id --unit 'mg/L' --out-dir /tmp/demo_out --stem demo_paired"
+  ],
+  "expected_behavior": {
+    "exact_duplicates_removed": 1,
+    "missing_dropped_without_zero_imputation": 1,
+    "encoded_integer_column_blocked_if_selected": "group_code",
+    "artifacts_generated": [
+      "demo_stats.json",
+      "demo_stats.md",
+      "demo_stats_plot.svg",
+      "reproduce_stats.py"
+    ]
+  }
+}

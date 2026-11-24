@@ -1,0 +1,17 @@
+{
+  "note": "Illustrative minimal invocation specification only (not a formal benchmark case).",
+  "table": "minimal_data.csv",
+  "data_kind": "categorical_continuous",
+  "analysis_goal": "group_comparison",
+  "chart_type": "bar_with_points",
+  "group_col": "arm",
+  "value_col": "delta_signal",
+  "unit": "a.u.",
+  "error_type": "SD",
+  "column_preset": "cell_1_5col",
+  "font_size_pt": 8.0,
+  "title": "Signal shift across study arms",
+  "xlabel": "Study arm",
+  "ylabel": "Signal shift",
+  "stat_summary": "Illustrative means +/- SD with raw individual replicates and zero baseline"
+}

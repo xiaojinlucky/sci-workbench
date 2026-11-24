@@ -1,0 +1,13 @@
+sample_id,arm,time_h,delta_signal
+V01,Control,0,-0.8
+V02,Control,0,-0.2
+V03,Control,0,0.4
+V04,Control,0,0.6
+V05,Treated_A,24,2.2
+V06,Treated_A,24,3.1
+V07,Treated_A,24,2.7
+V08,Treated_A,24,
+V09,Treated_B,48,-3.5
+V09,Treated_B,48,-3.5
+V10,Treated_B,48,-2.8
+V11,Treated_B,48,-4.1

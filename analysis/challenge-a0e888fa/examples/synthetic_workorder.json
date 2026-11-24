@@ -1,0 +1,30 @@
+{
+  "schema_version": "2.0",
+  "table_kind": "published_aggregate_transcription",
+  "forbid_imputation": true,
+  "forbid_population_inference": true,
+  "primary_key": ["record_id", "metric_name"],
+  "id_columns_preserve_string": ["record_id"],
+  "preserve_leading_zeros": true,
+  "duplicate_policy": {
+    "exact_duplicate": "drop_keep_first_with_log",
+    "key_conflict": "quarantine_do_not_silently_overwrite"
+  },
+  "metric_column": "metric_name",
+  "value_column": "reported_value",
+  "unit_column": "unit",
+  "per_metric_rules": {
+    "CRP": {
+      "target_unit": "mg/L",
+      "unit_factors_to_target": {
+        "mg/L": 1.0,
+        "ug/mL": 1.0,
+        "g/L": 1000.0
+      },
+      "qc_bounds": {
+        "min": 0.0,
+        "max": 500.0
+      }
+    }
+  }
+}

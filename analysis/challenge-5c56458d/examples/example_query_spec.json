@@ -1,0 +1,39 @@
+{
+  "_note": "Illustrative read-only query specification demonstrating 1:N CTE pre-aggregation, LEFT JOIN legitimate empty group preservation, and native Python reconciliation.",
+  "title": "Mean Alcohol (%) by Cultivar with Pre-Aggregated HPLC QC Metrics",
+  "base_table": "wine_samples",
+  "base_pk": "sample_code",
+  "group_col": "cultivar_label",
+  "value_col": "mean_alcohol_pct",
+  "queries": [
+    {
+      "id": "cultivar_summary_safe_cte",
+      "count_col": "n_samples",
+      "sql": "WITH hplc_per_sample AS (\n  SELECT\n    sample_code,\n    COUNT(*) AS n_injections,\n    AVG(CAST(qc_pass AS REAL)) AS sample_qc_pass_rate,\n    AVG(retention_drift_s) AS mean_drift_s\n  FROM hplc_injections\n  GROUP BY sample_code\n)\nSELECT\n  c.cultivar_code,\n  c.cultivar_label,\n  COUNT(w.sample_code) AS n_samples,\n  AVG(w.alcohol_pct) AS mean_alcohol_pct,\n  COALESCE(SUM(h.n_injections), 0) AS total_injections,\n  AVG(h.sample_qc_pass_rate) AS mean_sample_qc_pass_rate\nFROM cultivars c\nLEFT JOIN wine_samples w ON c.cultivar_code = w.cultivar_code\nLEFT JOIN hplc_per_sample h ON w.sample_code = h.sample_code\nGROUP BY c.cultivar_code, c.cultivar_label\nORDER BY c.cultivar_code",
+      "reconcile": {
+        "base_table": "wine_samples",
+        "sql_group_col": "cultivar_label",
+        "sql_count_col": "n_samples",
+        "dimension_table": {
+          "table": "cultivars",
+          "dim_key": "cultivar_code",
+          "base_fk": "cultivar_code",
+          "label_col": "cultivar_label"
+        },
+        "child_pre_agg": {
+          "table": "hplc_injections",
+          "join_key": "sample_code",
+          "per_key_metrics": {
+            "sample_qc_pass_rate": { "col": "qc_pass", "agg": "mean" },
+            "n_injections": { "col": "injection_id", "agg": "count" }
+          }
+        },
+        "metrics": [
+          { "sql_col": "mean_alcohol_pct", "source_col": "alcohol_pct", "agg": "mean" },
+          { "sql_col": "total_injections", "source_col": "n_injections", "agg": "sum", "coalesce_zero": true },
+          { "sql_col": "mean_sample_qc_pass_rate", "source_col": "sample_qc_pass_rate", "agg": "mean" }
+        ]
+      }
+    }
+  ]
+}
